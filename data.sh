@@ -1,0 +1,1 @@
+tar -xf raw/3c391_ctm_mosaic_10s_spw0.ms.tgz -C data/
