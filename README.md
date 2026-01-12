@@ -3,28 +3,30 @@ ML for Radoastronomy calibration debugging
 
 # Notes on corruption functions of CASA simulator
 
+Tests on J1822-0938 (gaincal, point source, low observation time ~15min)
+
 ## [setnoise](https://casadocs.readthedocs.io/en/stable/api/tt/casatools.simulator.html#casatools.simulator.simulator.setnoise)
 
 Random additive noise to visibilities.
 
-\[
+$$
 V_{\text{obs}} = V_{\text{true}} + n_r + i\,n_i
-\]
+$$
 where:
-- \(n_r, n_i \sim \mathcal{N}(0,\sigma^2)\)
-- \(\sigma =\) `simplenoise` (e.g. `"0.1Jy"`)
+- $ n_r, n_i \sim \mathcal{N}(0,\sigma^2) $
+- $ \sigma = $  `simplenoise` (e.g. `"0.1Jy"`)
 
 **Fixed sigma**  
-\[
+$$
 \sigma_{\text{image}} \approx
 \frac{\sigma}{
 \sqrt{n_{\text{pol}}\,n_{\text{baselines}}\,n_{\text{integrations}}\,n_{\text{chan}}}
 }
-\]
+$$
 with:
-- \(n_{\text{pol}}\): number of polarizations (usually 2)  
-- \(n_{\text{baselines}} = N_{\text{ant}}(N_{\text{ant}}-1)/2\)  
-- \(n_{\text{integrations}} \approx \text{num of correlation integration times in the MS}\)
+- $ n_{\text{pol}} $ : number of polarizations (usually 2)  
+- $ n_{\text{baselines}} = N_{\text{ant}}(N_{\text{ant}}-1)/2 $
+- $ n_{\text{integrations}} \approx \text{num of correlation integration times in the MS} $
 
 
 ### Brownian
@@ -34,20 +36,20 @@ $$
 $$
 
 where:
-- \(T_{\text{rx}}\): receiver temperature [K]  
-- \(T_{\text{atm}}\): atmospheric temperature [K]  
-- \(T_{\text{cmb}}\): CMB temperature [K]  
-- \(\tau_{\text{atm}}\): zenith atmospheric opacity  
-- \(\epsilon_a\): antenna efficiency  
-- \(\epsilon_q\): correlator efficiency  
-- \(\epsilon_l\): forward spillover efficiency  
-- \(D\): dish diameter  
-- \(\Delta\nu\): channel bandwidth  
-- \(\Delta t\): integration time  
+- $ T_{\text{rx}} $ : receiver temperature [K]  
+- $ T_{\text{atm}} $ : atmospheric temperature [K]  
+- $ T_{\text{cmb}} $ : CMB temperature [K]  
+- $ \tau_{\text{atm}} $ : zenith atmospheric opacity  
+- $ \epsilon_a $ : antenna efficiency  
+- $ \epsilon_q $ : correlator efficiency  
+- $ \epsilon_l $ : forward spillover efficiency  
+- $ D $ : dish diameter  
+- $ \Delta\nu $ : channel bandwidth  
+- $ \Delta t $ : integration time  
 
-- `tsys-atm`: \(T_{\text{atm}}\) computed from an atmospheric model using PWV  
-- `tsys-manual`: \(T_{\text{atm}}\) user specified  
-- Noise increases with airmass if \(\tau_{\text{atm}} > 0\)
+- `tsys-atm`: $ T_{\text{atm}} $  computed from an atmospheric model using PWV  
+- `tsys-manual`: $ T_{\text{atm}} $  user specified  
+- Noise increases with airmass if $ \tau_{\text{atm}} > 0 $
 
 ### Example (extreme noise)
 
