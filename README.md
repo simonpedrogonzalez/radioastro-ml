@@ -49,10 +49,31 @@ where:
 - `tsys-manual`: \(T_{\text{atm}}\) user specified  
 - Noise increases with airmass if \(\tau_{\text{atm}} > 0\)
 
+### Example (extreme noise)
+
+**Before**
+![before](images/gaincal_before.png)
+
+**After (very high noise, ~100 Jy)**
+![after](images/gaincal_noise_100Jy.png)
+
+**Difference (after − before)**
+![diff](images/gaincal_noise_100Jy_diff.png)
 
 ## [setgain](https://casadocs.readthedocs.io/en/stable/api/tt/casatools.simulator.html#casatools.simulator.simulator.setgain)(mode='fbm', ...)
 
 Time variable antenna gains (complex, drift),  as fractional Brownian (random wandering) motion with an rms amplitude scale.
+
+**Before**
+![before](images/gaincal_before.png)
+
+**After**
+![after](images/gaincal_antenna_gain_drift_0.2.png)
+
+**Difference (after − before)**
+![diff](images/gaincal_antenna_gain_drift_0.2_diff.png)
+
+
 
 ## [setleakage](https://casadocs.readthedocs.io/en/stable/api/tt/casatools.simulator.html#casatools.simulator.simulator.setleakage)
 
@@ -65,6 +86,16 @@ Per antenna pointing offset, mis-pointing error.
 ## [settrop](https://casadocs.readthedocs.io/en/stable/api/tt/casatools.simulator.html#casatools.simulator.simulator.settrop)
 
 Atmospheric effects. T-matrix defined in terms of precipitable wate vapor in mm & windspeed.
+
+
+**Before**
+![before](images/gaincal_trop_before.png)
+
+**After**
+![after](images/gaincal_trop_after_hurricane.png)
+
+**Difference (after − before)**
+![diff](images/gaincal_trop_hurricane_diff.png)
 
 ## setlimits(shadowlimit=..., elevationlimit=...)
 
