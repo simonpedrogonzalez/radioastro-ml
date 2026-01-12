@@ -12,17 +12,20 @@ Random additive noise to visibilities.
 $$
 V_{\text{obs}} = V_{\text{true}} + n_r + i\,n_i
 $$
+
 where:
 - $n_r, n_i \sim \mathcal{N}(0,\sigma^2)$
 - $\sigma =$  `simplenoise` (e.g. `"0.1Jy"`)
 
-**Fixed sigma**  
+**Fixed sigma**
+
 $$
 \sigma_{\text{image}} \approx
 \frac{\sigma}{
 \sqrt{n_{\text{pol}}\,n_{\text{baselines}}\,n_{\text{integrations}}\,n_{\text{chan}}}
 }
 $$
+
 with:
 - $n_{\text{pol}}$ : number of polarizations (usually 2)  
 - $n_{\text{baselines}} = N_{\text{ant}}(N_{\text{ant}}-1)/2$
