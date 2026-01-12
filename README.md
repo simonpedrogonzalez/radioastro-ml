@@ -14,7 +14,7 @@ V_{\text{obs}} = V_{\text{true}} + n_r + i\,n_i
 $$
 where:
 - $ n_r, n_i \sim \mathcal{N}(0,\sigma^2) $
-- $ \sigma = $  `simplenoise` (e.g. `"0.1Jy"`)
+- $\sigma =$  `simplenoise` (e.g. `"0.1Jy"`)
 
 **Fixed sigma**  
 $$
@@ -24,7 +24,7 @@ $$
 }
 $$
 with:
-- $ n_{\text{pol}} $ : number of polarizations (usually 2)  
+- $n_{\text{pol}}$ : number of polarizations (usually 2)  
 - $ n_{\text{baselines}} = N_{\text{ant}}(N_{\text{ant}}-1)/2 $
 - $ n_{\text{integrations}} \approx \text{num of correlation integration times in the MS} $
 
