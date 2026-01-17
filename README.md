@@ -32,6 +32,11 @@ with:
 - $n_{\text{integrations}} \approx \text{num of correlation integration times in the MS}$
 
 
+
+There is a pattern here, it shouldnt have any pattern probably, worth investigating.
+
+The psf should be the same. Clean the images first. Check where the structure comes from
+
 ### Brownian
 
 $$
@@ -54,6 +59,7 @@ where:
 - `tsys-manual`: $T_{\text{atm}}$  user specified  
 - Noise increases with airmass if $\tau_{\text{atm}} > 0$
 
+
 ### Example (extreme noise)
 
 **Before**
@@ -69,6 +75,8 @@ where:
 
 Time variable antenna gains (complex, drift),  as fractional Brownian (random wandering) motion with an rms amplitude scale.
 
+Do time plot for gain to check. Do it in fractional residual, as a fraction of the peak of the image. So as to be able to compare. Clean the image also do them. symmetric andtisymmetric in the final residuals. That's why do a clean test.
+
 **Before**
 ![before](images/gaincal_before.png)
 
@@ -77,7 +85,6 @@ Time variable antenna gains (complex, drift),  as fractional Brownian (random wa
 
 **Difference (after − before)**
 ![diff](images/gaincal_antenna_gain_drift_0.2_diff.png)
-
 
 
 ## [setleakage](https://casadocs.readthedocs.io/en/stable/api/tt/casatools.simulator.html#casatools.simulator.simulator.setleakage)
@@ -92,6 +99,8 @@ Per antenna pointing offset, mis-pointing error.
 
 Atmospheric effects. T-matrix defined in terms of precipitable wate vapor in mm & windspeed.
 
+
+Plot the phaszers, again. Go from here to the visibilities. It's important to know how the corruption looks like in the visibility domain.
 
 **Before**
 ![before](images/gaincal_trop_before.png)
@@ -117,3 +126,17 @@ Apply some existing calibration tables as a corruption. We can build the caltabl
 ## setbandpass(...)
 
 Bandpass errors with normal distributions, not implemented.
+
+The amplitude adn tropospheric thing should allow to change the data in a noticieable way, make some plots of the visibilities. to check if this would be good for corrupting the data.
+
+Look at the code of setgain, to see how setnoise actually works. Setgains, see what the code actually does. Chekc if one antenna can be fiddled with (just one antenna).
+
+set how the setgain does aactually work.
+
+Going to write the grant again
+make some edits
+
+including the corrections.
+
+due 23rd january at 5pm. to check
+
