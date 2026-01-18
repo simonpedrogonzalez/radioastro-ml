@@ -10,7 +10,7 @@ Tests on J1822-0938 (gaincal, point source, low observation time ~15min)
 Random additive noise to visibilities.
 
 $$
-V_{\text{obs}} = V_{\text{true}} + n_r + i\,n_i
+V_{\text{obs}} = V_{\text{true}} + n_r + in_i
 $$
 
 where:
@@ -22,7 +22,7 @@ where:
 $$
 \sigma_{\text{image}} \approx
 \frac{\sigma}{
-\sqrt{n_{\text{pol}}\,n_{\text{baselines}}\,n_{\text{integrations}}\,n_{\text{chan}}}
+\sqrt{n_{\text{pol}}n_{\text{baselines}}n_{\text{integrations}}n_{\text{chan}}}
 }
 $$
 
@@ -40,7 +40,7 @@ The psf should be the same. Clean the images first. Check where the structure co
 ### Brownian
 
 $$
-\Delta S = \frac{4\sqrt{2}\,\left(T_{\text{rx}} e^{-\tau_{\text{atm}}} + T_{\text{atm}}\left(e^{\tau_{\text{atm}}}-\epsilon_l\right) + T_{\text{cmb}}\right)}{\epsilon_q\,\epsilon_a\,\pi D^2\,\sqrt{\Delta\nu\,\Delta t}}
+\Delta S = \frac{4\sqrt{2}\left(T_{\text{rx}} e^{-\tau_{\text{atm}}} + T_{\text{atm}}\left(e^{\tau_{\text{atm}}}-\epsilon_l\right) + T_{\text{cmb}}\right)}{\epsilon_q\epsilon_a\pi D^2\sqrt{\Delta\nu\Delta t}}
 $$
 
 where:
@@ -75,6 +75,7 @@ where:
 
 Time variable antenna gains (complex, drift),  as fractional Brownian (random wandering) motion with an rms amplitude scale.
 
+[NOTES]
 Do time plot for gain to check. Do it in fractional residual, as a fraction of the peak of the image. So as to be able to compare. Clean the image also do them. symmetric andtisymmetric in the final residuals. That's why do a clean test.
 
 **Before**
@@ -99,7 +100,7 @@ Per antenna pointing offset, mis-pointing error.
 
 Atmospheric effects. T-matrix defined in terms of precipitable wate vapor in mm & windspeed.
 
-
+[NOTES]
 Plot the phaszers, again. Go from here to the visibilities. It's important to know how the corruption looks like in the visibility domain.
 
 **Before**
@@ -127,8 +128,10 @@ Apply some existing calibration tables as a corruption. We can build the caltabl
 
 Bandpass errors with normal distributions, not implemented.
 
+[NOTES]
 The amplitude adn tropospheric thing should allow to change the data in a noticieable way, make some plots of the visibilities. to check if this would be good for corrupting the data.
 
+[NOTES]
 Look at the code of setgain, to see how setnoise actually works. Setgains, see what the code actually does. Chekc if one antenna can be fiddled with (just one antenna).
 
 set how the setgain does aactually work.
@@ -140,3 +143,13 @@ including the corrections.
 
 due 23rd january at 5pm. to check
 
+
+
+TODOS:
+
+0. Fractional residual plot.
+1. Noise shouldnt have any pattern, investigate.
+2. Make visibility plots for all functions
+3. Study how setgains, setrop actually works
+4. [LATER] check grant 23rd 5pm
+5. Check no-op but performing setgain with values that should make it to no-op.
