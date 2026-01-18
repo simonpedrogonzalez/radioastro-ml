@@ -12,7 +12,7 @@ from casatools import simulator, image
 
 #Settings
 MS_IN  = "data/3c391_ctm_mosaic_10s_spw0.gaincal_corr.ms"
-MS_OUT = "3c391_ctm_mosaic_10s_spw0.gaincal_corr.ms"
+MS_OUT = "3c391_ctm_mosaic_10s_spw0.gaincal_corr.corrupted.ms"
 
 IMG_BEFORE_C = "img_gaincal_before_clean"
 IMG_AFTER_C  = "img_gaincal_after_clean"
@@ -39,7 +39,8 @@ TCLEAN_KW = dict(
 
 IMG_BEFORE = "img_gaincal_before"
 IMG_AFTER  = "img_gaincal_after"
-IMG_DIFF   = "img_gaincal_after_minus_before"
+IMG_DIFF   = "img_gaincal_diff"
+IMG_DIFF_C = "img_gaincal_diff_clean"
 
 def die(msg: str):
     raise RuntimeError(msg)
@@ -47,20 +48,12 @@ def die(msg: str):
 def make_clean(msname, outbase):
     rm_im_products(outbase)
     print(f"[INFO] CLEAN imaging {msname} field={GAINCAL_FIELD} -> {outbase}.image/.residual")
-    TCLEAN_KW.update(dict(
-        niter=1000,
-        # threshold="0.0Jy",
-    ))
-    tclean(vis=msname, imagename=outbase, **TCLEAN_KW)
+    tclean(vis=msname, imagename=outbase, niter=1000, **TCLEAN_KW)
 
 def make_dirty(msname: str, outbase: str):
     rm_im_products(outbase)
     print(f"[INFO] Dirty imaging {msname} field={GAINCAL_FIELD} -> {outbase}.image")
-    TCLEAN_CLEAN_KW.update(dict(
-        niter=0,
-        # threshold="0.0Jy",
-    ))
-    tclean(vis=msname, imagename=outbase, **TCLEAN_KW)
+    tclean(vis=msname, imagename=outbase, niter=0, **TCLEAN_KW)
 
 def copy_ms(src: str, dst: str):
     if not os.path.exists(src):
@@ -127,18 +120,18 @@ def make_frac_residuals(residual_im: str,
     out_im: str,
     ):
     # Compute reference scale
-    peak = img_peak(reference_im)
+    peak = img_peak(f"{reference_im}.image")
     if peak == 0.0:
-        raise RuntimeError(f"Reference image {reference_im} has zero peak")
+        raise RuntimeError(f"Reference image {reference_im}.image has zero peak")
 
-    print(f"[INFO] Fractional residual: dividing {residual_im} by peak={peak:.6g}")
+    print(f"[INFO] Fractional residual: dividing {residual_im}.residual by peak={peak:.6g}")
 
-    rmtables(out_im)
+    rmtables(f"{out_im}.image")
 
     immath(
-        imagename=[residual_im],
+        imagename=[f"{residual_im}.residual"],
         expr=f"IM0/{peak}",
-        outfile=out_im,
+        outfile=f"{out_im}.image",
     )
 
 from casatasks import plotms
@@ -158,7 +151,7 @@ def plot_before_after_vis_time(ms_before: str, ms_after: str, field: str, spw: s
             xaxis="time",
             yaxis=yaxis,          # "amp" or "phase"
             avgchannel="9999",    # average over channels
-            avgscan=True,
+            avgscan=False,
             coloraxis="antenna1", # shows antenna-dependent behavior
             showgui=False,
             plotfile=plotfile,
@@ -180,20 +173,20 @@ simulator_obvious_gain_corrupt(MS_OUT)
 make_dirty(MS_OUT, IMG_AFTER)
 make_clean(MS_OUT, IMG_AFTER_C)
 
-make_diff(IMG_BEFORE_C, IMG_AFTER_C)
-make_diff(IMG_BEFORE, IMG_AFTER)
+make_diff(IMG_BEFORE_C, IMG_AFTER_C, IMG_DIFF_C)
+make_diff(IMG_BEFORE, IMG_AFTER, IMG_DIFF)
 
-IMG_FRAC_RES = "img_gaincal_after_fracres.image"
+IMG_FRAC_RES = "img_gaincal_after_fracres"
 
 # Fractional residuals: what fraction of the true source brightness
 # is unexplained
 make_frac_residuals(
-    residual_im=f"{IMG_AFTER_C}.residual",
-    reference_im="{IMG_BEFORE_C}.image",
+    residual_im=IMG_AFTER_C,
+    reference_im=IMG_BEFORE_C,
     out_im=IMG_FRAC_RES,
 )
-rms_frac = img_rms(IMG_FRAC_RES)
-print(f"[CHECK] Fractional RMS residual = {rms_frac:.6g}")
+# rms_frac = img_rms(f"{IMG_FRAC_RES}.image")
+# print(f"[CHECK] Fractional RMS residual = {rms_frac:.6g}")
 
 plot_before_after_vis_time(MS_IN, MS_OUT, GAINCAL_FIELD, SPW)
 
