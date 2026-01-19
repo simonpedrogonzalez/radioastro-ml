@@ -75,6 +75,25 @@ where:
 
 Time variable antenna gains (complex, drift),  as fractional Brownian (random wandering) motion with an rms amplitude scale.
 
+### How does it work
+
+For each antenna and each time $t_i$, the code generates a complex gain
+
+$$
+g(t_i) = A(t_i)\,e^{i\phi(t_i)}
+$$
+
+Time is divided into discrete slots $t_0, t_1, t_2, \dots, t_N$, the gain is defined only at these times. fBM generates a random but correlated sequence $x(t_0), x(t_1), \dots, x(t_N)$ where each value is random, nearby times are strongly correlated, distant times are less correlated and there's a 'smoothness' parameter $\beta$. All values are generated together to satisfy a global correlation structure. Then, the values are scaled so that $\mathrm{RMS}\big(x_a(t)\big) = \text{scale}$ given by the user ('amplitude' parameter). The amplitude gain is then $A(t_i) = 1 + x_a(t_i)$ (because $g_i(t)=1+0i$ if instruments were perfect / already perfectly calibrated).
+
+A 2nd independent fBM sequence $x_\phi(t_i)$ is generated, scaled to radians $\phi(t_i) = \pi \cdot x_\phi(t_i)$, and then the phase gain is applied multiplicatively as $e^{i\phi(t_i)}$
+
+So the final complex gain for one antenna at time $t_i$ is:
+
+$$
+g(t_i) = \bigl(1 + x_a(t_i)\bigr)\; e^{\,i\,\pi\,x_\phi(t_i)}
+$$
+
+
 [NOTES]
 Do time plot for gain to check. Do it in fractional residual, as a fraction of the peak of the image. So as to be able to compare. Clean the image also do them. symmetric andtisymmetric in the final residuals. That's why do a clean test.
 
