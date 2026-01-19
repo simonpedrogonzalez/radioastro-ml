@@ -97,8 +97,8 @@ def simulator_obvious_gain_corrupt(msname: str):
     sm.corrupt()
     sm.done()
     
-    plotms(vis=gtab, xaxis="time", yaxis="gainamp", iteration="antenna", plotfile="x_gainamp_time.png", overwrite=True)
-    plotms(vis=gtab, xaxis="time", yaxis="gainphase", iteration="antenna", plotfile="x_gainphase_time.png", overwrite=True)
+    plotms(vis=gtab, xaxis="time", yaxis="gainamp", iteraxis="antenna", showflagged=False, plotfile="images/x_gainamp_time.png", overwrite=True)
+    plotms(vis=gtab, xaxis="time", yaxis="gainphase", iteraxis="antenna", showflagged=False, plotfile="images/x_gainphase_time.png", overwrite=True)
 
 def make_diff(img_before, img_after, img_out):
     rm_im_products(img_out)
@@ -156,9 +156,10 @@ def plot_before_after_vis_time(ms_before: str, ms_after: str, field: str, spw: s
             avgscan=False,
             coloraxis="antenna1", # shows antenna-dependent behavior
             showgui=False,
-            plotfile=plotfile,
+            plotfile=f"images/{plotfile}",
             overwrite=True,
-            showlegend=True
+            showlegend=True,
+            showflagged=False,
         )
 
     p(ms_before, "amp",   "before_amp_vs_time.png")
