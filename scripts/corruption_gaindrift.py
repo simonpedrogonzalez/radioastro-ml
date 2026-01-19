@@ -21,8 +21,8 @@ GAINCAL_FIELD = "J1822-0938"
 SPW = "0"
 SEED = 12345
 
-GAIN_RMS_REAL = 0.2
-GAIN_RMS_IMAG = 0.2
+GAIN_RMS_REAL = 0.5
+GAIN_RMS_IMAG = 0.5
 
 TCLEAN_KW = dict(
     field=GAINCAL_FIELD,
@@ -91,11 +91,14 @@ def simulator_obvious_gain_corrupt(msname: str):
     sm.openfromms(msname)
     sm.reset()
     sm.setseed(SEED)
-
-    sm.setgain(mode="fbm", amplitude=[GAIN_RMS_REAL, GAIN_RMS_IMAG])
+    gtab = msname + ".Gcorrupt"
+    sm.setgain(mode="fbm", table=gtab, amplitude=[GAIN_RMS_REAL, GAIN_RMS_IMAG])
 
     sm.corrupt()
     sm.done()
+    
+    plotms(vis=gtab, xaxis="time", yaxis="gainamp", iteration="antenna", plotfile="x_gainamp_time.png", overwrite=True)
+    plotms(vis=gtab, xaxis="time", yaxis="gainphase", iteration="antenna", plotfile="x_gainphase_time.png", overwrite=True)
 
 def make_diff(img_before, img_after, img_out):
     rm_im_products(img_out)
@@ -134,7 +137,6 @@ def make_frac_residuals(residual_im: str,
         outfile=f"{out_im}.image",
     )
 
-from casatasks import plotms
 
 def plot_before_after_vis_time(ms_before: str, ms_after: str, field: str, spw: str):
     """
@@ -156,6 +158,7 @@ def plot_before_after_vis_time(ms_before: str, ms_after: str, field: str, spw: s
             showgui=False,
             plotfile=plotfile,
             overwrite=True,
+            showlegend=True
         )
 
     p(ms_before, "amp",   "before_amp_vs_time.png")
