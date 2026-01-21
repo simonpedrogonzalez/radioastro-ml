@@ -20,6 +20,7 @@ ML for Radoastronomy calibration debugging
 ## Notes on fractional residual plot
 
 I am making fractional residual plots over the corrupted tcleaned image to check the corruption structure/magnitude. That is, after `tclean`, CASA produces a residual image:
+
 $$
 R_{\text{after-corruption}}(x,y) = I_{\text{data-after-corruption}}(x,y) - I_{\text{model}}(x,y)
 $$
@@ -31,6 +32,7 @@ I_{\text{ref}} = \max |I_{\text{clean-before-corruption}}(x,y)|.
 $$
 
 The fractional residual image is then
+
 $$
 R_{\text{frac}}(x,y) = \frac{R_{\text{after-corruption}}(x,y)}{I_{\text{ref}}}.
 $$
@@ -60,7 +62,7 @@ Both real and imaginary parts of each antenna gains are built by sampling two in
 
 | ![](images/random_gainamp_ant3.png) | 
 |:--:|
-| Synthetic random single antenna gain curve ($N(1, \sigma=0.2)$) colored by corr (RR, LL). |
+| Synthetic random single antenna gain curve ( $N(1, \sigma=0.2)$ ) colored by corr (RR, LL). |
 
 
 | ![](images/random_after_amp_vs_time.png) | 
