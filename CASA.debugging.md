@@ -1,6 +1,11 @@
 
-nano ~/.zshrc
+# Single "run environment" setup
 
+1. Edit:
+`nano ~/.zshrc`
+
+2. Paste:
+```
 export PATH="$HOME/homebrew/bin:$PATH"
 . "$HOME/.local/bin/env"
 
@@ -42,11 +47,26 @@ casa_run() {
     --logfile "$PWD/casa-logs/casa.log" \
     "$@"
 }
+```
 
+3. Update:
+
+```
 source ~/.zshrc
+```
 
-export DISPLAY=:0
+# CASA common problems / solutions
 
+1. Not displaying plotms plots
 
-unalias casa 2>/dev/null
+`export DISPLAY=:0`
+
+2. Make it single threaded
+
+```
+export OMP_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export NUMEXPR_NUM_THREADS=1
+```
 

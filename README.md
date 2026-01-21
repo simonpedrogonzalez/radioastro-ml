@@ -1,7 +1,72 @@
 # radioastro-ml
 ML for Radoastronomy calibration debugging
 
-# Notes on corruption functions of CASA simulator
+# Weel 2: Jan 19
+
+## Notes on "setgain" corruption functions of CASA simulator
+
+Corrupts by introducing variable antenna gains. That is, it creates gain curves (gain $\times$ time $\times$ antenna) in a table, and then applies them similarly as a $G$ type calibration matrix is applied.
+
+### How it works
+
+There are two modes of generating antenna gain curves: "Random" and "Fractional Brownian Motion" (fBM).
+
+### Random gain curves
+
+Both real and imaginary parts of each antenna gains are built by sampling two independent normal distributions $N(0,\sigma)$ with $\sigma$ defined by the user through an `amplitude` parameter. Real and imaginary parts can have different $\sigma$.
+
+**Problem**: by default, a $G$ type amplitude calibration is applied multiplicatively to the visibilities. This means that an amplitude taken from  $N(0,\sigma)$ doesn't work correctly, it should be  $N(1,\sigma)$ instead. Not much is mentioned in the docs regarding this weird implementation "mistake".
+
+**Solution**: created code to edit intermediate table to add 1 to the amplitudes in the gain curves so they can be applied in a regular $G$ calibration procedure.
+
+### Fractional Brownian Motion Gain Curve
+
+For each antenna and each time $t_i$, the code generates a complex gain:
+
+$$
+g(t_i) = A(t_i)\,e^{i\phi(t_i)}
+$$
+
+Time is divided into discrete slots $t_0, t_1, t_2, \dots, t_N$, the gain is defined only at these times.
+
+fBM (fractional Brownian Motion) generates a random but correlated sequence $x(t_0), x(t_1), \dots, x(t_N)$. Each value is random, but nearby times are strongly correlated, distant times are less correlated. There's a 'smoothness' parameter $\beta$ (set fixed to 1.1 in the code) that sets how jittery the curve is. Here is an example of how an fBM looks like in theory:
+
+![alt text](images/image.png)
+
+The code generates independent $x_a(t)$ (for the amplitude) and $x_\phi(t)$ (for the phase) values through this fBM process, in order to produce the complex gains.
+
+The values are then scaled by the user defined `amplitude` parameter ($\sigma$) so that $\mathrm{RMS}\big(x_a(t)\big) = \text{scale}$.
+
+The amplitude gain is then $A(t_i) = 1 + x_a(t_i)$ (because $g_i(t)=1+0i$ if instruments were perfect / already perfectly calibrated).
+
+The $x_\phi(t_i)$ values are scaled to radians $\phi(t_i) = \pi \cdot x_\phi(t_i)$, and then the phase gain is applied as $e^{i\phi(t_i)}$
+
+The final simulated complex gain for one antenna at time $t_i$ is:
+
+$$
+g(t_i) = \bigl(1 + x_a(t_i)\bigr)\; e^{\,i\,\pi\,x_\phi(t_i)}
+$$
+
+Important: fBM sequences are generated for each correlations (RR, LL, etc). So, for example, if we have 2 antennas and 2 corr (RR, LL), the code will generate:
+
+2 antennas x 2 corr x 2 (one for amp, one for phase) = 8 independent fBM sequences.
+
+**Problems:**
+
+- The experiments using fBM mode are not reproducible, there is some random element that can't be controlled by seting the RNG SEED for the procedure.
+
+- The simulated antenna gains, on occasion, present outlier values for the last timestamp (sometimes $\times 10$ the previous values). This can be "fixed" by overwriting these extreme values in the table containing the simulated antenna gains before applying the corruption. 
+
+- I believe the source of both problems is that there is a bug in the fBM C code, that stems from a missing initialization in an array (I think the last element of the array contains garbage).
+
+**Solutions:**
+- Created code to "patch" weird values after generating the gain curves.
+- I have submitted a bug report through the CASA helpdesk.
+- I am considering attempting to fix the CASA code myself, but this might be impractical, taking into account how CASA is packaged. Other options are: using the random mode instead of fBM, or implementing the fBM method on python directly.
+
+# Week 1: Jan 12
+
+## Notes on corruption functions of CASA simulator
 
 Tests on J1822-0938 (gaincal, point source, low observation time ~15min)
 
@@ -74,28 +139,6 @@ where:
 ## [setgain](https://casadocs.readthedocs.io/en/stable/api/tt/casatools.simulator.html#casatools.simulator.simulator.setgain)(mode='fbm', ...)
 
 Time variable antenna gains (complex, drift),  as fractional Brownian (random wandering) motion with an rms amplitude scale.
-
-### How does it work
-
-For each antenna and each time $t_i$, the code generates a complex gain
-
-$$
-g(t_i) = A(t_i)\,e^{i\phi(t_i)}
-$$
-
-Time is divided into discrete slots $t_0, t_1, t_2, \dots, t_N$, the gain is defined only at these times. fBM generates a random but correlated sequence $x(t_0), x(t_1), \dots, x(t_N)$ where each value is random, nearby times are strongly correlated, distant times are less correlated and there's a 'smoothness' parameter $\beta$. All values are generated together to satisfy a global correlation structure. Then, the values are scaled so that $\mathrm{RMS}\big(x_a(t)\big) = \text{scale}$ given by the user ('amplitude' parameter). The amplitude gain is then $A(t_i) = 1 + x_a(t_i)$ (because $g_i(t)=1+0i$ if instruments were perfect / already perfectly calibrated).
-
-A 2nd independent fBM sequence $x_\phi(t_i)$ is generated, scaled to radians $\phi(t_i) = \pi \cdot x_\phi(t_i)$, and then the phase gain is applied multiplicatively as $e^{i\phi(t_i)}$
-
-So the final complex gain for one antenna at time $t_i$ is:
-
-$$
-g(t_i) = \bigl(1 + x_a(t_i)\bigr)\; e^{\,i\,\pi\,x_\phi(t_i)}
-$$
-
-
-[NOTES]
-Do time plot for gain to check. Do it in fractional residual, as a fraction of the peak of the image. So as to be able to compare. Clean the image also do them. symmetric andtisymmetric in the final residuals. That's why do a clean test.
 
 **Before**
 ![before](images/gaincal_before.png)
