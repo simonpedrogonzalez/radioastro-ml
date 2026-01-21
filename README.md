@@ -55,14 +55,24 @@ Important: fBM sequences are generated for each correlations (RR, LL, etc). So, 
 
 - The experiments using fBM mode are not reproducible, there is some random element that can't be controlled by seting the RNG SEED for the procedure.
 
-- The simulated antenna gains, on occasion, present outlier values for the last timestamp (sometimes $\times 10$ the previous values). This can be "fixed" by overwriting these extreme values in the table containing the simulated antenna gains before applying the corruption. 
+- The simulated antenna gains, on occasion (about 1/2 of the antennas), present outlier values for the last timestamp. Then, when applied, this yields weird amplitudes. This can be "fixed" by overwriting these extreme values in the table containing the simulated antenna gains before applying the corruption.
 
 - I believe the source of both problems is that there is a bug in the fBM C code, that stems from a missing initialization in an array (I think the last element of the array contains garbage).
+
+| ![](images/fbm_broken_antenna_gains.png) | 
+|:--:| 
+| "Bad" Synthetic fBM single antenna gain curve (colored by corr (RR, LL)), notice outlier value. |
+
+| ![](images/fbm_broken_amp_vs_time.png) | 
+|:--:| 
+| "Bad" corrupted visibilities (amplitude vs time) after applying the "bad" gain curves. |
 
 **Solutions:**
 - Created code to "patch" weird values after generating the gain curves.
 - I have submitted a bug report through the CASA helpdesk.
 - I am considering attempting to fix the CASA code myself, but this might be impractical, taking into account how CASA is packaged. Other options are: using the random mode instead of fBM, or implementing the fBM method on python directly.
+
+
 
 # Week 1: Jan 12
 
