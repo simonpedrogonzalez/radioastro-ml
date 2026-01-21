@@ -644,8 +644,8 @@ make_dirty(MS_IN, IMG_BEFORE)
 make_clean(MS_IN,  IMG_BEFORE_C)
 
 # Add corruption
-gtab = sim_gain_corrupt(MS_OUT)
-# gtab = sim_gain_corrupt_clip_extreme(MS_OUT)
+# gtab = sim_gain_corrupt(MS_OUT)
+gtab = sim_gain_corrupt_clip_extreme(MS_OUT)
 # gtab = sim_gain_corrupt_clip_extreme_single_antenna(MS_OUT, keep_ant=3)
 # gtab = sim_gain_corrupt_random(MS_OUT)
 
@@ -668,6 +668,16 @@ make_frac_residuals(
     reference_im=IMG_BEFORE_C,
     out_im=IMG_FRAC_RES,
 )
+
+
+IMG_BEFORE_C = "img_gaincal_before_clean"
+IMG_AFTER_C  = "time_restricted_corrupted"
+make_frac_residuals(
+    residual_im=IMG_AFTER_C,
+    reference_im=IMG_BEFORE_C,
+    out_im="img_gaincal_after_fracres_restricted",
+)
+
 # rms_frac = img_rms(f"{IMG_FRAC_RES}.image")
 # print(f"[CHECK] Fractional RMS residual = {rms_frac:.6g}")
 

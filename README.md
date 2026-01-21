@@ -1,7 +1,41 @@
 # radioastro-ml
 ML for Radoastronomy calibration debugging
 
-# Weel 2: Jan 19
+# Week 2: Jan 19
+
+## Summary
+
+- Implemented fractional residual images to observe corruption effect.
+
+- In-depth analysis of CASA `setgain` (antenna gain drift corruption simulation). Identified some problems. Found ways to somewhat "fix" them.
+
+- Found a way to corrupt only a subset of antennas.
+
+- Next steps:
+
+1. compare the sythetic antenna gain drift with real antenna gain drift from the non-calibrated tutorials and try to achieve a "realistic" drift, as to evaluate if this method will be useful.
+2. Decide whether the patches for the problems with the code (described in the next sections) are sufficient, or if another solution should be considered.
+3. Move on to in-depth analysis of other functions.
+
+## Notes on fractional residual plot
+
+I am making fractional residual plots over the corrupted tcleaned image to check the corruption structure/magnitude. That is, after `tclean`, CASA produces a residual image:
+$$
+R_{\text{after-corruption}}(x,y) = I_{\text{data-after-corruption}}(x,y) - I_{\text{model}}(x,y)
+$$
+
+I take this residual image and normalize it by a reference brightness (the peak of the clean image):
+
+$$
+I_{\text{ref}} = \max |I_{\text{clean-before-corruption}}(x,y)|.
+$$
+
+The fractional residual image is then
+$$
+R_{\text{frac}}(x,y) = \frac{R_{\text{after-corruption}}(x,y)}{I_{\text{ref}}}.
+$$
+
+The resulting pixel values represent the fraction of the brightness that remains unexplained by the model. The idea is that this shows the structure and magnitude of the corruption. Examples can be seen in the following sections.
 
 ## Notes on "setgain" corruption functions of CASA simulator
 
@@ -13,18 +47,38 @@ There are two modes of generating antenna gain curves: "Random" and "Fractional 
 
 ### Random gain curves
 
-Both real and imaginary parts of each antenna gains are built by sampling two independent normal distributions $N(0,\sigma)$ with $\sigma$ defined by the user through an `amplitude` parameter. Real and imaginary parts can have different $\sigma$.
+Both real and imaginary parts of each antenna gains are built by sampling two independent normal distributions $N(0,\sigma)$ with $\sigma$ defined by the user through an `amplitude` parameter. Real and imaginary parts can have different `amplitude`.
 
 **Problem**: by default, a $G$ type amplitude calibration is applied multiplicatively to the visibilities. This means that an amplitude taken from  $N(0,\sigma)$ doesn't work correctly, it should be  $N(1,\sigma)$ instead. Not much is mentioned in the docs regarding this weird implementation "mistake".
 
 **Solution**: created code to edit intermediate table to add 1 to the amplitudes in the gain curves so they can be applied in a regular $G$ calibration procedure.
+
+
+| ![](images/before_amp.png) | 
+|:--:|
+| Amplitudes before antenna random gain corruption. |
+
+| ![](images/random_gainamp_ant3.png) | 
+|:--:|
+| Synthetic random single antenna gain curve ($N(1, \sigma=0.2)$) colored by corr (RR, LL). |
+
+
+| ![](images/random_after_amp_vs_time.png) | 
+|:--:|
+| Amplitudes after random antenna gain corruption. |
+
+
+| ![](images/img_random_gaincal_after_fracres.png) | 
+|:--:|
+| Fractional residuals after random antenna gain corruption. |
+
 
 ### Fractional Brownian Motion Gain Curve
 
 For each antenna and each time $t_i$, the code generates a complex gain:
 
 $$
-g(t_i) = A(t_i)\,e^{i\phi(t_i)}
+g(t_i) = A(t_i)e^{i\phi(t_i)}
 $$
 
 Time is divided into discrete slots $t_0, t_1, t_2, \dots, t_N$, the gain is defined only at these times.
@@ -35,7 +89,7 @@ fBM (fractional Brownian Motion) generates a random but correlated sequence $x(t
 
 The code generates independent $x_a(t)$ (for the amplitude) and $x_\phi(t)$ (for the phase) values through this fBM process, in order to produce the complex gains.
 
-The values are then scaled by the user defined `amplitude` parameter ($\sigma$) so that $\mathrm{RMS}\big(x_a(t)\big) = \text{scale}$.
+The values are then scaled by the user defined `amplitude` parameter ($\sigma$) so that $\mathrm{RMS}\big(x_a(t)\big) = \sigma$.
 
 The amplitude gain is then $A(t_i) = 1 + x_a(t_i)$ (because $g_i(t)=1+0i$ if instruments were perfect / already perfectly calibrated).
 
@@ -44,18 +98,18 @@ The $x_\phi(t_i)$ values are scaled to radians $\phi(t_i) = \pi \cdot x_\phi(t_i
 The final simulated complex gain for one antenna at time $t_i$ is:
 
 $$
-g(t_i) = \bigl(1 + x_a(t_i)\bigr)\; e^{\,i\,\pi\,x_\phi(t_i)}
+g(t_i) = \bigl(1 + x_a(t_i)\bigr)\; e^{i\phi(t_i)}
 $$
 
-Important: fBM sequences are generated for each correlations (RR, LL, etc). So, for example, if we have 2 antennas and 2 corr (RR, LL), the code will generate:
+Important: independent fBM sequences are generated for each correlations (RR, LL, etc). So, for example, if we have 2 antennas and 2 corr (RR, LL), the code will generate:
 
 2 antennas x 2 corr x 2 (one for amp, one for phase) = 8 independent fBM sequences.
 
 **Problems:**
 
-- The experiments using fBM mode are not reproducible, there is some random element that can't be controlled by seting the RNG SEED for the procedure.
+- The experiments using fBM mode are not reproducible, there is some random element that can't be controlled by seting the RNG seed for the procedure.
 
-- The simulated antenna gains, on occasion (about 1/2 of the antennas), present outlier values for the last timestamp. Then, when applied, this yields weird amplitudes. This can be "fixed" by overwriting these extreme values in the table containing the simulated antenna gains before applying the corruption.
+- The simulated antenna gains, on occasion (for about 1/2 of the antennas), present outlier values for the last timestamp. Then, when applied, this yields weird amplitudes. This can be "fixed" by overwriting these extreme values in the table containing the simulated antenna gains before applying the corruption.
 
 - I believe the source of both problems is that there is a bug in the fBM C code, that stems from a missing initialization in an array (I think the last element of the array contains garbage).
 
@@ -67,12 +121,43 @@ Important: fBM sequences are generated for each correlations (RR, LL, etc). So, 
 |:--:| 
 | "Bad" corrupted visibilities (amplitude vs time) after applying the "bad" gain curves. |
 
+
+| ![](images/broken_fbm_fracres.png) | 
+|:--:| 
+| Fractional residuals for the "badly" fBM corrupted tcleaned image. The stripe pattern probably comes from the very high gain at the very last timestamp, since each time interval correspond to a specific uv direction as earth rotates.|
+| ![](images/img_gaincal_after_fracres_restricted.png) | 
+| Fractional residuals for the "badly" fBM corrupted tcleaned image but ignoring the last measurement. We can see that the stripe pattern dissapeared, confirming the previous explanation |
+
 **Solutions:**
 - Created code to "patch" weird values after generating the gain curves.
 - I have submitted a bug report through the CASA helpdesk.
-- I am considering attempting to fix the CASA code myself, but this might be impractical, taking into account how CASA is packaged. Other options are: using the random mode instead of fBM, or implementing the fBM method on python directly.
+- I am considering attempting to fix the CASA code myself, but this might be impractical. Other options are: using the random mode instead of fBM, or implementing the fBM method on python directly.
+
+| ![](images/fbm_gainamp_ant1.png) |
+|:--:|
+| ![](images/fbm_gainamp_ant7.png) |
+| Two "fixed" (no outlier values) synthetic fBM antenna gain curves (colored by corr (RR, LL)), for two different antennas. |
 
 
+| ![](images/before_amp.png) |
+|:--:| 
+| Amplitudes before fBM corruption. |
+
+| ![](images/fbm_fixed_after_amp_vs_time.png) |
+|:--:| 
+| Amplitudes after "fixed" (removed outliers from gain curves) fBM corruption. |
+
+| ![](images/fbm_fixed_fracres.png) |
+|:--:| 
+| Fractional residual after tcleaning the "fixed" (no outlier values) fBM corrupted image with `amplitude=0.2`. |
+
+## One antenna gain corruption
+
+I can use `setgain` to create sythetic gain curves for all antennas, and then flatten these curves for a selection of antennas (set all values to $1+0i$). This allows for only corrupting one antenna, which could be useful.
+
+| ![](images/img_gaincal_after_fracres_one_antenna.png) |
+|:--:| 
+| Fractional residual after fBM corrupting only one antenna. |
 
 # Week 1: Jan 12
 
