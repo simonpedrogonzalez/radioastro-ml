@@ -7,15 +7,15 @@ ML for Radoastronomy calibration debugging
 
 - Implemented fractional residual images to observe corruption effect.
 
-- In-depth analysis of CASA `setgain` (antenna gain drift corruption simulation). Identified some problems. Found ways to somewhat "fix" them.
+- In-depth analysis of CASA `setgain` (antenna gain drift corruption simulation). Identified some problems in the code. Found ways to somewhat "fix" them.
 
 - Found a way to corrupt only a subset of antennas.
 
 - Next steps:
 
-1. compare the sythetic antenna gain drift with real antenna gain drift from the non-calibrated tutorials and try to achieve a "realistic" drift, as to evaluate if this method will be useful.
-2. Decide whether the patches for the problems with the code (described in the next sections) are sufficient, or if another solution should be considered.
-3. Move on to in-depth analysis of other functions.
+1. compare the sythetic antenna gain drift with real antenna gain drift from the non-calibrated tutorial data and try to achieve a realistic antenna gain drift corruption.
+2. Decide whether the patches for the problems found in the code (described in the next sections) are sufficient, or if another solution should be considered.
+3. Move on to in-depth analysis of other kind of corruption.
 
 ## Notes on fractional residual plot
 
