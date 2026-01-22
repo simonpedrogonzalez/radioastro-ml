@@ -107,6 +107,8 @@ Important: independent fBM sequences are generated for each correlations (RR, LL
 
 2 antennas x 2 corr x 2 (one for amp, one for phase) = 8 independent fBM sequences.
 
+How the $x(t)$ values are generated: for a certain number of frequencies $k$, generate a wave drawing a random normal amplitude and uniform phase. Scale those waves with the $\beta$ parameter so low freq components are more prominent. Create a signal by adding up all these waves. Draw samples at point $t$ of the signal. That sample is $x(t)$. Since the low frequency components are more prominent, nearby times get similar draws from the signal, they are more strongly correlated.
+
 **Problems:**
 
 - The experiments using fBM mode are not reproducible, there is some random element that can't be controlled by seting the RNG seed for the procedure.
@@ -259,9 +261,6 @@ Per antenna pointing offset, mis-pointing error.
 
 Atmospheric effects. T-matrix defined in terms of precipitable wate vapor in mm & windspeed.
 
-[NOTES]
-Plot the phaszers, again. Go from here to the visibilities. It's important to know how the corruption looks like in the visibility domain.
-
 **Before**
 ![before](images/gaincal_trop_before.png)
 
@@ -286,29 +285,3 @@ Apply some existing calibration tables as a corruption. We can build the caltabl
 ## setbandpass(...)
 
 Bandpass errors with normal distributions, not implemented.
-
-[NOTES]
-The amplitude adn tropospheric thing should allow to change the data in a noticieable way, make some plots of the visibilities. to check if this would be good for corrupting the data.
-
-[NOTES]
-Look at the code of setgain, to see how setnoise actually works. Setgains, see what the code actually does. Chekc if one antenna can be fiddled with (just one antenna).
-
-set how the setgain does aactually work.
-
-Going to write the grant again
-make some edits
-
-including the corrections.
-
-due 23rd january at 5pm. to check
-
-
-
-TODOS:
-
-0. Fractional residual plot.
-1. Noise shouldnt have any pattern, investigate.
-2. Make visibility plots for all functions
-3. Study how setgains, setrop actually works
-4. [LATER] check grant 23rd 5pm
-5. Check no-op but performing setgain with values that should make it to no-op.
