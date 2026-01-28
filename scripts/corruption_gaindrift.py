@@ -1,27 +1,34 @@
 #1. copies MS_IN -> MS_OUT
-#2. gain corruption casatools.simulator.setgain
-#3. imaging
-#4. writes diff image
+#2. applies some gain corruption
+#3. makes a bunch of plots
 
-import os
-import shutil
+# SETUP
+import os; os.environ.setdefault("DISPLAY", ":0")
+# MY HELPERS
+import importlib
+import io_utils, img_utils
+for lib in [io_utils, img_utils]:
+    importlib.reload(lib)
+from img_utils import make_frac_residuals, casa_image_to_png, make_clean, make_dirty, make_diff, img_rms
+from io_utils import copy_ms, hash_casa_table_cols, col_diff
+
 import numpy as np
-
 from casatasks import tclean, rmtables, immath
-from casatools import simulator, image
+from casaplotms import plotms
+import hashlib
+from casatasks import flagdata, visstat, applycal
+from casatools import simulator, table, image
+from casatools import msmetadata as msmdtool
 
 #Settings
 MS_IN  = "data/J1822_spw0.calibrated.ms"
 MS_OUT = "J1822_spw0.gaindrift.corrupted.ms"
 
-IMG_BEFORE_C = "img_gaincal_before_clean"
-IMG_AFTER_C  = "img_gaincal_after_clean"
-
 GAINCAL_FIELD = "J1822-0938"
 SPW = "0"
 SEED = 12345
 
-GAIN_RMS_AMP=0.7
+GAIN_RMS_AMP=1.0
 
 TCLEAN_KW = dict(
     field=GAINCAL_FIELD,
@@ -36,129 +43,10 @@ TCLEAN_KW = dict(
     savemodel="none",
 )
 
-IMG_BEFORE = "img_gaincal_before"
-IMG_AFTER  = "img_gaincal_after"
-IMG_DIFF   = "img_gaincal_diff"
-IMG_DIFF_C = "img_gaincal_diff_clean"
-
-import numpy as np
-import hashlib
-from casatools import table
-
-import hashlib
-import numpy as np
-from casatools import table
-
-def hash_casa_table_cols(
-    tabpath: str,
-    cols: list[str],
-    *,
-    row_stride: int = 1,
-    max_rows: int | None = None,
-) -> str:
-    """
-    Hash selected columns of a CASA table.
-
-    Parameters
-    ----------
-    tabpath : str
-        Path to CASA table (MS main table or caltable directory)
-    cols : list of str
-        Column names to hash (must exist in the table)
-    row_stride : int
-        Hash every k-th row (1 = all rows)
-    max_rows : int or None
-        Cap number of rows hashed (after striding)
-
-    Returns
-    -------
-    sha256 hex digest
-    """
-    tb = table()
-    tb.open(tabpath)
-
-    h = hashlib.sha256()
-    h.update(tabpath.encode())
-
-    nrows = tb.nrows()
-    rows = np.arange(0, nrows, row_stride)
-    if max_rows is not None:
-        rows = rows[:max_rows]
-
-    h.update(np.int64(nrows).tobytes())
-    h.update(np.int64(len(rows)).tobytes())
-
-    for col in cols:
-        if col not in tb.colnames():
-            raise KeyError(f"Column '{col}' not in table {tabpath}")
-
-        h.update(col.encode())
-
-        data = tb.getcol(col)
-
-        # CASA convention: last axis is row
-        if isinstance(data, np.ndarray):
-            data = np.take(data, rows, axis=data.ndim - 1)
-
-            # Normalize dtype to avoid float/int ambiguity
-            arr = np.ascontiguousarray(data)
-            h.update(str(arr.dtype).encode())
-            h.update(str(arr.shape).encode())
-            h.update(arr.tobytes())
-        else:
-            # strings / lists
-            for i in rows:
-                h.update(str(data[i]).encode())
-
-    tb.close()
-    return h.hexdigest()
-
-
-
-def die(msg: str):
-    raise RuntimeError(msg)
-
-def make_clean(msname, outbase):
-    rm_im_products(outbase)
-    print(f"[INFO] CLEAN imaging {msname} field={GAINCAL_FIELD} -> {outbase}.image/.residual")
-    tclean(vis=msname, imagename=outbase, niter=1000, **TCLEAN_KW)
-
-def make_dirty(msname: str, outbase: str):
-    rm_im_products(outbase)
-    print(f"[INFO] Dirty imaging {msname} field={GAINCAL_FIELD} -> {outbase}.image")
-    tclean(vis=msname, imagename=outbase, niter=0, **TCLEAN_KW)
-
-def copy_ms(src: str, dst: str):
-    if not os.path.exists(src):
-        die(f"Missing input MS: {src}")
-    if os.path.exists(dst):
-        print(f"[WARN] Removing existing {dst}")
-        shutil.rmtree(dst)
-    print(f"[INFO] Copying MS: {src} -> {dst}")
-    shutil.copytree(src, dst)
-
-from casatasks import flagdata, visstat
-
 def rm_im_products(imbase: str):
     for suf in [".image", ".model", ".psf", ".residual", ".sumwt", ".pb", ".weight", ".mask"]:
         rmtables(imbase + suf)
 
-def image_to_numpy(imname: str) -> np.ndarray:
-    ia = image()
-    ia.open(imname)
-    arr = ia.getchunk()
-    ia.close()
-    return np.asarray(arr)
-
-def img_peak(imname: str) -> float:
-    arr = image_to_numpy(imname)
-    return float(np.max(np.abs(arr)))
-
-def img_rms(imname: str) -> float:
-    arr = image_to_numpy(imname)
-    return float(np.sqrt(np.mean(arr.astype(np.float64)**2)))
-
-from casatools import table
 
 def plot_gain_per_antenna(gtab, spw="0"):
     tb = table()
@@ -192,13 +80,6 @@ def plot_gain_per_antenna(gtab, spw="0"):
             overwrite=True,
             showgui=False,
         )
-
-# Example:
-# 
-
-import numpy as np
-from casatools import simulator, table
-from casatasks import applycal
 
 def _mad(x):
     m = np.median(x)
@@ -368,8 +249,7 @@ def sim_gain_corrupt_clip_extreme(msname: str):
 
     gtab = msname + ".Gcorrupt"
     rmtables(gtab) 
-    # NOTE: interval arg is ignored for fbm in CASA (as you've found)
-    sm.setgain(mode="fbm", table=gtab, amplitude=GAIN_RMS_AMP, interval="10m")
+    sm.setgain(mode="fbm", table=gtab, amplitude=GAIN_RMS_AMP)
 
     sm.done()
 
@@ -391,8 +271,6 @@ def sim_gain_corrupt_clip_extreme(msname: str):
 
     return gtab_fixed
 
-from casatools import table as tbtool
-from casatools import msmetadata as msmdtool
 
 def set_multiplicative_gains_to_1_for_all_except_one_antenna(
     gtab_out: str,
@@ -403,7 +281,7 @@ def set_multiplicative_gains_to_1_for_all_except_one_antenna(
     if gtab_out is None:
         gtab_out = f"{gtab_in}.keepAnt{keep_ant}"
 
-    tb = tbtool()
+    tb = table()
     tb.open(gtab_out, nomodify=False)
     try:
         colnames = tb.colnames()
@@ -487,8 +365,6 @@ def sim_gain_corrupt_clip_extreme_single_antenna(msname: str, keep_ant: int):
     return gtab_fixed
 
 
-
-
 def sim_gain_corrupt(msname: str):
     print(f"[INFO] Applying simulator gain corruption to {msname}")
     sm = simulator()
@@ -510,7 +386,7 @@ def shift_gain_table_to_unity(gtab_out: str):
     added multiplicatively by the corruptor
     """
 
-    tb = tbtool()
+    tb = table()
     tb.open(gtab_out, nomodify=False)
     try:
         if "CPARAM" not in tb.colnames():
@@ -552,42 +428,119 @@ def sim_gain_corrupt_random(msname: str):
     return gtab_fixed
 
 
-def make_diff(img_before, img_after, img_out):
-    rm_im_products(img_out)
-    a = image_to_numpy(img_before + ".image")
-    b = image_to_numpy(img_after + ".image")
-    equal = np.array_equal(a, b)
-    print(f"[RESULT] Image equality (expected False): {equal}")
-    if equal:
-        print("[WARN] Images are equal.")
-    else:
-        d = b - a
-        print(f"[INFO] diff stats: max|d|={np.max(np.abs(d))}  rms(d)={np.sqrt(np.mean(d*d))}")
-    print(f"[INFO] Writing diff image {img_out}.image = AFTER - BEFORE")
-    immath(
-        imagename=[img_after + ".image", img_before + ".image"],
-        expr="IM0 - IM1",
-        outfile=img_out + ".image"
+def set_multiplicative_gains_to_1_for_all_except_some_antennas(
+    gtab_in: str,
+    msname: str,                 # kept for symmetry with your other funcs (not strictly needed)
+    keep_ants: list[int],
+    gtab_out: str | None = None,
+):
+    """
+    Copy gain table gtab_in -> gtab_out, then set CPARAM=1+0j for all rows whose antenna
+    is NOT in keep_ants. Leaves rows for antennas in keep_ants untouched.
+
+    This assumes the gain table is a per-antenna table (ANTENNA1 present), like setgain() outputs.
+    """
+    keep_ants = sorted(set(int(a) for a in keep_ants))
+    if len(keep_ants) == 0:
+        raise ValueError("keep_ants is empty")
+
+    if gtab_out is None:
+        keep_str = "_".join(map(str, keep_ants[:12]))
+        gtab_out = f"{gtab_in}.keep{len(keep_ants)}ants_{keep_str}"
+
+    # Deep copy the table directory first (so we don't mutate gtab_in)
+    tb = table()
+    tb.open(gtab_in)
+    tb.copy(gtab_out, deep=True)
+    tb.close()
+
+    tb.open(gtab_out, nomodify=False)
+    try:
+        colnames = tb.colnames()
+
+        # Antenna column
+        if "ANTENNA1" in colnames:
+            antcol = "ANTENNA1"
+        elif "ANTENNA" in colnames:
+            antcol = "ANTENNA"
+        else:
+            raise RuntimeError(f"Could not find ANTENNA1/ANTENNA in {gtab_out}. Columns: {colnames}")
+
+        ant = tb.getcol(antcol)
+
+        # Rows to neutralize: antennas NOT in keep_ants
+        keep_set = set(keep_ants)
+        rows = np.array([i for i, a in enumerate(ant) if int(a) not in keep_set], dtype=np.int64)
+
+        if rows.size == 0:
+            print(f"[INFO] keep_ants covers all antennas present; nothing to neutralize.")
+            return gtab_out
+
+        # Prefer CPARAM; fallback FPARAM if needed
+        if "CPARAM" in colnames:
+            cparam = tb.getcol("CPARAM")  # (ncorr, nchan(usually 1), nrow)
+            cparam[:, :, rows] = 1.0 + 0.0j
+            tb.putcol("CPARAM", cparam)
+        elif "FPARAM" in colnames:
+            fparam = tb.getcol("FPARAM")
+            if fparam.ndim == 3:
+                fparam[:, :, rows] = 1.0
+            elif fparam.ndim == 2:
+                fparam[:, rows] = 1.0
+            else:
+                raise RuntimeError(f"Unexpected FPARAM shape {fparam.shape} in {gtab_out}")
+            tb.putcol("FPARAM", fparam)
+        else:
+            raise RuntimeError(f"No CPARAM/FPARAM in {gtab_out}. Columns: {colnames}")
+
+        tb.flush()
+    finally:
+        tb.close()
+
+    print(f"[INFO] Wrote multi-antenna corruption table: {gtab_out}")
+    print(f"[INFO] Kept corruption for antennas: {keep_ants}")
+    print(f"[INFO] Neutralized gains for {rows.size} rows (antennas not in keep_ants)")
+    return gtab_out
+
+
+def sim_gain_corrupt_clip_extreme_n_antennas(msname: str, keep_ants: list[int]):
+    """
+    Generate FBM gain table, fix outliers, then keep corruption only for keep_ants
+    (provided via keep_ants); neutralize all others to unity; apply to MS.
+    """
+    keep_ants = list(keep_ants)
+
+    print(f"[INFO] Generating gain corruption table for {msname}")
+
+    sm = simulator()
+    sm.openfromms(msname)
+    sm.setseed(SEED)
+
+    gtab = msname + ".Gcorrupt"
+    rmtables(gtab)
+    sm.setgain(mode="fbm", table=gtab, amplitude=GAIN_RMS_AMP)
+    sm.done()
+
+    print(f"[INFO] Raw gain table: {gtab}")
+
+    gtab_fixed = fix_gain_table(gtab, zmax=10.0, fix_last_spike=True)
+    gtab_fixed = set_multiplicative_gains_to_1_for_all_except_some_antennas(
+        gtab_in=gtab_fixed,
+        msname=msname,
+        keep_ants=keep_ants,
+        gtab_out=None,
     )
 
-def make_frac_residuals(residual_im: str,
-    reference_im: str,
-    out_im: str,
-    ):
-    # Compute reference scale
-    peak = img_peak(f"{reference_im}.image")
-    if peak == 0.0:
-        raise RuntimeError(f"Reference image {reference_im}.image has zero peak")
+    print(f"[INFO] Applying fixed gain table to MS: {msname}")
 
-    print(f"[INFO] Fractional residual: dividing {residual_im}.residual by peak={peak:.6g}")
+    sm = simulator()
+    sm.openfromms(msname)
+    sm.setseed(SEED)
+    sm.setapply(table=gtab_fixed, type="G", field=GAINCAL_FIELD, interp="linear", calwt=False)
+    sm.corrupt()
+    sm.done()
 
-    rmtables(f"{out_im}.image")
-
-    immath(
-        imagename=[f"{residual_im}.residual"],
-        expr=f"IM0/{peak}",
-        outfile=f"{out_im}.image",
-    )
+    return gtab_fixed
 
 
 def plot_before_after_vis_time(ms_before: str, ms_after: str, field: str, spw: str):
@@ -619,64 +572,164 @@ def plot_before_after_vis_time(ms_before: str, ms_after: str, field: str, spw: s
     p(ms_after,  "amp",   "after_amp_vs_time.png")
     p(ms_after,  "phase", "after_phase_vs_time.png")
 
-def check_was_applied():
-    from casatools import table
-    import numpy as np
 
-    tb = table()
-    tb.open(MS_OUT)
-    d0 = tb.getcol("DATA")
-    tb.close()
+def sim_all(msname: str):
+    """
+    Apply, in one go:
+      1) reasonable tropospheric phase screen (settrop, screen mode)
+      2) reasonable thermal noise using ATM model (setnoise, tsys-atm) with the SAME PWV
+      3) multiplicative gain drift (fbm) applied ONLY to antennas 0-6 (first 7 ants)
 
-    tb = table()
-    tb.open(MS_IN)
-    d1 = tb.getcol("DATA")
-    tb.close()
+    Assumes you already have:
+      - SEED, GAINCAL_FIELD, GAIN_RMS_AMP (or we set a local one)
+      - fix_gain_table(...)
+      - set_multiplicative_gains_to_1_for_all_except_some_antennas(...)
+    """
+    print(f"[INFO] sim_all: applying trop + tsys-atm noise + partial gain drift to {msname}")
 
-    print("||DATA(before) - DATA(after)|| =", np.linalg.norm(d0 - d1))
+    # ----------------------------
+    # 1) Choose "reasonable" values
+    # ----------------------------
+    # Moderate-ish PWV (mm). 0.5–2 is good/typical-ish, 3–5 is poorer weather.
+    PWV_MM = 100000
+
+    # Troposphere "screen" parameters (phase screen made from fluctuating PWV)
+    # deltapwv is the RMS fluctuation (mm). 0.05–0.3 is a reasonable range.
+    DELTAPWV_MM = 1.0
+    BETA = 1.9
+    WINDSPEED_MPS = 10000.0
+
+    # Gain drift strength (dimensionless). Keep modest so it looks "real" not insane.
+    GAIN_DRIFT_AMP = 1.0
+
+    # Only these antennas get gain drift
+    KEEP_ANTS = [0, 1, 2, 3, 4, 5, 6]
+
+    # ----------------------------
+    # 2) Build a gain corruption table (fbm), then sanitize, then keep only ants 0-6
+    # ----------------------------
+    gtab_raw = msname + ".Gcorrupt"
+    rmtables(gtab_raw)
+
+    sm = simulator()
+    sm.openfromms(msname)
+    sm.setseed(SEED)
+
+    # Generate the table (do NOT corrupt yet — we will apply via setapply after editing)
+    sm.setgain(mode="fbm", table=gtab_raw, amplitude=GAIN_DRIFT_AMP, interval="10m")
+    sm.done()
+
+    print(f"[INFO] sim_all: raw gain table: {gtab_raw}")
+
+    # Fix spikes/outliers (your existing robust clipper)
+    gtab_fixed = fix_gain_table(gtab_raw, zmax=10.0, fix_last_spike=True)
+
+    # Neutralize all antennas except KEEP_ANTS (your helper)
+    gtab_partial = set_multiplicative_gains_to_1_for_all_except_some_antennas(
+        gtab_in=gtab_fixed,
+        msname=msname,
+        keep_ants=KEEP_ANTS,
+        gtab_out=None,
+    )
+
+    # ----------------------------
+    # 3) Apply: (trop + noise + partial gain drift) then corrupt MS once
+    # ----------------------------
+    sm = simulator()
+    sm.openfromms(msname)
+    sm.reset()
+    sm.setseed(SEED)
+
+    # --- Troposphere (phase screen) ---
+    # Keyword names can vary slightly by CASA version; this is the standard form.
+    # If your CASA complains about any keyword, drop it and retry (pwv/deltapwv are the big ones).
+    sm.settrop(
+        mode="individual",
+        pwv=PWV_MM,
+        deltapwv=DELTAPWV_MM,
+        beta=BETA,
+        windspeed=WINDSPEED_MPS,
+    )
+
+    # --- Thermal noise (ATM) with SAME PWV ---
+    sm.setnoise(mode="simplenoise", simplenoise="10.0Jy")
+
+    # --- Apply the partial gain table multiplicatively ---
+    sm.setapply(
+        table=gtab_partial,
+        type="G",
+        field=GAINCAL_FIELD,
+        interp="linear",
+        calwt=False,
+    )
+
+    print("[INFO] sim_all: calling corrupt() ...")
+    sm.corrupt()
+    sm.done()
+    print("[INFO] sim_all: done.")
+
+    return {
+        "gtab_raw": gtab_raw,
+        "gtab_fixed": gtab_fixed,
+        "gtab_partial": gtab_partial,
+        "pwv_mm": PWV_MM,
+        "deltapwv_mm": DELTAPWV_MM,
+        "gain_drift_amp": GAIN_DRIFT_AMP,
+        "keep_ants": KEEP_ANTS,
+    }
 
 
+# SETUP
 print(f"MS_IN hash: {hash_casa_table_cols(MS_IN, cols=["DATA"])}")
 copy_ms(MS_IN, MS_OUT)
 print(f"MS_OUT hash:  {hash_casa_table_cols(MS_OUT, cols=["DATA"])}")
+col_diff(MS_IN, MS_OUT)
 
-make_dirty(MS_IN, IMG_BEFORE)
-make_clean(MS_IN,  IMG_BEFORE_C)
-
+# CORRUPTION
 # Add corruption
 # gtab = sim_gain_corrupt(MS_OUT)
-gtab = sim_gain_corrupt_clip_extreme(MS_OUT)
+# gtab = sim_gain_corrupt_clip_extreme(MS_OUT)
 # gtab = sim_gain_corrupt_clip_extreme_single_antenna(MS_OUT, keep_ant=3)
 # gtab = sim_gain_corrupt_random(MS_OUT)
+# sim_info = sim_all(MS_OUT) 
+# gtab = sim_info['gtab_partial']
 
-print(f"GTAB hash:  {hash_casa_table_cols(gtab, cols=["TIME", "ANTENNA1", "CPARAM"])}")
 
-plot_gain_per_antenna(gtab, spw="0")
+gtab = sim_gain_corrupt_clip_extreme_n_antennas(
+    MS_OUT,
+    keep_ants=[0,1,2,3,4,5],
+)
 
-make_dirty(MS_OUT, IMG_AFTER)
-make_clean(MS_OUT, IMG_AFTER_C)
+# PLOTS
+
+IMG_BEFORE_C = "img_gaincal_before_clean"
+IMG_AFTER_C  = "img_gaincal_after_clean"
+
+IMG_BEFORE = "img_gaincal_before"
+IMG_AFTER  = "img_gaincal_after"
+
+IMG_DIFF   = "img_gaincal_diff"
+IMG_DIFF_C = "img_gaincal_diff_clean"
+
+IMG_FRAC_RES = "img_gaincal_after_fracres"
+
+# plot_gain_per_antenna(gtab, spw="0")
+make_dirty(MS_IN, IMG_BEFORE, TCLEAN_KW)
+make_clean(MS_IN,  IMG_BEFORE_C, TCLEAN_KW)
+
+make_dirty(MS_OUT, IMG_AFTER, TCLEAN_KW)
+make_clean(MS_OUT, IMG_AFTER_C, TCLEAN_KW)
 
 make_diff(IMG_BEFORE_C, IMG_AFTER_C, IMG_DIFF_C)
 make_diff(IMG_BEFORE, IMG_AFTER, IMG_DIFF)
 
-IMG_FRAC_RES = "img_gaincal_after_fracres"
-
-# Fractional residuals: what fraction of the true source brightness
-# is unexplained
 make_frac_residuals(
     residual_im=IMG_AFTER_C,
     reference_im=IMG_BEFORE_C,
     out_im=IMG_FRAC_RES,
 )
 
-
-IMG_BEFORE_C = "img_gaincal_before_clean"
-IMG_AFTER_C  = "time_restricted_corrupted"
-make_frac_residuals(
-    residual_im=IMG_AFTER_C,
-    reference_im=IMG_BEFORE_C,
-    out_im="img_gaincal_after_fracres_restricted",
-)
+casa_image_to_png(f"{IMG_FRAC_RES}.image", f"images/{IMG_FRAC_RES}.png")
 
 # rms_frac = img_rms(f"{IMG_FRAC_RES}.image")
 # print(f"[CHECK] Fractional RMS residual = {rms_frac:.6g}")
@@ -691,4 +744,3 @@ print(f"  - {IMG_BEFORE}.image")
 print(f"  - {IMG_AFTER}.image")
 print(f"  - {IMG_DIFF}.image")
 print(f"  - {IMG_FRAC_RES}.image")
-
