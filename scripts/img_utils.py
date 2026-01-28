@@ -1,6 +1,6 @@
 import os
 import numpy as np
-from casatasks import immath, rmtables, tclean
+from casatasks import immath, rmtables, tclean, exportfits
 from casatools import simulator, image
 import matplotlib.pyplot as plt
 from casatools import image as ia_tool

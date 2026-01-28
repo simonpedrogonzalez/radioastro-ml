@@ -1,6 +1,43 @@
 # radioastro-ml
 ML for Radoastronomy calibration debugging
 
+# Week 3: Jan 28
+
+- Some code cleaning
+- Fractional residual comparison stats and images (before-after pair same scale with RMS stats) code
+- Before-after plots for visibilitites code
+- Answer from CASA: confirm the bugs.
+- Working on getting a "realistic" corruption. What "realistic" corruption could mean: it's realistic (according to the usual calibration model) if I can recover from it: calibrated -> corrupted -> calibrate -> recovered.
+1. Is this reasonable?
+2. Some recovery is done but I have to think more about how I am calibrating back
+
+
+| ![](images/recovery/before_after_amp_phase_2x2.png) | 
+|:--:|
+| Before (top) after (bottom) amplitude (left) phase (right) visibilities. |
+
+
+| ![](images/recovery/fracres_base_corrupted.png) | 
+|:--:|
+| Base->corrupted. |
+
+| ![](images/recovery/fracres_corrupted_recovered.png) | 
+|:--:|
+| corrupted->recovered. |
+
+| ![](images/recovery/fracres_base_recovered.png) | 
+|:--:|
+| base->recovered. |
+
+| ![](images/recovery/J1822_gtab_corrupt_vs_recovered_2x2.png) | 
+|:--:|
+| Corruption and calibration gaincurves (amp, phase). |
+
+- Current direction:
+1. get some calibrated observations, add random noise with setnoise and gaindrift (2 labels)
+2. try to maintain the same RMS fractional residual values with respect the base in the 2 cases (so the model doesn't rely on absolute value to classify). Or make the same amount of images with the same frac res RMS.
+3. Use a model to label them.
+
 # Week 2: Jan 19
 
 ## Summary
