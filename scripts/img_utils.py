@@ -16,7 +16,7 @@ def image_to_numpy(imname: str) -> np.ndarray:
 
 def rm_im_products(imbase: str):
     for suf in [".image", ".model", ".psf", ".residual", ".sumwt", ".pb", ".weight", ".mask"]:
-        print("[INFO] Removing " + imbase + suf)
+        # print("[INFO] Removing " + imbase + suf)
         rmtables(imbase + suf)
         if os.path.exists(imbase + suf):
             raise RuntimeError(
@@ -164,3 +164,224 @@ def casa_image_to_png(
     plt.tight_layout()
     plt.savefig(out_png, dpi=dpi)
     plt.close()
+
+def crop_center(img2d: np.ndarray, half_size: int = 64) -> np.ndarray:
+    ny, nx = img2d.shape
+    cy, cx = ny // 2, nx // 2
+    y0, y1 = max(0, cy - half_size), min(ny, cy + half_size)
+    x0, x1 = max(0, cx - half_size), min(nx, cx + half_size)
+    return img2d[y0:y1, x0:x1]
+
+def fracres_metrics(frac_image_path: str, crop_half: int | None = 64) -> dict:
+    arr = image_to_numpy(frac_image_path)
+    arr = np.squeeze(arr)
+
+    if arr.ndim == 4:
+        arr = arr[:, :, 0, 0]
+    elif arr.ndim == 3:
+        arr = arr[:, :, 0]
+    img = arr.T
+
+    if crop_half is not None:
+        img = crop_center(img, half_size=crop_half)
+
+    x = img[np.isfinite(img)]
+    ax = np.abs(x)
+
+    out = {}
+    out["rms"] = float(np.sqrt(np.mean(x**2)))
+    out["p99_abs"] = float(np.percentile(ax, 99))
+    for thr in [0.005, 0.01, 0.02]:
+        out[f"frac_abs_gt_{thr}"] = float(np.mean(ax > thr))
+    return out
+
+def compare_fracres(before_img: str, after_img: str, crop_half: int | None = 64) -> dict:
+    b = fracres_metrics(before_img, crop_half=crop_half)
+    a = fracres_metrics(after_img, crop_half=crop_half)
+
+    ratios = {}
+    for k in b.keys():
+        denom = b[k]
+        ratios[k] = float(a[k] / denom) if denom not in (0.0, np.nan) and np.isfinite(denom) else float("inf")
+
+    return {"before": b, "after": a, "ratio_after_over_before": ratios}
+
+
+from matplotlib.patches import Rectangle
+from astropy.wcs import WCS
+from astropy.wcs import FITSFixedWarning
+import warnings
+
+
+def _robust_sigma(x: np.ndarray) -> float:
+    x = x[np.isfinite(x)]
+    if x.size == 0:
+        return float("nan")
+    med = np.median(x)
+    mad = np.median(np.abs(x - med))
+    return float(1.4826 * mad)
+
+
+def _load_casa_image_as_2d_with_wcs(imname: str, chan: int = 0, stokes: int = 0, fitsname: str | None = None):
+    """
+    Export CASA image to FITS, load (img2d, wcs2d, fitsname).
+    img2d is a 2D numpy array in FITS pixel order (y, x).
+    """
+    if fitsname is None:
+        fitsname = imname.rstrip("/").replace(".image", "") + ".tmp_export.fits"
+
+    exportfits(
+        imagename=imname,
+        fitsimage=fitsname,
+        overwrite=True,
+        dropstokes=False,
+        dropdeg=True,
+    )
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", FITSFixedWarning)
+        with fits.open(fitsname) as hdul:
+            data = np.squeeze(hdul[0].data)
+            wcs = WCS(hdul[0].header)
+
+    # Typical FITS order from CASA export: (stokes, chan, y, x)
+    if data.ndim == 4:
+        img2d = data[stokes, chan, :, :]
+        wcs2d = wcs.celestial
+    elif data.ndim == 3:
+        img2d = data[chan, :, :]
+        wcs2d = wcs.celestial
+    elif data.ndim == 2:
+        img2d = data
+        wcs2d = wcs.celestial
+    else:
+        raise RuntimeError(f"Unexpected FITS data ndim={data.ndim} for {imname}")
+
+    return img2d, wcs2d, fitsname
+
+
+def _center_crop_slices(ny: int, nx: int, half_size: int):
+    cy, cx = ny // 2, nx // 2
+    y0, y1 = max(0, cy - half_size), min(ny, cy + half_size)
+    x0, x1 = max(0, cx - half_size), min(nx, cx + half_size)
+    return slice(y0, y1), slice(x0, x1)
+
+
+def fracres_before_after_png(
+    before_im: str,
+    after_im: str,
+    out_png: str,
+    *,
+    chan: int = 0,
+    stokes: int = 0,
+    crop_half: int = 64,
+    robust_pct: float = 99.5,
+    symmetric: bool = True,
+    cmap: str = "inferno",
+    dpi: int = 180,
+    keep_fits: bool = False,
+    thresholds: tuple[float, ...] = (0.005, 0.01, 0.02),
+):
+   # load
+    before2d, wcs2d_b, fits_b = _load_casa_image_as_2d_with_wcs(before_im, chan=chan, stokes=stokes)
+    after2d,  wcs2d_a, fits_a = _load_casa_image_as_2d_with_wcs(after_im,  chan=chan, stokes=stokes)
+
+    if before2d.shape != after2d.shape:
+        raise RuntimeError(f"Shape mismatch: before {before2d.shape} vs after {after2d.shape}")
+
+    ny, nx = before2d.shape
+    ys, xs = _center_crop_slices(ny, nx, half_size=crop_half)
+    b_crop = before2d[ys, xs]
+    a_crop = after2d[ys, xs]
+
+    print(f"[ROI] y: {ys.start}:{ys.stop}  x: {xs.start}:{xs.stop}")
+    print(f"[ROI] shape: {(ys.stop-ys.start, xs.stop-xs.start)}  (expected {(2*crop_half, 2*crop_half)})")
+    print(f"[IMG] full shape (ny,nx): {before2d.shape}")
+
+    def _metrics(x: np.ndarray) -> dict:
+        x = x[np.isfinite(x)]
+        ax = np.abs(x)
+        out = {}
+        out["rms"] = float(np.sqrt(np.mean(x**2))) if x.size else float("nan")
+        out["p99_abs"] = float(np.percentile(ax, 99)) if x.size else float("nan")
+        for thr in thresholds:
+            out[f"area>|{thr}|"] = float(np.mean(ax > thr)) if x.size else float("nan")
+        return out
+
+    b_m = _metrics(b_crop)
+    a_m = _metrics(a_crop)
+
+    def _ratio(a: float, b: float) -> float:
+        if not np.isfinite(a) or not np.isfinite(b):
+            return float("nan")
+        if b == 0.0:
+            return float("inf") if a > 0 else 1.0
+        return float(a / b)
+
+    r_m = {k: _ratio(a_m[k], b_m[k]) for k in b_m.keys()}
+
+    # shared scale across both images
+    finite_all = np.isfinite(before2d) & np.isfinite(after2d)
+    if not np.any(finite_all):
+        raise RuntimeError("No finite pixels in either image.")
+
+    vals_all = np.concatenate([before2d[finite_all], after2d[finite_all]])
+    if symmetric:
+        vmax = float(np.percentile(np.abs(vals_all), robust_pct))
+        vmin = -vmax
+    else:
+        vmin, vmax = np.percentile(vals_all, [100 - robust_pct, robust_pct])
+        vmin, vmax = float(vmin), float(vmax)
+
+    # ROI rectangle (pixel coords)
+    y0, x0 = ys.start, xs.start
+    h, w = (ys.stop - ys.start), (xs.stop - xs.start)
+
+    # ----- Stable layout: 2 image axes + 1 colorbar axis + 1 stats axis -----
+    fig = plt.figure(figsize=(12.5, 6.2), constrained_layout=True)
+    gs = fig.add_gridspec(
+        nrows=2, ncols=3,
+        height_ratios=[1.0, 0.28],
+        width_ratios=[1.0, 1.0, 0.05],
+    )
+
+    ax1 = fig.add_subplot(gs[0, 0], projection=wcs2d_b)
+    ax2 = fig.add_subplot(gs[0, 1], projection=wcs2d_a)
+    cax = fig.add_subplot(gs[0, 2])      # dedicated colorbar axis
+    tax = fig.add_subplot(gs[1, :])      # dedicated text axis
+    tax.axis("off")
+
+    im1 = ax1.imshow(before2d, origin="lower", vmin=vmin, vmax=vmax, cmap=cmap)
+    im2 = ax2.imshow(after2d,  origin="lower", vmin=vmin, vmax=vmax, cmap=cmap)
+
+    for ax, title in [(ax1, "Before (frac-res)"), (ax2, "After (frac-res)")]:
+        ax.add_patch(Rectangle((x0, y0), w, h, fill=False, edgecolor="white", linewidth=1.5))
+        ax.set_title(title)
+        ax.set_xlabel("RA")
+        ax.set_ylabel("Dec")
+
+    cb = fig.colorbar(im2, cax=cax)
+    cb.set_label("fraction of peak")
+
+    # Stats text (simple, one block)
+    lines = []
+    lines.append(f"ROI: center crop ±{crop_half}px ({w}×{h} px)")
+    lines.append("Metric            before     after    ratio")
+    lines.append(f"RMS             {b_m['rms']:.3g}   {a_m['rms']:.3g}   {r_m['rms']:.2f}×")
+    lines.append(f"p99 |x|         {b_m['p99_abs']:.3g}   {a_m['p99_abs']:.3g}   {r_m['p99_abs']:.2f}×")
+    for thr in thresholds:
+        k = f"area>|{thr}|"
+        lines.append(f"|x|>{thr:<6}     {100*b_m[k]:5.2f}%   {100*a_m[k]:5.2f}%   {r_m[k]:.2f}×")
+
+    tax.text(0.01, 0.95, "\n".join(lines), ha="left", va="top",
+             family="monospace", fontsize=10)
+
+    fig.savefig(out_png, dpi=dpi)
+    plt.close(fig)
+
+    if not keep_fits:
+        for f in [fits_b, fits_a]:
+            try:
+                os.remove(f)
+            except OSError:
+                pass

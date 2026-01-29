@@ -8,7 +8,7 @@ ML for Radoastronomy calibration debugging
 - Before-after plots for visibilitites code
 - Answer from CASA: confirm the bugs.
 - Working on getting a "realistic" corruption. What "realistic" corruption could mean: it's realistic (according to the usual calibration model) if I can recover from it: calibrated -> corrupted -> calibrate -> recovered.
-1. Is this reasonable?
+1. Is this reasonable? Kind of, as a starting point.
 2. Some recovery is done but I have to think more about how I am calibrating back
 
 

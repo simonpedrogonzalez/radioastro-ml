@@ -6,14 +6,14 @@
 import os; os.environ.setdefault("DISPLAY", ":0")
 # MY HELPERS
 import importlib
-import io_utils, img_utils
+from scripts import io_utils, img_utils
 for lib in [io_utils, img_utils]:
     importlib.reload(lib)
-from img_utils import make_frac_residuals, casa_image_to_png, make_clean, make_dirty, make_diff, img_rms
-from io_utils import copy_ms, hash_casa_table_cols, col_diff
+from .img_utils import make_frac_residuals, casa_image_to_png, make_clean, make_dirty, make_diff, img_rms, fracres_before_after_png
+from .io_utils import copy_ms, hash_casa_table_cols, col_diff
 
 import numpy as np
-from casatasks import tclean, rmtables, immath
+from casatasks import tclean, rmtables, immath, gaincal, ft
 from casaplotms import plotms
 import hashlib
 from casatasks import flagdata, visstat, applycal
@@ -503,7 +503,7 @@ def set_multiplicative_gains_to_1_for_all_except_some_antennas(
     return gtab_out
 
 
-def sim_gain_corrupt_clip_extreme_n_antennas(msname: str, keep_ants: list[int]):
+def sim_gain_corrupt_clip_extreme_n_antennas(msname: str, keep_ants: list[int], amp=None):
     """
     Generate FBM gain table, fix outliers, then keep corruption only for keep_ants
     (provided via keep_ants); neutralize all others to unity; apply to MS.
@@ -518,7 +518,11 @@ def sim_gain_corrupt_clip_extreme_n_antennas(msname: str, keep_ants: list[int]):
 
     gtab = msname + ".Gcorrupt"
     rmtables(gtab)
-    sm.setgain(mode="fbm", table=gtab, amplitude=GAIN_RMS_AMP)
+
+    if amp is None:
+        amp = GAIN_RMS_AMP
+
+    sm.setgain(mode="fbm", table=gtab, amplitude=amp)
     sm.done()
 
     print(f"[INFO] Raw gain table: {gtab}")
@@ -542,6 +546,79 @@ def sim_gain_corrupt_clip_extreme_n_antennas(msname: str, keep_ants: list[int]):
 
     return gtab_fixed
 
+def plot_gtab_corrupt_vs_recovered_all_ants_2x2(
+    corr_gtab: str,
+    cal_gtab: str,
+    spw: str = "0",
+    out_png: str = "images/gtab_corrupt_vs_recovered_2x2.png",
+    overwrite: bool = True,
+    cleanup_tmp: bool = True,
+):
+    """
+    2x2 grid:
+      [ corrupt: gainamp  | corrupt: gainphase ]
+      [ recov : gainamp   | recov : gainphase  ]
+
+    All antennas shown, colored by antenna (ANTENNA1).
+    """
+    os.makedirs(os.path.dirname(out_png) or ".", exist_ok=True)
+    os.makedirs("images", exist_ok=True)
+
+    def p(vis: str, yaxis: str, plotfile: str):
+        plotms(
+            vis=vis,
+            spw=spw,
+            xaxis="time",
+            yaxis=yaxis,            # "gainamp" or "gainphase"
+            coloraxis="antenna1",   # color by antenna id (gtables are per-antenna)
+            showgui=False,
+            plotfile=plotfile,
+            overwrite=overwrite,
+            showlegend=True,
+        )
+
+    # 1) Generate the four plots
+    tmp = {
+        "c_amp":   "images/_tmp_gtab_corrupt_gainamp.png",
+        "c_phase": "images/_tmp_gtab_corrupt_gainphase.png",
+        "r_amp":   "images/_tmp_gtab_recovered_gainamp.png",
+        "r_phase": "images/_tmp_gtab_recovered_gainphase.png",
+    }
+
+    p(corr_gtab, "gainamp",   tmp["c_amp"])
+    p(corr_gtab, "gainphase", tmp["c_phase"])
+    p(cal_gtab,  "gainamp",   tmp["r_amp"])
+    p(cal_gtab,  "gainphase", tmp["r_phase"])
+
+    # 2) Stitch into a 2x2 grid
+    imgs = [
+        Image.open(tmp["c_amp"]).convert("RGB"),
+        Image.open(tmp["c_phase"]).convert("RGB"),
+        Image.open(tmp["r_amp"]).convert("RGB"),
+        Image.open(tmp["r_phase"]).convert("RGB"),
+    ]
+
+    # Use smallest tile size to avoid upscaling
+    w = min(im.size[0] for im in imgs)
+    h = min(im.size[1] for im in imgs)
+    imgs = [im.resize((w, h), resample=Image.Resampling.LANCZOS) for im in imgs]
+
+    canvas = Image.new("RGB", (2 * w, 2 * h), (255, 255, 255))
+    canvas.paste(imgs[0], (0,   0))
+    canvas.paste(imgs[1], (w,   0))
+    canvas.paste(imgs[2], (0,   h))
+    canvas.paste(imgs[3], (w,   h))
+    canvas.save(out_png)
+
+    if cleanup_tmp:
+        for path in tmp.values():
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
+    print(f"[INFO] Wrote 2x2 gain-table comparison: {out_png}")
+    return out_png
 
 def plot_before_after_vis_time(ms_before: str, ms_after: str, field: str, spw: str):
     """
@@ -678,69 +755,320 @@ def sim_all(msname: str):
         "keep_ants": KEEP_ANTS,
     }
 
+from PIL import Image
+import os
 
-# SETUP
-print(f"MS_IN hash: {hash_casa_table_cols(MS_IN, cols=["DATA"])}")
-copy_ms(MS_IN, MS_OUT)
-print(f"MS_OUT hash:  {hash_casa_table_cols(MS_OUT, cols=["DATA"])}")
-col_diff(MS_IN, MS_OUT)
+def plot_before_after_vis_time_2x2(
+    ms_before: str,
+    ms_after: str,
+    field: str,
+    spw: str,
+    out_png: str = "images/before_after_amp_phase_2x2.png",
+    correlation: str = "RR",
+):
+    """
+    Make a single 2x2 PNG:
+      [ BEFORE amp   | BEFORE phase ]
+      [ AFTER  amp   | AFTER  phase ]
+    """
+    os.makedirs(os.path.dirname(out_png) or ".", exist_ok=True)
 
-# CORRUPTION
-# Add corruption
-# gtab = sim_gain_corrupt(MS_OUT)
-# gtab = sim_gain_corrupt_clip_extreme(MS_OUT)
-# gtab = sim_gain_corrupt_clip_extreme_single_antenna(MS_OUT, keep_ant=3)
-# gtab = sim_gain_corrupt_random(MS_OUT)
-# sim_info = sim_all(MS_OUT) 
-# gtab = sim_info['gtab_partial']
+    def _plot(vis: str, yaxis: str, plotfile: str):
+        plotms(
+            vis=vis,
+            field=field,
+            spw=spw,
+            xaxis="time",
+            yaxis=yaxis,          # "amp" or "phase"
+            avgchannel="9999",    # average over channels
+            avgscan=False,
+            coloraxis="baseline",
+            showgui=False,
+            plotfile=plotfile,
+            overwrite=True,
+            showlegend=True,
+            correlation=correlation,
+        )
+
+    # 1) Make the four individual plots (temporary)
+    tmp_before_amp   = "images/_tmp_before_amp_vs_time.png"
+    tmp_before_phase = "images/_tmp_before_phase_vs_time.png"
+    tmp_after_amp    = "images/_tmp_after_amp_vs_time.png"
+    tmp_after_phase  = "images/_tmp_after_phase_vs_time.png"
+
+    _plot(ms_before, "amp",   tmp_before_amp)
+    _plot(ms_before, "phase", tmp_before_phase)
+    _plot(ms_after,  "amp",   tmp_after_amp)
+    _plot(ms_after,  "phase", tmp_after_phase)
+
+    # 2) Stitch into a 2x2 grid
+    imgs = [
+        Image.open(tmp_before_amp).convert("RGB"),
+        Image.open(tmp_before_phase).convert("RGB"),
+        Image.open(tmp_after_amp).convert("RGB"),
+        Image.open(tmp_after_phase).convert("RGB"),
+    ]
+
+    # Make all tiles the same size (use the smallest to avoid upscaling)
+    w = min(im.size[0] for im in imgs)
+    h = min(im.size[1] for im in imgs)
+    imgs = [im.resize((w, h), resample=Image.Resampling.LANCZOS) for im in imgs]
+
+    canvas = Image.new("RGB", (2 * w, 2 * h), (255, 255, 255))
+    canvas.paste(imgs[0], (0,   0))
+    canvas.paste(imgs[1], (w,   0))
+    canvas.paste(imgs[2], (0,   h))
+    canvas.paste(imgs[3], (w,   h))
+
+    canvas.save(out_png)
+
+    # Optional cleanup of temporaries
+    for p in [tmp_before_amp, tmp_before_phase, tmp_after_amp, tmp_after_phase]:
+        try:
+            os.remove(p)
+        except OSError:
+            pass
+
+    print(f"[INFO] Wrote 2x2 plotms grid: {out_png}")
+    return out_png
 
 
-gtab = sim_gain_corrupt_clip_extreme_n_antennas(
-    MS_OUT,
-    keep_ants=[0,1,2,3,4,5],
-)
 
-# PLOTS
 
-IMG_BEFORE_C = "img_gaincal_before_clean"
-IMG_AFTER_C  = "img_gaincal_after_clean"
+def main():
+    # SETUP
+    print(f"MS_IN hash: {hash_casa_table_cols(MS_IN, cols=["DATA"])}")
+    copy_ms(MS_IN, MS_OUT)
+    print(f"MS_OUT hash:  {hash_casa_table_cols(MS_OUT, cols=["DATA"])}")
+    col_diff(MS_IN, MS_OUT)
 
-IMG_BEFORE = "img_gaincal_before"
-IMG_AFTER  = "img_gaincal_after"
+    # CORRUPTION
+    # Add corruption
+    # gtab = sim_gain_corrupt(MS_OUT)
+    # gtab = sim_gain_corrupt_clip_extreme(MS_OUT)
+    # gtab = sim_gain_corrupt_clip_extreme_single_antenna(MS_OUT, keep_ant=3)
+    # gtab = sim_gain_corrupt_random(MS_OUT)
+    # sim_info = sim_all(MS_OUT) 
+    # gtab = sim_info['gtab_partial']
 
-IMG_DIFF   = "img_gaincal_diff"
-IMG_DIFF_C = "img_gaincal_diff_clean"
 
-IMG_FRAC_RES = "img_gaincal_after_fracres"
+    gtab = sim_gain_corrupt_clip_extreme_n_antennas(
+        MS_OUT,
+        keep_ants=[0,1,2,3,4,5],
+    )
 
-# plot_gain_per_antenna(gtab, spw="0")
-make_dirty(MS_IN, IMG_BEFORE, TCLEAN_KW)
-make_clean(MS_IN,  IMG_BEFORE_C, TCLEAN_KW)
+    # PLOTS
 
-make_dirty(MS_OUT, IMG_AFTER, TCLEAN_KW)
-make_clean(MS_OUT, IMG_AFTER_C, TCLEAN_KW)
+    IMG_BEFORE_C = "img_gaincal_before_clean"
+    IMG_AFTER_C  = "img_gaincal_after_clean"
 
-make_diff(IMG_BEFORE_C, IMG_AFTER_C, IMG_DIFF_C)
-make_diff(IMG_BEFORE, IMG_AFTER, IMG_DIFF)
+    IMG_BEFORE = "img_gaincal_before"
+    IMG_AFTER  = "img_gaincal_after"
 
-make_frac_residuals(
-    residual_im=IMG_AFTER_C,
-    reference_im=IMG_BEFORE_C,
-    out_im=IMG_FRAC_RES,
-)
+    IMG_DIFF   = "img_gaincal_diff"
+    IMG_DIFF_C = "img_gaincal_diff_clean"
 
-casa_image_to_png(f"{IMG_FRAC_RES}.image", f"images/{IMG_FRAC_RES}.png")
+    IMG_FRAC_RES = "img_gaincal_after_fracres"
+    IMG_FRAC_RES_BEFORE = "img_gaincal_before_fracres"
 
-# rms_frac = img_rms(f"{IMG_FRAC_RES}.image")
-# print(f"[CHECK] Fractional RMS residual = {rms_frac:.6g}")
+    # plot_gain_per_antenna(gtab, spw="0")
+    make_dirty(MS_IN, IMG_BEFORE, TCLEAN_KW)
+    make_clean(MS_IN,  IMG_BEFORE_C, TCLEAN_KW)
 
-plot_before_after_vis_time(MS_IN, MS_OUT, GAINCAL_FIELD, SPW)
-check_was_applied()
-print(f"MS_OUT hash:  {hash_casa_table_cols(MS_OUT, cols=["DATA"])}")
+    make_dirty(MS_OUT, IMG_AFTER, TCLEAN_KW)
+    make_clean(MS_OUT, IMG_AFTER_C, TCLEAN_KW)
 
-print("[DONE] Outputs:")
-print(f"  - {MS_OUT}")
-print(f"  - {IMG_BEFORE}.image")
-print(f"  - {IMG_AFTER}.image")
-print(f"  - {IMG_DIFF}.image")
-print(f"  - {IMG_FRAC_RES}.image")
+    make_diff(IMG_BEFORE_C, IMG_AFTER_C, IMG_DIFF_C)
+    make_diff(IMG_BEFORE, IMG_AFTER, IMG_DIFF)
+
+    make_frac_residuals(
+        residual_im=IMG_AFTER_C,
+        reference_im=IMG_BEFORE_C,
+        out_im=IMG_FRAC_RES,
+    )
+
+    make_frac_residuals(
+        residual_im=IMG_BEFORE_C,
+        reference_im=IMG_BEFORE_C,
+        out_im=IMG_FRAC_RES_BEFORE,
+    )
+
+    fracres_before_after_png(
+        before_im=f"{IMG_FRAC_RES_BEFORE}.image",
+        after_im=f"{IMG_FRAC_RES}.image",
+        out_png="images/fracres_before_after.png",
+        crop_half=64,
+    )
+
+    # casa_image_to_png(f"{IMG_FRAC_RES}.image", f"images/{IMG_FRAC_RES}.png")
+
+    # rms_frac = img_rms(f"{IMG_FRAC_RES}.image")
+    # print(f"[CHECK] Fractional RMS residual = {rms_frac:.6g}")
+
+    plot_before_after_vis_time(MS_IN, MS_OUT, GAINCAL_FIELD, SPW)
+    col_diff(MS_IN, MS_OUT)
+    print(f"MS_OUT hash:  {hash_casa_table_cols(MS_OUT, cols=["DATA"])}")
+
+    print("[DONE] Outputs:")
+    print(f"  - {MS_OUT}")
+    print(f"  - {IMG_BEFORE}.image")
+    print(f"  - {IMG_AFTER}.image")
+    print(f"  - {IMG_DIFF}.image")
+    print(f"  - {IMG_FRAC_RES}.image")
+
+
+def main_recoverable_corruption():
+    
+    # SETUP
+    print(f"MS_IN hash: {hash_casa_table_cols(MS_IN, cols=['DATA'])}")
+    copy_ms(MS_IN, MS_OUT)
+    print(f"MS_OUT hash (pre-corrupt): {hash_casa_table_cols(MS_OUT, cols=['DATA'])}")
+    col_diff(MS_IN, MS_OUT)
+
+    # CORRUPT
+    gtab_injected = sim_gain_corrupt_clip_extreme_n_antennas(
+        MS_OUT,
+        keep_ants=[0, 1, 2, 3, 4, 5],
+        amp=0.05
+    )
+    print(f"[INFO] Injected corruption table: {gtab_injected}")
+
+    # Before / After visibilities
+    plot_before_after_vis_time_2x2(MS_IN, MS_OUT, GAINCAL_FIELD, SPW)
+
+    # RECOVER
+
+    gtab_solved = MS_OUT + f".recover"
+    rmtables(gtab_solved)
+
+    # NOTW:
+    # For "ap" solnorm=False
+    # if want to see the solver match the injected curve shape, I think
+
+    print(f"[INFO] Solving gains back into: {gtab_solved}")
+    # set some point source model
+
+    # from casatools import componentlist
+
+    # cl = componentlist()
+    # cl.addcomponent(
+    #     dir="J2000 00h00m00s 00d00m00s",  # phase center (will be overridden by ft field)
+    #     flux=1.0,                        # Jy
+    #     freq="1GHz",                     # dummy, CASA rescales per spw
+    #     shape="point"
+    # )
+    # cl.rename("J1822_point.cl")
+    # cl.close()
+
+    # ft(
+    #     vis=MS_OUT,
+    #     field="J1822-0938",
+    #     spw="0",
+    #     complist="J1822_point.cl",
+    #     usescratch=True
+    # )
+
+    # from casatasks import visstat
+    # st = visstat(
+    #     vis=MS_OUT,
+    #     field="J1822-0938",
+    #     spw="0",
+    #     datacolumn="model"
+    # )
+    # print(st)
+
+
+    gaincal(
+        vis=MS_OUT,
+        caltable=gtab_solved,
+        field=GAINCAL_FIELD,
+        spw=SPW,
+        refant="ea21",
+        gaintype="G",
+        calmode="ap",
+        solint="int", # scan
+        minsnr=5,
+        solnorm=True
+    )
+
+    plot_gtab_corrupt_vs_recovered_all_ants_2x2(
+        corr_gtab=gtab_injected,
+        cal_gtab=gtab_solved,
+        spw="0",
+        out_png="images/J1822_gtab_corrupt_vs_recovered_2x2.png",
+    )
+
+    MS_REC = MS_OUT + ".recovered_for_imaging.ms"
+    rmtables(MS_REC)
+    copy_ms(MS_OUT, MS_REC)
+    print("[INFO] Applying solved gains to undo corruption (-> CORRECTED_DATA)")
+    applycal(
+        vis=MS_REC,
+        field=GAINCAL_FIELD,
+        spw=SPW,
+        gaintable=[gtab_solved],
+        interp=["linear"],
+        calwt=False,
+    )
+    tb = table()
+    tb.open(MS_REC, nomodify=False)
+    data = tb.getcol("CORRECTED_DATA")
+    tb.putcol("DATA", data)
+    tb.close()
+    
+    IMG_BASE_C     = "img_base_clean"
+    IMG_CORR_C     = "img_corrupted_clean"
+    IMG_RECOV_C    = "img_recovered_clean"
+    
+    make_clean(MS_IN,  IMG_BASE_C,  TCLEAN_KW)
+    make_clean(MS_OUT, IMG_CORR_C,  TCLEAN_KW)
+    make_clean(MS_REC, IMG_RECOV_C, TCLEAN_KW)
+
+
+    IMG_FRAC_BASE = "img_base_fracres"
+    make_frac_residuals(
+        residual_im=IMG_BASE_C,
+        reference_im=IMG_BASE_C,
+        out_im=IMG_FRAC_BASE,
+    )
+
+    IMG_FRAC_CORR = "img_corrupted_fracres"
+    make_frac_residuals(
+        residual_im=IMG_CORR_C,
+        reference_im=IMG_BASE_C,
+        out_im=IMG_FRAC_CORR,
+    )
+
+    IMG_FRAC_REC = "img_recovered_fracres"
+    make_frac_residuals(
+        residual_im=IMG_RECOV_C,
+        reference_im=IMG_BASE_C,
+        out_im=IMG_FRAC_REC,
+    )
+
+    fracres_before_after_png(
+        before_im=f"{IMG_FRAC_BASE}.image",      # or baseline vs corrupted measure
+        after_im=f"{IMG_FRAC_REC}.image",
+        out_png="images/fracres_base_recovered.png",
+        crop_half=64,
+    )
+
+    fracres_before_after_png(
+        before_im=f"{IMG_FRAC_BASE}.image",      # or baseline vs corrupted measure
+        after_im=f"{IMG_FRAC_CORR}.image",
+        out_png="images/fracres_base_corrupted.png",
+        crop_half=64,
+    )
+
+    fracres_before_after_png(
+        before_im=f"{IMG_FRAC_CORR}.image",      # or baseline vs corrupted measure
+        after_im=f"{IMG_FRAC_REC}.image",
+        out_png="images/fracres_corrupted_recovered.png",
+        crop_half=64,
+    )
+
+    print("[DONE OptionA] Outputs:")
+    print(f"  - Corrupted MS: {MS_OUT}")
+    print(f"  - Injected gain table: {gtab_injected}")
+    print(f"  - Solved (recovered) gain table: {gtab_solved}")
+    print(f"  - Clean images: {IMG_BASE_C}.image, {IMG_CORR_C}.image, {IMG_RECOV_C}.image")
