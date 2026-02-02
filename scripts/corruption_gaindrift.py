@@ -19,6 +19,7 @@ import hashlib
 from casatasks import flagdata, visstat, applycal
 from casatools import simulator, table, image
 from casatools import msmetadata as msmdtool
+from PIL import Image
 
 #Settings
 MS_IN  = "data/J1822_spw0.calibrated.ms"
@@ -42,11 +43,6 @@ TCLEAN_KW = dict(
     interactive=False,
     savemodel="none",
 )
-
-def rm_im_products(imbase: str):
-    for suf in [".image", ".model", ".psf", ".residual", ".sumwt", ".pb", ".weight", ".mask"]:
-        rmtables(imbase + suf)
-
 
 def plot_gain_per_antenna(gtab, spw="0"):
     tb = table()
@@ -240,144 +236,169 @@ def fix_gain_table(
     print(f"[INFO] Replaced {n_fixed} outlier gain entries (z>{zmax})")
     return gtab_out
 
-def sim_gain_corrupt_clip_extreme(msname: str):
-    print(f"[INFO] Generating gain corruption table for {msname}")
+# def sim_gain_corrupt_clip_extreme(msname: str):
+#     print(f"[INFO] Generating gain corruption table for {msname}")
 
-    sm = simulator()
-    sm.openfromms(msname)
-    sm.setseed(SEED)
+#     sm = simulator()
+#     sm.openfromms(msname)
+#     sm.setseed(SEED)
 
-    gtab = msname + ".Gcorrupt"
-    rmtables(gtab) 
-    sm.setgain(mode="fbm", table=gtab, amplitude=GAIN_RMS_AMP)
+#     gtab = msname + ".Gcorrupt"
+#     rmtables(gtab) 
+#     sm.setgain(mode="fbm", table=gtab, amplitude=GAIN_RMS_AMP)
 
-    sm.done()
+#     sm.done()
 
-    # sm.corrupt()
-    # sm.done()
+#     # sm.corrupt()
+#     # sm.done()
 
-    print(f"[INFO] Raw gain table: {gtab}")
+#     print(f"[INFO] Raw gain table: {gtab}")
 
-    gtab_fixed = fix_gain_table(gtab, zmax=10.0, fix_last_spike=True)
+#     gtab_fixed = fix_gain_table(gtab, zmax=10.0, fix_last_spike=True)
 
-    print(f"[INFO] Applying fixed gain table to MS: {msname}")
+#     print(f"[INFO] Applying fixed gain table to MS: {msname}")
     
-    sm = simulator()
-    sm.openfromms(msname)
-    sm.setseed(SEED)
-    sm.setapply(table=gtab_fixed, type='G', field=GAINCAL_FIELD, interp='linear', calwt=False)
-    sm.corrupt()
-    sm.done()
+#     sm = simulator()
+#     sm.openfromms(msname)
+#     sm.setseed(SEED)
+#     sm.setapply(table=gtab_fixed, type='G', field=GAINCAL_FIELD, interp='linear', calwt=False)
+#     sm.corrupt()
+#     sm.done()
 
-    return gtab_fixed
+#     return gtab_fixed
 
 
-def set_multiplicative_gains_to_1_for_all_except_one_antenna(
-    gtab_out: str,
-    msname: str, # just to get antenna names
-    keep_ant: int
-):
+# def set_multiplicative_gains_to_1_for_all_except_one_antenna(
+#     gtab_out: str,
+#     msname: str, # just to get antenna names
+#     keep_ant: int
+# ):
 
-    if gtab_out is None:
-        gtab_out = f"{gtab_in}.keepAnt{keep_ant}"
+#     if gtab_out is None:
+#         gtab_out = f"{gtab_in}.keepAnt{keep_ant}"
 
+#     tb = table()
+#     tb.open(gtab_out, nomodify=False)
+#     try:
+#         colnames = tb.colnames()
+
+#         # Identify antenna column name
+#         if "ANTENNA1" in colnames:
+#             ant1 = tb.getcol("ANTENNA1")
+#         elif "ANTENNA" in colnames:
+#             ant1 = tb.getcol("ANTENNA")
+#         else:
+#             raise RuntimeError(f"Could not find ANTENNA1/ANTENNA in {gtab_out}. Columns: {colnames}")
+
+#         # Neutralize all rows except for the ones with this antenna involved
+#         rows = np.where(ant1 != keep_ant)[0]
+#         if rows.size == 0:
+#             print(f"[INFO] keep_only_one_antenna_in_gtab: nothing to change (only antenna {keep_ant} present?)")
+#             return gtab_out
+
+#         # Overwrite CPARAM (complex gains) if present
+#         if "CPARAM" in colnames:
+#             cparam = tb.getcol("CPARAM")  # (npol, nchan, nrow)
+#             cparam[:, :, rows] = 1.0 + 0.0j
+#             tb.putcol("CPARAM", cparam)
+#         else:
+#             # Some tables may use FPARAM (rare for gain tables); handle just in case.
+#             if "FPARAM" in colnames:
+#                 print("[WARNING] FPARAM present when setting antenna gains to 1+0i")
+#                 fparam = tb.getcol("FPARAM")
+#                 # Best-effort: set to 1 in the same row positions
+#                 # (shape can vary depending on table type)
+#                 if fparam.ndim == 3:
+#                     fparam[:, :, rows] = 1.0
+#                 elif fparam.ndim == 2:
+#                     fparam[:, rows] = 1.0
+#                 else:
+#                     raise RuntimeError(f"Unexpected FPARAM shape {fparam.shape} in {gtab_out}")
+#                 tb.putcol("FPARAM", fparam)
+#             else:
+#                 raise RuntimeError(f"No CPARAM/FPARAM in {gtab_out}. Columns: {colnames}")
+
+#         tb.flush()
+#     finally:
+#         tb.close()
+
+#     print(f"[INFO] Wrote single-antenna corruption table: {gtab_out} (kept ant id {keep_ant})")
+#     return gtab_out
+
+
+
+def set_amp_to_1(gtab: str):
+    """
+    In-place: set CPARAM := exp(1j*angle(CPARAM)) for all rows/corr/chan.
+    Keeps flags as-is.
+    """
     tb = table()
-    tb.open(gtab_out, nomodify=False)
+    tb.open(gtab, nomodify=False)
     try:
-        colnames = tb.colnames()
+        if "CPARAM" not in tb.colnames():
+            raise RuntimeError(f"{gtab} has no CPARAM column")
 
-        # Identify antenna column name
-        if "ANTENNA1" in colnames:
-            ant1 = tb.getcol("ANTENNA1")
-        elif "ANTENNA" in colnames:
-            ant1 = tb.getcol("ANTENNA")
-        else:
-            raise RuntimeError(f"Could not find ANTENNA1/ANTENNA in {gtab_out}. Columns: {colnames}")
-
-        # Neutralize all rows except for the ones with this antenna involved
-        rows = np.where(ant1 != keep_ant)[0]
-        if rows.size == 0:
-            print(f"[INFO] keep_only_one_antenna_in_gtab: nothing to change (only antenna {keep_ant} present?)")
-            return gtab_out
-
-        # Overwrite CPARAM (complex gains) if present
-        if "CPARAM" in colnames:
-            cparam = tb.getcol("CPARAM")  # (npol, nchan, nrow)
-            cparam[:, :, rows] = 1.0 + 0.0j
-            tb.putcol("CPARAM", cparam)
-        else:
-            # Some tables may use FPARAM (rare for gain tables); handle just in case.
-            if "FPARAM" in colnames:
-                print("[WARNING] FPARAM present when setting antenna gains to 1+0i")
-                fparam = tb.getcol("FPARAM")
-                # Best-effort: set to 1 in the same row positions
-                # (shape can vary depending on table type)
-                if fparam.ndim == 3:
-                    fparam[:, :, rows] = 1.0
-                elif fparam.ndim == 2:
-                    fparam[:, rows] = 1.0
-                else:
-                    raise RuntimeError(f"Unexpected FPARAM shape {fparam.shape} in {gtab_out}")
-                tb.putcol("FPARAM", fparam)
-            else:
-                raise RuntimeError(f"No CPARAM/FPARAM in {gtab_out}. Columns: {colnames}")
-
+        c = tb.getcol("CPARAM")  # (ncorr, nchan, nrow) complex
+        amp = np.abs(c)
+        # Avoid division by 0
+        c_unit = np.where(amp > 0, c / amp, 1.0 + 0.0j)
+        tb.putcol("CPARAM", c_unit)
         tb.flush()
     finally:
         tb.close()
 
-    print(f"[INFO] Wrote single-antenna corruption table: {gtab_out} (kept ant id {keep_ant})")
-    return gtab_out
-
-
-def sim_gain_corrupt_clip_extreme_single_antenna(msname: str, keep_ant: int):
-
-    print(f"[INFO] Generating gain corruption table for {msname}")
-
-    sm = simulator()
-    sm.openfromms(msname)
-    sm.setseed(SEED)
-
-    gtab = msname + ".Gcorrupt"
-    rmtables(gtab) 
-    # NOTE: interval arg is ignored for fbm in CASA (as you've found)
-    sm.setgain(mode="fbm", table=gtab, amplitude=GAIN_RMS_AMP, interval="10m")
-
-    sm.done()
-
-    # sm.corrupt()
-    # sm.done()
-
-    print(f"[INFO] Raw gain table: {gtab}")
-
-    gtab_fixed = fix_gain_table(gtab, zmax=10.0, fix_last_spike=True)
-    gtab_fixed = set_multiplicative_gains_to_1_for_all_except_one_antenna(gtab_fixed, msname, keep_ant)
-
-    print(f"[INFO] Applying fixed gain table to MS: {msname}")
-    
-    sm = simulator()
-    sm.openfromms(msname)
-    sm.setseed(SEED)
-    sm.setapply(table=gtab_fixed, type='G', field=GAINCAL_FIELD, interp='linear', calwt=False)
-    sm.corrupt()
-    sm.done()
-
-    return gtab_fixed
-
-
-def sim_gain_corrupt(msname: str):
-    print(f"[INFO] Applying simulator gain corruption to {msname}")
-    sm = simulator()
-    sm.openfromms(msname)
-    sm.setseed(SEED)
-    gtab = msname + ".Gcorrupt"
-    rmtables(gtab) 
-    sm.setgain(mode="fbm", table=gtab, amplitude=GAIN_RMS_AMP)
-
-    sm.corrupt()
-    sm.done()
-
+    print(f"[INFO] Phase-only enforced in {gtab}")
     return gtab
+
+
+# def sim_gain_corrupt_clip_extreme_single_antenna(msname: str, keep_ant: int):
+
+#     print(f"[INFO] Generating gain corruption table for {msname}")
+
+#     sm = simulator()
+#     sm.openfromms(msname)
+#     sm.setseed(SEED)
+
+#     gtab = msname + ".Gcorrupt"
+#     rmtables(gtab) 
+#     # NOTE: interval arg is ignored for fbm in CASA (as you've found)
+#     sm.setgain(mode="fbm", table=gtab, amplitude=GAIN_RMS_AMP, interval="10m")
+
+#     sm.done()
+
+#     # sm.corrupt()
+#     # sm.done()
+
+#     print(f"[INFO] Raw gain table: {gtab}")
+
+#     gtab_fixed = fix_gain_table(gtab, zmax=10.0, fix_last_spike=True)
+#     gtab_fixed = set_multiplicative_gains_to_1_for_all_except_one_antenna(gtab_fixed, msname, keep_ant)
+
+#     print(f"[INFO] Applying fixed gain table to MS: {msname}")
+    
+#     sm = simulator()
+#     sm.openfromms(msname)
+#     sm.setseed(SEED)
+#     sm.setapply(table=gtab_fixed, type='G', field=GAINCAL_FIELD, interp='linear', calwt=False)
+#     sm.corrupt()
+#     sm.done()
+
+#     return gtab_fixed
+
+
+# def sim_gain_corrupt(msname: str):
+#     print(f"[INFO] Applying simulator gain corruption to {msname}")
+#     sm = simulator()
+#     sm.openfromms(msname)
+#     sm.setseed(SEED)
+#     gtab = msname + ".Gcorrupt"
+#     rmtables(gtab) 
+#     sm.setgain(mode="fbm", table=gtab, amplitude=GAIN_RMS_AMP)
+
+#     sm.corrupt()
+#     sm.done()
+
+#     return gtab
 
 
 def shift_gain_table_to_unity(gtab_out: str):
@@ -404,28 +425,28 @@ def shift_gain_table_to_unity(gtab_out: str):
 
     return gtab_out
 
-def sim_gain_corrupt_random(msname: str):
-    print(f"[INFO] Applying random simulator gain corruption to {msname}")
-    sm = simulator()
-    sm.openfromms(msname)
-    sm.setseed(SEED)
-    gtab = msname + ".Gcorrupt"
-    rmtables(gtab) 
-    sm.setgain(mode="random", table=gtab, amplitude=GAIN_RMS_AMP)
-    sm.done()
+# def sim_gain_corrupt_random(msname: str):
+#     print(f"[INFO] Applying random simulator gain corruption to {msname}")
+#     sm = simulator()
+#     sm.openfromms(msname)
+#     sm.setseed(SEED)
+#     gtab = msname + ".Gcorrupt"
+#     rmtables(gtab) 
+#     sm.setgain(mode="random", table=gtab, amplitude=GAIN_RMS_AMP)
+#     sm.done()
 
-    gtab_fixed = shift_gain_table_to_unity(gtab)
+#     gtab_fixed = shift_gain_table_to_unity(gtab)
 
-    print(f"[INFO] Applying fixed gain table to MS: {msname}")
+#     print(f"[INFO] Applying fixed gain table to MS: {msname}")
     
-    sm = simulator()
-    sm.openfromms(msname)
-    sm.setseed(SEED)
-    sm.setapply(table=gtab_fixed, type='G', field=GAINCAL_FIELD, interp='linear', calwt=False)
-    sm.corrupt()
-    sm.done()
+#     sm = simulator()
+#     sm.openfromms(msname)
+#     sm.setseed(SEED)
+#     sm.setapply(table=gtab_fixed, type='G', field=GAINCAL_FIELD, interp='linear', calwt=False)
+#     sm.corrupt()
+#     sm.done()
 
-    return gtab_fixed
+#     return gtab_fixed
 
 
 def set_multiplicative_gains_to_1_for_all_except_some_antennas(
@@ -503,14 +524,31 @@ def set_multiplicative_gains_to_1_for_all_except_some_antennas(
     return gtab_out
 
 
-def sim_gain_corrupt_clip_extreme_n_antennas(msname: str, keep_ants: list[int], amp=None):
+def add_gain_corruption(
+    msname: str,
+    amp: float = 0.1,
+    keep_ants: list[int] | None = None,
+    fix_extreme: bool = True,
+    phase_only: bool = False,
+    *,
+    mode: str = "fbm",
+    zmax: float = 10.0,
+    fix_last_spike: bool = True,
+    spw: str | None = None,  # kept for future; simulator setapply doesn't always need it
+):
     """
-    Generate FBM gain table, fix outliers, then keep corruption only for keep_ants
-    (provided via keep_ants); neutralize all others to unity; apply to MS.
-    """
-    keep_ants = list(keep_ants)
+    Create a simulator gain corruption table, then apply it to the MS via simulator.setapply()+corrupt().
 
-    print(f"[INFO] Generating gain corruption table for {msname}")
+    Requires
+      - SEED
+      - GAINCAL_FIELD
+      - fix_gain_table(...)
+      - set_multiplicative_gains_to_1_for_all_except_some_antennas(...)
+
+    Returns the path to the table actually applied.
+    """
+    print(f"[INFO] add_gain_corruption: ms={msname} mode={mode} amp={amp} "
+          f"keep_ants={keep_ants} fix_extreme={fix_extreme} phase_only={phase_only}")
 
     sm = simulator()
     sm.openfromms(msname)
@@ -519,32 +557,92 @@ def sim_gain_corrupt_clip_extreme_n_antennas(msname: str, keep_ants: list[int], 
     gtab = msname + ".Gcorrupt"
     rmtables(gtab)
 
-    if amp is None:
-        amp = GAIN_RMS_AMP
-
-    sm.setgain(mode="fbm", table=gtab, amplitude=amp)
+    sm.setgain(mode=mode, table=gtab, amplitude=amp)
     sm.done()
 
-    print(f"[INFO] Raw gain table: {gtab}")
+    print(f"[INFO] add_gain_corruption: raw gain table: {gtab}")
 
-    gtab_fixed = fix_gain_table(gtab, zmax=10.0, fix_last_spike=True)
-    gtab_fixed = set_multiplicative_gains_to_1_for_all_except_some_antennas(
-        gtab_in=gtab_fixed,
-        msname=msname,
-        keep_ants=keep_ants,
-        gtab_out=None,
-    )
+    gtab_use = gtab
 
-    print(f"[INFO] Applying fixed gain table to MS: {msname}")
+    if fix_extreme:
+        gtab_use = fix_gain_table(gtab_use, zmax=zmax, fix_last_spike=fix_last_spike)
+
+    if mode == "random":
+        gtab_use = shift_gain_table_to_unity(gtab_use)
+
+    if keep_ants is not None:
+        gtab_use = set_multiplicative_gains_to_1_for_all_except_some_antennas(
+            gtab_in=gtab_use,
+            msname=msname,
+            keep_ants=keep_ants,
+            gtab_out=None,
+        )
+
+    if phase_only:
+        gtab_use = set_amp_to_1(gtab_use)
+
+    print(f"[INFO] add_gain_corruption: applying table to MS: {gtab_use}")
 
     sm = simulator()
     sm.openfromms(msname)
     sm.setseed(SEED)
-    sm.setapply(table=gtab_fixed, type="G", field=GAINCAL_FIELD, interp="linear", calwt=False)
+
+    sm.setapply(
+        table=gtab_use,
+        type="G",
+        field=GAINCAL_FIELD,
+        interp="linear",
+        calwt=False,
+    )
+
     sm.corrupt()
     sm.done()
 
-    return gtab_fixed
+    return gtab_use
+
+
+# def sim_gain_corrupt_clip_extreme_n_antennas(msname: str, keep_ants: list[int], amp=None):
+#     """
+#     Generate FBM gain table, fix outliers, then keep corruption only for keep_ants
+#     (provided via keep_ants); neutralize all others to unity; apply to MS.
+#     """
+#     keep_ants = list(keep_ants)
+
+#     print(f"[INFO] Generating gain corruption table for {msname}")
+
+#     sm = simulator()
+#     sm.openfromms(msname)
+#     sm.setseed(SEED)
+
+#     gtab = msname + ".Gcorrupt"
+#     rmtables(gtab)
+
+#     if amp is None:
+#         amp = GAIN_RMS_AMP
+
+#     sm.setgain(mode="fbm", table=gtab, amplitude=amp)
+#     sm.done()
+
+#     print(f"[INFO] Raw gain table: {gtab}")
+
+#     gtab_fixed = fix_gain_table(gtab, zmax=10.0, fix_last_spike=True)
+#     gtab_fixed = set_multiplicative_gains_to_1_for_all_except_some_antennas(
+#         gtab_in=gtab_fixed,
+#         msname=msname,
+#         keep_ants=keep_ants,
+#         gtab_out=None,
+#     )
+
+#     print(f"[INFO] Applying fixed gain table to MS: {msname}")
+
+#     sm = simulator()
+#     sm.openfromms(msname)
+#     sm.setseed(SEED)
+#     sm.setapply(table=gtab_fixed, type="G", field=GAINCAL_FIELD, interp="linear", calwt=False)
+#     sm.corrupt()
+#     sm.done()
+
+#     return gtab_fixed
 
 def plot_gtab_corrupt_vs_recovered_all_ants_2x2(
     corr_gtab: str,
@@ -649,114 +747,110 @@ def plot_before_after_vis_time(ms_before: str, ms_after: str, field: str, spw: s
     p(ms_after,  "amp",   "after_amp_vs_time.png")
     p(ms_after,  "phase", "after_phase_vs_time.png")
 
+# def sim_all(msname: str):
+#     """
+#     Apply, in one go:
+#       1) reasonable tropospheric phase screen (settrop, screen mode)
+#       2) reasonable thermal noise using ATM model (setnoise, tsys-atm) with the SAME PWV
+#       3) multiplicative gain drift (fbm) applied ONLY to antennas 0-6 (first 7 ants)
 
-def sim_all(msname: str):
-    """
-    Apply, in one go:
-      1) reasonable tropospheric phase screen (settrop, screen mode)
-      2) reasonable thermal noise using ATM model (setnoise, tsys-atm) with the SAME PWV
-      3) multiplicative gain drift (fbm) applied ONLY to antennas 0-6 (first 7 ants)
+#     Assumes you already have:
+#       - SEED, GAINCAL_FIELD, GAIN_RMS_AMP (or we set a local one)
+#       - fix_gain_table(...)
+#       - set_multiplicative_gains_to_1_for_all_except_some_antennas(...)
+#     """
+#     print(f"[INFO] sim_all: applying trop + tsys-atm noise + partial gain drift to {msname}")
 
-    Assumes you already have:
-      - SEED, GAINCAL_FIELD, GAIN_RMS_AMP (or we set a local one)
-      - fix_gain_table(...)
-      - set_multiplicative_gains_to_1_for_all_except_some_antennas(...)
-    """
-    print(f"[INFO] sim_all: applying trop + tsys-atm noise + partial gain drift to {msname}")
+#     # ----------------------------
+#     # 1) Choose "reasonable" values
+#     # ----------------------------
+#     # Moderate-ish PWV (mm). 0.5–2 is good/typical-ish, 3–5 is poorer weather.
+#     PWV_MM = 100000
 
-    # ----------------------------
-    # 1) Choose "reasonable" values
-    # ----------------------------
-    # Moderate-ish PWV (mm). 0.5–2 is good/typical-ish, 3–5 is poorer weather.
-    PWV_MM = 100000
+#     # Troposphere "screen" parameters (phase screen made from fluctuating PWV)
+#     # deltapwv is the RMS fluctuation (mm). 0.05–0.3 is a reasonable range.
+#     DELTAPWV_MM = 1.0
+#     BETA = 1.9
+#     WINDSPEED_MPS = 10000.0
 
-    # Troposphere "screen" parameters (phase screen made from fluctuating PWV)
-    # deltapwv is the RMS fluctuation (mm). 0.05–0.3 is a reasonable range.
-    DELTAPWV_MM = 1.0
-    BETA = 1.9
-    WINDSPEED_MPS = 10000.0
+#     # Gain drift strength (dimensionless). Keep modest so it looks "real" not insane.
+#     GAIN_DRIFT_AMP = 1.0
 
-    # Gain drift strength (dimensionless). Keep modest so it looks "real" not insane.
-    GAIN_DRIFT_AMP = 1.0
+#     # Only these antennas get gain drift
+#     KEEP_ANTS = [0, 1, 2, 3, 4, 5, 6]
 
-    # Only these antennas get gain drift
-    KEEP_ANTS = [0, 1, 2, 3, 4, 5, 6]
+#     # ----------------------------
+#     # 2) Build a gain corruption table (fbm), then sanitize, then keep only ants 0-6
+#     # ----------------------------
+#     gtab_raw = msname + ".Gcorrupt"
+#     rmtables(gtab_raw)
 
-    # ----------------------------
-    # 2) Build a gain corruption table (fbm), then sanitize, then keep only ants 0-6
-    # ----------------------------
-    gtab_raw = msname + ".Gcorrupt"
-    rmtables(gtab_raw)
+#     sm = simulator()
+#     sm.openfromms(msname)
+#     sm.setseed(SEED)
 
-    sm = simulator()
-    sm.openfromms(msname)
-    sm.setseed(SEED)
+#     # Generate the table (do NOT corrupt yet — we will apply via setapply after editing)
+#     sm.setgain(mode="fbm", table=gtab_raw, amplitude=GAIN_DRIFT_AMP, interval="10m")
+#     sm.done()
 
-    # Generate the table (do NOT corrupt yet — we will apply via setapply after editing)
-    sm.setgain(mode="fbm", table=gtab_raw, amplitude=GAIN_DRIFT_AMP, interval="10m")
-    sm.done()
+#     print(f"[INFO] sim_all: raw gain table: {gtab_raw}")
 
-    print(f"[INFO] sim_all: raw gain table: {gtab_raw}")
+#     # Fix spikes/outliers (your existing robust clipper)
+#     gtab_fixed = fix_gain_table(gtab_raw, zmax=10.0, fix_last_spike=True)
 
-    # Fix spikes/outliers (your existing robust clipper)
-    gtab_fixed = fix_gain_table(gtab_raw, zmax=10.0, fix_last_spike=True)
+#     # Neutralize all antennas except KEEP_ANTS (your helper)
+#     gtab_partial = set_multiplicative_gains_to_1_for_all_except_some_antennas(
+#         gtab_in=gtab_fixed,
+#         msname=msname,
+#         keep_ants=KEEP_ANTS,
+#         gtab_out=None,
+#     )
 
-    # Neutralize all antennas except KEEP_ANTS (your helper)
-    gtab_partial = set_multiplicative_gains_to_1_for_all_except_some_antennas(
-        gtab_in=gtab_fixed,
-        msname=msname,
-        keep_ants=KEEP_ANTS,
-        gtab_out=None,
-    )
+#     # ----------------------------
+#     # 3) Apply: (trop + noise + partial gain drift) then corrupt MS once
+#     # ----------------------------
+#     sm = simulator()
+#     sm.openfromms(msname)
+#     sm.reset()
+#     sm.setseed(SEED)
 
-    # ----------------------------
-    # 3) Apply: (trop + noise + partial gain drift) then corrupt MS once
-    # ----------------------------
-    sm = simulator()
-    sm.openfromms(msname)
-    sm.reset()
-    sm.setseed(SEED)
+#     # --- Troposphere (phase screen) ---
+#     # Keyword names can vary slightly by CASA version; this is the standard form.
+#     # If your CASA complains about any keyword, drop it and retry (pwv/deltapwv are the big ones).
+#     sm.settrop(
+#         mode="individual",
+#         pwv=PWV_MM,
+#         deltapwv=DELTAPWV_MM,
+#         beta=BETA,
+#         windspeed=WINDSPEED_MPS,
+#     )
 
-    # --- Troposphere (phase screen) ---
-    # Keyword names can vary slightly by CASA version; this is the standard form.
-    # If your CASA complains about any keyword, drop it and retry (pwv/deltapwv are the big ones).
-    sm.settrop(
-        mode="individual",
-        pwv=PWV_MM,
-        deltapwv=DELTAPWV_MM,
-        beta=BETA,
-        windspeed=WINDSPEED_MPS,
-    )
+#     # --- Thermal noise (ATM) with SAME PWV ---
+#     sm.setnoise(mode="simplenoise", simplenoise="10.0Jy")
 
-    # --- Thermal noise (ATM) with SAME PWV ---
-    sm.setnoise(mode="simplenoise", simplenoise="10.0Jy")
+#     # --- Apply the partial gain table multiplicatively ---
+#     sm.setapply(
+#         table=gtab_partial,
+#         type="G",
+#         field=GAINCAL_FIELD,
+#         interp="linear",
+#         calwt=False,
+#     )
 
-    # --- Apply the partial gain table multiplicatively ---
-    sm.setapply(
-        table=gtab_partial,
-        type="G",
-        field=GAINCAL_FIELD,
-        interp="linear",
-        calwt=False,
-    )
+#     print("[INFO] sim_all: calling corrupt() ...")
+#     sm.corrupt()
+#     sm.done()
+#     print("[INFO] sim_all: done.")
 
-    print("[INFO] sim_all: calling corrupt() ...")
-    sm.corrupt()
-    sm.done()
-    print("[INFO] sim_all: done.")
-
-    return {
-        "gtab_raw": gtab_raw,
-        "gtab_fixed": gtab_fixed,
-        "gtab_partial": gtab_partial,
-        "pwv_mm": PWV_MM,
-        "deltapwv_mm": DELTAPWV_MM,
-        "gain_drift_amp": GAIN_DRIFT_AMP,
-        "keep_ants": KEEP_ANTS,
-    }
-
-from PIL import Image
-import os
+#     return {
+#         "gtab_raw": gtab_raw,
+#         "gtab_fixed": gtab_fixed,
+#         "gtab_partial": gtab_partial,
+#         "pwv_mm": PWV_MM,
+#         "deltapwv_mm": DELTAPWV_MM,
+#         "gain_drift_amp": GAIN_DRIFT_AMP,
+#         "keep_ants": KEEP_ANTS,
+#     }
 
 def plot_before_after_vis_time_2x2(
     ms_before: str,
@@ -831,9 +925,6 @@ def plot_before_after_vis_time_2x2(
 
     print(f"[INFO] Wrote 2x2 plotms grid: {out_png}")
     return out_png
-
-
-
 
 def main():
     # SETUP
@@ -916,7 +1007,6 @@ def main():
     print(f"  - {IMG_DIFF}.image")
     print(f"  - {IMG_FRAC_RES}.image")
 
-
 def main_recoverable_corruption():
     
     # SETUP
@@ -926,11 +1016,17 @@ def main_recoverable_corruption():
     col_diff(MS_IN, MS_OUT)
 
     # CORRUPT
-    gtab_injected = sim_gain_corrupt_clip_extreme_n_antennas(
-        MS_OUT,
+    gtab_injected = add_gain_corruption(
+        msname=MS_OUT,
+        amp=0.1,
         keep_ants=[0, 1, 2, 3, 4, 5],
-        amp=0.05
+        fix_extreme=True,
+        phase_only=True,
+        mode="fbm",
+        zmax=10.0,
+        fix_last_spike=True
     )
+    
     print(f"[INFO] Injected corruption table: {gtab_injected}")
 
     # Before / After visibilities
@@ -941,42 +1037,7 @@ def main_recoverable_corruption():
     gtab_solved = MS_OUT + f".recover"
     rmtables(gtab_solved)
 
-    # NOTW:
-    # For "ap" solnorm=False
-    # if want to see the solver match the injected curve shape, I think
-
     print(f"[INFO] Solving gains back into: {gtab_solved}")
-    # set some point source model
-
-    # from casatools import componentlist
-
-    # cl = componentlist()
-    # cl.addcomponent(
-    #     dir="J2000 00h00m00s 00d00m00s",  # phase center (will be overridden by ft field)
-    #     flux=1.0,                        # Jy
-    #     freq="1GHz",                     # dummy, CASA rescales per spw
-    #     shape="point"
-    # )
-    # cl.rename("J1822_point.cl")
-    # cl.close()
-
-    # ft(
-    #     vis=MS_OUT,
-    #     field="J1822-0938",
-    #     spw="0",
-    #     complist="J1822_point.cl",
-    #     usescratch=True
-    # )
-
-    # from casatasks import visstat
-    # st = visstat(
-    #     vis=MS_OUT,
-    #     field="J1822-0938",
-    #     spw="0",
-    #     datacolumn="model"
-    # )
-    # print(st)
-
 
     gaincal(
         vis=MS_OUT,
@@ -1023,7 +1084,6 @@ def main_recoverable_corruption():
     make_clean(MS_IN,  IMG_BASE_C,  TCLEAN_KW)
     make_clean(MS_OUT, IMG_CORR_C,  TCLEAN_KW)
     make_clean(MS_REC, IMG_RECOV_C, TCLEAN_KW)
-
 
     IMG_FRAC_BASE = "img_base_fracres"
     make_frac_residuals(
