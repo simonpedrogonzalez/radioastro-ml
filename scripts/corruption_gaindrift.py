@@ -17,13 +17,16 @@ from casatasks import tclean, rmtables, immath, gaincal, ft
 from casaplotms import plotms
 import hashlib
 from casatasks import flagdata, visstat, applycal
-from casatools import simulator, table, image
+from casatools import simulator, table, image, msmetadata
 from casatools import msmetadata as msmdtool
 from PIL import Image
 
 #Settings
 MS_IN  = "data/J1822_spw0.calibrated.ms"
 MS_OUT = "J1822_spw0.gaindrift.corrupted.ms"
+
+# ZOOM = "08:55:00~10:18:00"
+ZOOM = "08:55:00~09:05:00"
 
 GAINCAL_FIELD = "J1822-0938"
 SPW = "0"
@@ -557,7 +560,7 @@ def add_gain_corruption(
     gtab = msname + ".Gcorrupt"
     rmtables(gtab)
 
-    sm.setgain(mode=mode, table=gtab, amplitude=amp)
+    sm.setgain(mode=mode, table=gtab, amplitude=amp, interval='10000s')
     sm.done()
 
     print(f"[INFO] add_gain_corruption: raw gain table: {gtab}")
@@ -643,6 +646,81 @@ def add_gain_corruption(
 #     sm.done()
 
 #     return gtab_fixed
+
+
+def plot_gtab_corrupt_vs_recovered_all_ants_2x2_zoom(
+    corr_gtab: str,
+    cal_gtab: str,
+    spw: str = "0",
+    out_png: str = "images/gtab_corrupt_vs_recovered_2x2_zoom.png",
+    overwrite: bool = True,
+    cleanup_tmp: bool = True,
+):
+    """
+    2x2 grid (zoomed in time):
+      [ corrupt: gainamp  | corrupt: gainphase ]
+      [ recov : gainamp   | recov : gainphase  ]
+
+    All antennas shown, colored by antenna (ANTENNA1).
+    """
+    os.makedirs(os.path.dirname(out_png) or ".", exist_ok=True)
+    os.makedirs("images", exist_ok=True)
+
+    def p(vis: str, yaxis: str, plotfile: str):
+        plotms(
+            vis=vis,                 # NOTE: this is a CALTABLE, not an MS
+            spw=spw,
+            xaxis="time",
+            yaxis=yaxis,             # "gainamp" or "gainphase"
+            coloraxis="antenna1",    # <-- correct for gtables
+            timerange=ZOOM,
+            antenna="0",
+            showgui=False,
+            plotfile=plotfile,
+            overwrite=overwrite,
+            showlegend=True,
+        )
+
+
+    tmp = {
+        "c_amp":   "images/_tmp_gtab_corrupt_gainamp_zoom.png",
+        "c_phase": "images/_tmp_gtab_corrupt_gainphase_zoom.png",
+        "r_amp":   "images/_tmp_gtab_recovered_gainamp_zoom.png",
+        "r_phase": "images/_tmp_gtab_recovered_gainphase_zoom.png",
+    }
+
+    p(corr_gtab, "gainamp",   tmp["c_amp"])
+    p(corr_gtab, "gainphase", tmp["c_phase"])
+    p(cal_gtab,  "gainamp",   tmp["r_amp"])
+    p(cal_gtab,  "gainphase", tmp["r_phase"])
+
+    imgs = [
+        Image.open(tmp["c_amp"]).convert("RGB"),
+        Image.open(tmp["c_phase"]).convert("RGB"),
+        Image.open(tmp["r_amp"]).convert("RGB"),
+        Image.open(tmp["r_phase"]).convert("RGB"),
+    ]
+
+    w = min(im.size[0] for im in imgs)
+    h = min(im.size[1] for im in imgs)
+    imgs = [im.resize((w, h), resample=Image.Resampling.LANCZOS) for im in imgs]
+
+    canvas = Image.new("RGB", (2 * w, 2 * h), (255, 255, 255))
+    canvas.paste(imgs[0], (0,   0))
+    canvas.paste(imgs[1], (w,   0))
+    canvas.paste(imgs[2], (0,   h))
+    canvas.paste(imgs[3], (w,   h))
+    canvas.save(out_png)
+
+    if cleanup_tmp:
+        for path in tmp.values():
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
+    print(f"[INFO] Wrote 2x2 gain-table comparison (zoomed): {out_png}")
+    return out_png
 
 def plot_gtab_corrupt_vs_recovered_all_ants_2x2(
     corr_gtab: str,
@@ -926,6 +1004,262 @@ def plot_before_after_vis_time_2x2(
     print(f"[INFO] Wrote 2x2 plotms grid: {out_png}")
     return out_png
 
+import os
+from PIL import Image
+
+def plot_zoomed_before_after_vis_time_2x2(
+    ms_before: str,
+    ms_after: str,
+    out_png: str = "images/zoom_before_after_amp_phase_2x2.png",
+):
+    """
+    2x2 plot:
+      [ BEFORE amp   | BEFORE phase ]
+      [ AFTER  amp   | AFTER  phase ]
+
+    Fixed selection:
+      baseline   = ea21&ea01
+      spw        = 0:32
+      corr       = RR
+      timerange  = ZOOM
+      no averaging
+
+    FIX: forces identical y-limits for BEFORE vs AFTER (amp and phase separately).
+    """
+
+    os.makedirs(os.path.dirname(out_png) or ".", exist_ok=True)
+    os.makedirs("images", exist_ok=True)
+
+    ANTSEL = "18&0"
+    SPWSEL = "0:32"
+    CORR   = "RR"
+    TR     =  ZOOM
+
+    def _hms_to_sec(hms: str) -> int:
+        hh, mm, ss = hms.split(":")
+        return int(hh) * 3600 + int(mm) * 60 + int(ss)
+
+    def _timerange_mask(time_sec: np.ndarray, timerange: str) -> np.ndarray:
+        # MS TIME is seconds; we filter by time-of-day (mod 86400)
+        t0, t1 = timerange.split("~")
+        s0, s1 = _hms_to_sec(t0), _hms_to_sec(t1)
+        tod = np.mod(time_sec, 86400.0)
+        if s0 <= s1:
+            return (tod >= s0) & (tod <= s1)
+        else:
+            return (tod >= s0) | (tod <= s1)
+
+    def _get_ant_ids(ms: str, antsel: str):
+        a, b = [x.strip() for x in antsel.split("&")]
+        msmd = msmetadata(); msmd.open(ms)
+        try:
+            def _id(x):
+                if x.isdigit():
+                    return int(x)
+                ids = msmd.antennaids(x)
+                if not ids:
+                    raise ValueError(f"Can't resolve antenna '{x}' in {ms}")
+                return int(ids[0])
+            return _id(a), _id(b)
+        finally:
+            msmd.close()
+
+    def _get_ddid(ms: str, spw_id: int):
+        msmd = msmetadata(); msmd.open(ms)
+        try:
+            return int(msmd.datadescids(spw_id)[0])
+        finally:
+            msmd.close()
+
+
+    def _extract_amp_phase(ms: str):
+        # parse SPWSEL="0:32"
+        spw_id_str, chan_str = SPWSEL.split(":")
+        spw_id = int(spw_id_str)
+        chan = int(chan_str)
+
+        a1, a2 = _get_ant_ids(ms, ANTSEL)
+        ddid = _get_ddid(ms, spw_id)
+        cidx = 0
+
+        tb = table(); tb.open(ms)
+        try:
+            q = (
+                f"DATA_DESC_ID=={ddid} && "
+                f"((ANTENNA1=={a1} && ANTENNA2=={a2}) || (ANTENNA1=={a2} && ANTENNA2=={a1}))"
+            )
+            subt = tb.query(q)
+            t = subt.getcol("TIME")
+            m = _timerange_mask(t, TR)
+
+            data = subt.getcol("DATA")      # (nCorr, nChan, nRow)
+            data = data[:, :, m]            # filter rows by timerange
+
+            if data.shape[-1] == 0:
+                raise ValueError(f"No rows for selection+timerange in {ms}. (timerange might need full date)")
+
+            if chan < 0 or chan >= data.shape[1]:
+                raise ValueError(f"Channel {chan} out of range 0~{data.shape[1]-1} in {ms}")
+
+            vis = data[cidx, chan, :]       # complex (nRow,)
+            amp = np.abs(vis).astype(float)
+            phs = (np.angle(vis) * 180.0 / np.pi).astype(float)
+            return amp, phs
+        finally:
+            try:
+                subt.close()
+            except Exception:
+                pass
+            tb.close()
+
+    # 1) Compute shared y-limits (use robust percentiles so one crazy point doesn't blow the scale)
+    amp_b, phs_b = _extract_amp_phase(ms_before)
+    amp_a, phs_a = _extract_amp_phase(ms_after)
+
+    def _robust_ylim(x1, x2, lo=0.5, hi=99.5, pad=0.05):
+        v = np.concatenate([x1, x2])
+        y0 = float(np.percentile(v, lo))
+        y1 = float(np.percentile(v, hi))
+        if y0 == y1:
+            y0 -= 1.0
+            y1 += 1.0
+        p = (y1 - y0) * pad
+        return y0 - p, y1 + p
+
+    amp_ymin, amp_ymax = _robust_ylim(amp_b, amp_a)
+    phs_ymin, phs_ymax = _robust_ylim(phs_b, phs_a)
+
+    def _plot(vis, yaxis, plotfile, yrng):
+        plotms(
+            vis=vis,
+            xaxis="time",
+            yaxis=yaxis,
+            antenna=ANTSEL,
+            spw=SPWSEL,
+            correlation=CORR,
+            avgtime="",
+            avgchannel="",
+            avgscan=False,
+            avgbaseline=False,
+            avgspw=False,
+            timerange=TR,
+            coloraxis="channel",
+            showgui=False,
+            plotfile=plotfile,
+            overwrite=True,
+            plotrange=[0.0, 0.0, float(yrng[0]), float(yrng[1])],
+        )
+
+    # 2) Make the four plots (with fixed y-lims)
+    tmp_before_amp   = "images/_tmp_before_amp.png"
+    tmp_before_phase = "images/_tmp_before_phase.png"
+    tmp_after_amp    = "images/_tmp_after_amp.png"
+    tmp_after_phase  = "images/_tmp_after_phase.png"
+
+    _plot(ms_before, "amp",   tmp_before_amp,   (amp_ymin, amp_ymax))
+    _plot(ms_before, "phase", tmp_before_phase, (phs_ymin, phs_ymax))
+    _plot(ms_after,  "amp",   tmp_after_amp,    (amp_ymin, amp_ymax))
+    _plot(ms_after,  "phase", tmp_after_phase,  (phs_ymin, phs_ymax))
+
+    # 3) Stitch into 2x2
+    imgs = [
+        Image.open(tmp_before_amp).convert("RGB"),
+        Image.open(tmp_before_phase).convert("RGB"),
+        Image.open(tmp_after_amp).convert("RGB"),
+        Image.open(tmp_after_phase).convert("RGB"),
+    ]
+
+    w = min(im.size[0] for im in imgs)
+    h = min(im.size[1] for im in imgs)
+    imgs = [im.resize((w, h), Image.Resampling.LANCZOS) for im in imgs]
+
+    canvas = Image.new("RGB", (2 * w, 2 * h), (255, 255, 255))
+    canvas.paste(imgs[0], (0,   0))
+    canvas.paste(imgs[1], (w,   0))
+    canvas.paste(imgs[2], (0,   h))
+    canvas.paste(imgs[3], (w,   h))
+    canvas.save(out_png)
+
+    # Cleanup
+    for p in [tmp_before_amp, tmp_before_phase, tmp_after_amp, tmp_after_phase]:
+        try:
+            os.remove(p)
+        except OSError:
+            pass
+
+    print(f"[INFO] Wrote 2x2 zoomed plot: {out_png}")
+    print(f"[INFO] Shared AMP   yrange: [{amp_ymin:.4g}, {amp_ymax:.4g}]")
+    print(f"[INFO] Shared PHASE yrange: [{phs_ymin:.4g}, {phs_ymax:.4g}]")
+    return out_png
+
+def gtab_time_interval(gtab):
+    tb = table()
+    tb.open(gtab)
+    t = tb.getcol("TIME")
+    tb.close()
+
+    print("nrows:", len(t))
+    print("unique times:", len(set(t)))
+    print("time span (s):", max(t)-min(t))
+
+from casatools import table
+import numpy as np
+
+
+def gtab_min_dt(gtab):
+    tb = table()
+    tb.open(gtab)
+    t = np.asarray(tb.getcol("TIME"), dtype=float)
+    tb.close()
+
+    # only unique solution times
+    tu = np.unique(t)
+
+    if tu.size < 2:
+        print("Not enough unique times.")
+        return None
+
+    dt = np.diff(tu)
+
+    print(f"Unique solution times: {tu.size}")
+    print(f"Min solution Δt:    {dt.min():.3f} s")
+    print(f"Median solution Δt: {np.median(dt):.3f} s")
+    print(f"Max solution Δt:    {dt.max():.3f} s")
+
+    return dt.min()
+
+
+def col_exists(ms, col):
+    tb=table(); tb.open(ms)
+    ok = (col in tb.colnames())
+    tb.close()
+    return ok
+
+def col_summary(ms, col):
+    tb=table(); tb.open(ms)
+    x = tb.getcol(col)
+    tb.close()
+    # summarize amplitude to avoid huge prints
+    a = np.abs(x).astype(float)
+    return dict(shape=x.shape, mean=float(np.nanmean(a)), std=float(np.nanstd(a)))
+
+def compare_cols(ms, colA="DATA", colB="CORRECTED_DATA"):
+    print("MS:", ms)
+    print("Has DATA:", col_exists(ms, colA))
+    print("Has CORRECTED_DATA:", col_exists(ms, colB))
+    if col_exists(ms, colA):
+        print("  DATA summary:", col_summary(ms, colA))
+    if col_exists(ms, colB):
+        print("  CORR summary:", col_summary(ms, colB))
+    if col_exists(ms, colA) and col_exists(ms, colB):
+        tb=table(); tb.open(ms)
+        A = tb.getcol(colA)
+        B = tb.getcol(colB)
+        tb.close()
+        print("  mean|DATA-CORR|:", float(np.nanmean(np.abs(A-B))))
+
+
+
 def main():
     # SETUP
     print(f"MS_IN hash: {hash_casa_table_cols(MS_IN, cols=["DATA"])}")
@@ -1029,9 +1363,6 @@ def main_recoverable_corruption():
     
     print(f"[INFO] Injected corruption table: {gtab_injected}")
 
-    # Before / After visibilities
-    plot_before_after_vis_time_2x2(MS_IN, MS_OUT, GAINCAL_FIELD, SPW)
-
     # RECOVER
 
     gtab_solved = MS_OUT + f".recover"
@@ -1046,20 +1377,41 @@ def main_recoverable_corruption():
         spw=SPW,
         refant="ea21",
         gaintype="G",
-        calmode="ap",
+        calmode="p",
         solint="int", # scan
-        minsnr=5,
+        # minsnr=5,
         solnorm=True
+    )
+
+    # plot_gtab_corrupt_vs_recovered_all_ants_2x2(
+    #     corr_gtab=gtab_injected,
+    #     cal_gtab=gtab_solved,
+    #     spw="0",
+    #     out_png="images/J1822_gtab_corrupt_vs_recovered_2x2.png",
+    # )
+
+    compare_cols(MS_OUT)
+
+    plot_gtab_corrupt_vs_recovered_all_ants_2x2_zoom(
+        corr_gtab=gtab_injected,
+        cal_gtab=gtab_solved,
+        spw="0",
+        out_png="images/zoom_gtab_corrupt_recovered.png",
+        overwrite=True,
+        cleanup_tmp=True,
     )
 
     plot_gtab_corrupt_vs_recovered_all_ants_2x2(
         corr_gtab=gtab_injected,
         cal_gtab=gtab_solved,
         spw="0",
-        out_png="images/J1822_gtab_corrupt_vs_recovered_2x2.png",
+        out_png="images/gtab_corrupt_recovered.png",
+        overwrite=True,
+        cleanup_tmp=True,
     )
 
     MS_REC = MS_OUT + ".recovered_for_imaging.ms"
+    
     rmtables(MS_REC)
     copy_ms(MS_OUT, MS_REC)
     print("[INFO] Applying solved gains to undo corruption (-> CORRECTED_DATA)")
@@ -1076,6 +1428,15 @@ def main_recoverable_corruption():
     data = tb.getcol("CORRECTED_DATA")
     tb.putcol("DATA", data)
     tb.close()
+
+    # Before / After visibilities
+    plot_zoomed_before_after_vis_time_2x2(MS_IN, MS_OUT, "images/zoom_base_corrupted.png")
+    plot_before_after_vis_time(MS_IN, MS_OUT, GAINCAL_FIELD, SPW)
+
+    # Before / After visibilities
+    plot_zoomed_before_after_vis_time_2x2(MS_IN, MS_REC, "images/zoom_base_recovered.png")
+    plot_before_after_vis_time(MS_IN, MS_REC, GAINCAL_FIELD, SPW)
+
     
     IMG_BASE_C     = "img_base_clean"
     IMG_CORR_C     = "img_corrupted_clean"
@@ -1126,6 +1487,13 @@ def main_recoverable_corruption():
         out_png="images/fracres_corrupted_recovered.png",
         crop_half=64,
     )
+
+    gtab_min_dt(gtab_injected)
+    gtab_min_dt(gtab_solved)
+
+    col_diff(MS_IN, MS_OUT)
+
+
 
     print("[DONE OptionA] Outputs:")
     print(f"  - Corrupted MS: {MS_OUT}")

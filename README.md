@@ -1,6 +1,54 @@
 # radioastro-ml
 ML for Radoastronomy calibration debugging
 
+# Week 4: Feb 2
+
+Experiment on recoverability (calibrated -> corrupted -> recalibrated, recalibrated should be ~ to calibrated):
+- Corruption: small phase only error
+- Integration time for the corruption can't be set (parameter doesn't work). It uses a `min(5 seconds, value derived from the MS)`, in this case, it uses 6 seconds, which ends up being about the same as the `solint='int'` when calibrating. Here's a comparison :
+
+```
+Corrtable
+Min Δt between single antenna values:    6.000 s
+
+Caltable
+Min Δt between single antenna values:    5.978 s
+```
+
+So we are on the limits on what is possible to recover, the random values are drawn at the same rate that the caltable fits a new value.
+
+
+
+| ![](images/recovery_zoomed/zoom_base_corrupted.png) | 
+|:--:|
+| Fig 1: Visibilities for 1 baseline (ea01-ea21), 1 correlation (RR), only for the first set of measurements, 1 channel (32), with all averaging removed. Base calibrated visibilities (TOP) vs Corrupted visibilities (BOTTOM), amp (LEFT) and phase (RIGHT)|
+
+
+
+| ![](images/recovery_zoomed/zoom_base_recovered.png) | 
+|:--:|
+| Fig 2: Visibilities for 1 baseline (ea01-ea21), 1 correlation (RR), only for the first set of measurements, 1 channel (32), with all averaging removed. Base calibrated visibilities (TOP) vs Recovered visibilities (BOTTOM), amp (LEFT) and phase (RIGHT)|
+
+
+| ![](images/recovery_zoomed/zoom_gtab_corrupt_recovered.png) | 
+|:--:|
+| Fig 3: Corruption table (TOP) vs recovered Calibration table (BOTTOM), amp (LEFT) and phase (RIGHT) for antenna ea01, both correlations (RR, LL), only for the first set of measurements. Same "shape" but slightly shifted. |
+
+| ![](images/recovery_zoomed/fracres_base_corrupted.png) | 
+|:--:|
+| Fig 4: Fractional residuals base vs corrupted. |
+
+| ![](images/recovery_zoomed/fracres_corrupted_recovered.png) | 
+|:--:|
+| Fig 5: Fractional residuals base vs recovered. |
+
+
+| ![](images/recovery_zoomed/fracres_base_recovered.png) | 
+|:--:|
+| Fig 6: Fractional residuals base vs recovered. |
+
+Conclusions: there is quite a bit of recovery. The derived correction isn't identical to the corruption table, but it significantly reduces the corruption. It might be better if we were able to adjust the interval of the corruption. One idea is to gather the generated corruption table and use a portion of the values (say, the first 50% of them) and linearly interpolate to generate the other values, increasing thus the interval at which new random corruption is applied.
+
 # Week 3: Jan 28
 
 - Some code cleaning
