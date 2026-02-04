@@ -1,6 +1,112 @@
 # radioastro-ml
 ML for Radoastronomy calibration debugging
 
+# Week 4: Feb 4
+
+## Phase Closure Experiments
+
+Check if the per antenna phase corruption / calibration procedure preserves the closure relations for a fixed antenna triangle $ (a,b,c) $ for a given time $ t $, channel and correlation. The closure phase is calculated:
+
+$$
+\phi_{abc}(t) = \arg\left( V_{ab}(t) V_{bc}(t) V_{ca}(t) \right)
+$$
+
+where $ \arg $ means the phase angle of the complex number.
+### Experiment 1: manual constant per-antenna phase corruption
+
+Applied a per-antenna constant-in-time random phase corruption $ \phi_a $ for visibilities involving antenna $ a $:
+
+$$
+V_{ab} \leftarrow e^{i\phi_a} e^{-i\phi_b} V_{ab}
+$$
+
+This was done manually editing the MS table without (no CASA functions). Then used CASA `gaincal` to recover from the corruption. My expectation is that the closure phase is unchanged, and was confirmed. 
+
+| ![](images/closure/constant_per_antenna/closure_phase_vs_time.png) |
+|:--:|
+| **Fig 1:** Closure phase vs time for constant per-antenna phase corruption. Baseline, corrupted, and recovered curves overlap exactly. |
+
+| ![](images/closure/constant_per_antenna/zoom_base_corrupted.png) |
+|:--:|
+| **Fig 2:** Single-baseline visibility (amp/phase) before and after (top/bottom) constant per-antenna corruption. Large phase changes can be seen. |
+
+| ![](images/closure/constant_per_antenna/zoom_base_recovered.png) |
+|:--:|
+| **Fig 3:** Same baseline after recovery. The values are much better but not identical to the base. |
+
+| ![](images/closure/constant_per_antenna/fracres_base_corrupted.png) |
+|:--:|
+| **Fig 4:** Constant antenna corruption fractional residuals, base vs corrupted. |
+
+| ![](images/closure/constant_per_antenna/fracres_base_recovered.png) |
+|:--:|
+| **Fig 5:** Constant antenna corruption fractional residuals, base vs recovered. |
+
+
+### Experiment 2: fBM per-antenna phase corruption
+
+Each antenna phase independently evolves on time following fBM, using CASA functions. 
+
+Despite my distrust to this function it seems to preserve closure. I tested this function with and without my patches for fixing extreme values and applying corruption to only some antennas and results are the same regarding closure.
+
+| ![](images/closure/fbm/closure_phase_vs_time.png) |
+|:--:|
+| **Fig 6:** Closure phase vs time under fBM corruption. Again the lines overlap. |
+
+| ![](images/closure/fbm/zoom_base_corrupted.png) |
+|:--:|
+| **Fig 7:** Baseline visibilities after fBM corruption. It can be seen that the corruption is time dependent. |
+
+| ![](images/closure/fbm/zoom_base_recovered.png) |
+|:--:|
+| **Fig 8:** Same baseline after recovery. |
+
+| ![](images/closure/fbm/fracres_base_corrupted.png) |
+|:--:|
+| **Fig 9:** Fractional residuals, base vs corrupted. |
+
+| ![](images/closure/fbm/fracres_base_recovered.png) |
+|:--:|
+| **Fig 10:** Fractional residuals, base vs recovered. |
+
+### Experiment 3: single-baseline phase corruption
+
+A single baseline $ (a,b) $ that is part of the triangle is modified by a constant phase offset, say $ \theta $:
+
+$$
+V_{ab} \leftarrow e^{i\theta}\, V_{ab}
+$$
+
+Only rows belonging to that baseline are changed. My expectation is that for any triangle containing that baseline, the closure phase shifts, so closure relation is not maintained.
+
+| ![](images/closure/one_baseline/closure_phase_vs_time.png) |
+|:--:|
+| **Fig 12:** Closure phase vs time under 1 baseline corruption. There is aconstant offset of about 30 deg. Both corrupted and recovered are overlapping. |
+
+| ![](images/closure/one_baseline/zoom_base_corrupted.png) |
+|:--:|
+| **Fig 13:** Baseline visibilities after 1 baseline phase corruption. |
+
+| ![](images/closure/one_baseline/zoom_base_recovered.png) |
+|:--:|
+| **Fig 14:** Same baseline after gaincal calibration. It seems that calibration couldnt fix it. |
+
+| ![](images/closure/one_baseline/fracres_base_corrupted.png) |
+|:--:|
+| **Fig 15:** Fractional residuals, base vs corrupted. It seems that single baseline phase corruption doesn't affect that much? |
+
+| ![](images/closure/one_baseline/fracres_base_recovered.png) |
+|:--:|
+| **Fig 16:** Fractional residuals, base vs recovered. |
+
+### Conclusions
+
+1. It seems that CASA fBM corruption does preserve closure even with my patching. So the application of per-antenna errors seems to be correct.
+
+2. I could violate closure by applying a non per-antenna error (a per baseline error).
+
+4. It seems the antenna based calibration of `gaincal` cannot remove baseline only errors, which probably makes sense.
+
 # Week 4: Feb 2
 
 Experiment on recoverability (calibrated -> corrupted -> recalibrated, recalibrated should be ~ to calibrated):

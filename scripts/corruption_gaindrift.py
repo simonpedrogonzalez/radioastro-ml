@@ -6,11 +6,12 @@
 import os; os.environ.setdefault("DISPLAY", ":0")
 # MY HELPERS
 import importlib
-from scripts import io_utils, img_utils
-for lib in [io_utils, img_utils]:
+from scripts import io_utils, img_utils, closure
+for lib in [io_utils, img_utils, closure]:
     importlib.reload(lib)
 from .img_utils import make_frac_residuals, casa_image_to_png, make_clean, make_dirty, make_diff, img_rms, fracres_before_after_png
 from .io_utils import copy_ms, hash_casa_table_cols, col_diff
+from .closure import compare_closure_three_int, plot_phase_closure, constant_per_antena_phase_corruption, baseline_phase_corruption
 
 import numpy as np
 from casatasks import tclean, rmtables, immath, gaincal, ft
@@ -560,7 +561,7 @@ def add_gain_corruption(
     gtab = msname + ".Gcorrupt"
     rmtables(gtab)
 
-    sm.setgain(mode=mode, table=gtab, amplitude=amp, interval='10000s')
+    sm.setgain(mode=mode, table=gtab, amplitude=amp)
     sm.done()
 
     print(f"[INFO] add_gain_corruption: raw gain table: {gtab}")
@@ -672,7 +673,7 @@ def plot_gtab_corrupt_vs_recovered_all_ants_2x2_zoom(
             spw=spw,
             xaxis="time",
             yaxis=yaxis,             # "gainamp" or "gainphase"
-            coloraxis="antenna1",    # <-- correct for gtables
+            coloraxis="corr",    # <-- correct for gtables
             timerange=ZOOM,
             antenna="0",
             showgui=False,
@@ -1350,16 +1351,43 @@ def main_recoverable_corruption():
     col_diff(MS_IN, MS_OUT)
 
     # CORRUPT
-    gtab_injected = add_gain_corruption(
-        msname=MS_OUT,
-        amp=0.1,
-        keep_ants=[0, 1, 2, 3, 4, 5],
-        fix_extreme=True,
-        phase_only=True,
-        mode="fbm",
-        zmax=10.0,
-        fix_last_spike=True
+    # # fBM partial ants phase corrution
+    # gtab_injected = add_gain_corruption(
+    #     msname=MS_OUT,
+    #     amp=0.1,
+    #     keep_ants=[0, 1, 2, 3, 4, 5],
+    #     fix_extreme=True,
+    #     phase_only=True,
+    #     mode="fbm",
+    #     zmax=10.0,
+    #     fix_last_spike=True
+    # )
+
+    # Random phase corruption that might be more closure friendly
+    # gtab_injected = add_gain_corruption(
+    #     msname=MS_OUT,
+    #     amp=0.1,
+    #     keep_ants=None,
+    #     fix_extreme=False,
+    #     phase_only=True,
+    #     mode="random",
+    # )
+
+    # gtab_injected = constant_per_antena_phase_corruption(
+    #     MS_IN, MS_OUT
+    # )
+
+    gtab_injected = baseline_phase_corruption(
+        MS_OUT,
+        a=18, b=0,          # baseline to corrupt
+        ddid=0,
+        chan_idx=32,
+        corr_idx=0,
+        phase_rad=np.deg2rad(30.0),
+        col="DATA",
+        # timerange=ZOOM,
     )
+
     
     print(f"[INFO] Injected corruption table: {gtab_injected}")
 
@@ -1383,6 +1411,11 @@ def main_recoverable_corruption():
         solnorm=True
     )
 
+    # gtab_min_dt(gtab_injected)
+    # gtab_min_dt(gtab_solved)
+
+    # compare_cols(MS_OUT)
+
     # plot_gtab_corrupt_vs_recovered_all_ants_2x2(
     #     corr_gtab=gtab_injected,
     #     cal_gtab=gtab_solved,
@@ -1390,25 +1423,23 @@ def main_recoverable_corruption():
     #     out_png="images/J1822_gtab_corrupt_vs_recovered_2x2.png",
     # )
 
-    compare_cols(MS_OUT)
+    # plot_gtab_corrupt_vs_recovered_all_ants_2x2_zoom(
+    #     corr_gtab=gtab_injected,
+    #     cal_gtab=gtab_solved,
+    #     spw="0",
+    #     out_png="images/zoom_gtab_corrupt_recovered.png",
+    #     overwrite=True,
+    #     cleanup_tmp=True,
+    # )
 
-    plot_gtab_corrupt_vs_recovered_all_ants_2x2_zoom(
-        corr_gtab=gtab_injected,
-        cal_gtab=gtab_solved,
-        spw="0",
-        out_png="images/zoom_gtab_corrupt_recovered.png",
-        overwrite=True,
-        cleanup_tmp=True,
-    )
-
-    plot_gtab_corrupt_vs_recovered_all_ants_2x2(
-        corr_gtab=gtab_injected,
-        cal_gtab=gtab_solved,
-        spw="0",
-        out_png="images/gtab_corrupt_recovered.png",
-        overwrite=True,
-        cleanup_tmp=True,
-    )
+    # plot_gtab_corrupt_vs_recovered_all_ants_2x2(
+    #     corr_gtab=gtab_injected,
+    #     cal_gtab=gtab_solved,
+    #     spw="0",
+    #     out_png="images/gtab_corrupt_recovered.png",
+    #     overwrite=True,
+    #     cleanup_tmp=True,
+    # )
 
     MS_REC = MS_OUT + ".recovered_for_imaging.ms"
     
@@ -1428,6 +1459,34 @@ def main_recoverable_corruption():
     data = tb.getcol("CORRECTED_DATA")
     tb.putcol("DATA", data)
     tb.close()
+
+    # Check phase closure
+    a, b, c = 18, 0, 1 # antenna IDs
+    ddid = 0 # DATA_DESC_ID ~ (SPW, corr) so it should be 0
+    chan_idx = 32 # channel
+    corr_idx = 0 # corr hand RR
+
+    times, P0, P1, P2, _, _, _, report = compare_closure_three_int(
+        MS_IN, MS_OUT, MS_REC,
+        a=a, b=b, c=c,
+        ddid=ddid,
+        chan_idx=chan_idx,
+        corr_idx=corr_idx,
+        timerange=ZOOM,
+        col="DATA",
+    )
+
+    with open("images/closure.txt", "a") as f:
+        f.write(report + "\n\n")
+
+    plot_phase_closure(
+        times,
+        P0,
+        P1,
+        P2,
+        title=f"Closure phase ants=({a},{b},{c}), corr={corr_idx}, spw={SPW}, chan={chan_idx}, timerange={ZOOM}",
+        out_png="images/closure_phase_vs_time.png",
+    )
 
     # Before / After visibilities
     plot_zoomed_before_after_vis_time_2x2(MS_IN, MS_OUT, "images/zoom_base_corrupted.png")
@@ -1487,9 +1546,6 @@ def main_recoverable_corruption():
         out_png="images/fracres_corrupted_recovered.png",
         crop_half=64,
     )
-
-    gtab_min_dt(gtab_injected)
-    gtab_min_dt(gtab_solved)
 
     col_diff(MS_IN, MS_OUT)
 
