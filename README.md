@@ -5,16 +5,16 @@ ML for Radoastronomy calibration debugging
 
 ## Phase Closure Experiments
 
-Check if the per antenna phase corruption / calibration procedure preserves the closure relations for a fixed antenna triangle $ (a,b,c) $ for a given time $ t $, channel and correlation. The closure phase is calculated:
+Check if the per antenna phase corruption / calibration procedure preserves the closure relations for a fixed antenna triangle $(a,b,c)$ for a given time $t$, channel and correlation. The closure phase is calculated:
 
 $$
 \phi_{abc}(t) = \arg\left( V_{ab}(t) V_{bc}(t) V_{ca}(t) \right)
 $$
 
-where $ \arg $ means the phase angle of the complex number.
+where $\arg$ means the phase angle of the complex number.
 ### Experiment 1: manual constant per-antenna phase corruption
 
-Applied a per-antenna constant-in-time random phase corruption $ \phi_a $ for visibilities involving antenna $ a $:
+Applied a per-antenna constant-in-time random phase corruption $\phi_a$ for visibilities involving antenna $a$:
 
 $$
 V_{ab} \leftarrow e^{i\phi_a} e^{-i\phi_b} V_{ab}
@@ -71,7 +71,7 @@ Despite my distrust to this function it seems to preserve closure. I tested this
 
 ### Experiment 3: single-baseline phase corruption
 
-A single baseline $ (a,b) $ that is part of the triangle is modified by a constant phase offset, say $ \theta $:
+A single baseline $(a,b)$ that is part of the triangle is modified by a constant phase offset, say $\theta$:
 
 $$
 V_{ab} \leftarrow e^{i\theta}\, V_{ab}
