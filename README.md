@@ -1,6 +1,44 @@
 # radioastro-ml
 ML for Radoastronomy calibration debugging
 
+# Week 5: Feb 9
+
+Project goals:
+1. Create a physically plausible labeled training and testing dataset by: (a) gathering real visibilities (b) corrupting them.
+2. Create a model to identify calibration errors.
+
+I mostly worked on 1b. At this point we can:
+
+1. Measure / visualize the corruption and check for phase closure properties.
+2. Create some basic corruptions with limitations: some corruption methods are not reproducible, have bugs, we cannnot set a corruption interval larger than the integration interval.
+
+Next steps on (1b):
+1. Based on how `setgain` is supposed to work and how this type of corruption should look like, build a reliable `setgain` equivalent that solves the limitations and can be trusted.
+2. As a starting point, consider only 2 kinds of corruption: per-antenna `amp` vs per antenna `phase` errors.
+3. Then move on to other kinds of corruption.
+
+Since last Wednesday I've been working on (1a), having some programatic way of gathering visibilities to corrupt:
+
+1. I've taken the list of VLA calibrators: https://science.nrao.edu/facilities/vla/observing/callist, and fixed / compiled it into a table.
+2. Filtered calibrators following some criteria:
+- Excluded some weird entries that seem unreliable (duplicates, probable mistakes, etc)
+- Require $\gt 0.5 \text{Jy}$ at 6cm wavelength. Idea: it should be bright
+- Require flags: `P` (< 3% amplitude closure errors expected) or `S` (3-10% closure errors expected) at 6cm in the `A` (longer) baseline configuration. The idea: longer baseline at 6cm will be sensitive to source structure. Hence, if they are `P` in that configuration, the source is probably good calibrator in most other configurations (and it's probably more point-like?).
+
+3. I was left with names and coordinates of ~500 calibrators.
+
+4. I'm using TAP services to find projects containing observations of those sources, and filtering them by:
+- Date (2010-2020 ?)
+- VLA instrument
+- Project has visibilities
+- The project data is not huge in size (since I will not be using most of the data in them probably, I'm looking for one specific source).
+
+
+## Training dataset building: what to use
+
+
+
+
 # Week 4: Feb 4
 
 ## Phase Closure Experiments
