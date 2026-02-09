@@ -1,0 +1,28 @@
+ level     name                  issue                                                        detail
+  band 0455-205 suspicious_uvmin_small     {'wavelength': '90cm', 'uvmin_kl': 0.7, 'threshold': 1.0}
+  band 1220+292 suspicious_uvmin_small     {'wavelength': '20cm', 'uvmin_kl': 0.0, 'threshold': 1.0}
+  band 1337-129         uvmin_gt_uvmax     {'wavelength': '20cm', 'uvmin_kl': 60.0, 'uvmax_kl': 3.0}
+  band 1733-130         uvmin_gt_uvmax     {'wavelength': '20cm', 'uvmin_kl': 40.0, 'uvmax_kl': 3.0}
+  band 1748+700         uvmin_gt_uvmax {'wavelength': '3.7cm', 'uvmin_kl': 400.0, 'uvmax_kl': 100.0}
+  band 2023+318         uvmin_gt_uvmax    {'wavelength': '20cm', 'uvmin_kl': 45.0, 'uvmax_kl': 10.0}
+source 1118-465               no_bands                                                          None
+
+1118-465 remove
+0354+801 appears twice in this list, and refers to the same source. The JVAS and CJ2 positions differ about 30mas, inconsistent with their both B type positional accuracy. The JVAS entry only has Q band info that should be merged with the more elaborate info from the CJ2 entry, after a proper position resolution. For now I am renaming the less precise JVAS source to J0354+8009x (i.e. probably do not use) in the SCT.
+1914+166 appears twice in this list, and refers to the same source. Both the VERA and JVAS entries refer to high-frequency suitability. The positions differ 0.6", in combination inconsistent with their B and C type positional accuracy. I've named the JVAS source (with the larger RA) J1914+163a in the SCT (to distinguish the entry from the VERA one). More accurate astrometry is needed to resolve this duplicate.
+0632+159 also appears twice, but with a position difference of more than 6'. Looking at the positions, it seems unlikely that this is a single digit typo (in RA seconds and/or Dec arcmin). These sources are by default distinctively named J0632+1554 and J0632+1559 in the SCT.
+1300+142 also appears twice, but with a position difference of almost 5'. Position entry typo's can be excluded but the default naming scheme would name them both J1300+1417. In the SCT I have renamed the JVAS source (with the larger RA) to J1300+141a.
+The SCT data base, among source property (typically uv-range) errors in many places, was previously missing the sources J1220+2916, J1354-1041, J1501-3918, J1642-0621 and J1933+1504. Corrected in the SCT in 2016.
+
+
+weird = ['0455-205',
+'1220+292',
+'1337-129',
+'1733-130',
+'2023+318',
+'1748+700',
+'1118-465',
+'0354+801',
+'1914+166',
+'0632+159',
+'1300+142']
