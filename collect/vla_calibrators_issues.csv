@@ -1,0 +1,8 @@
+level,name,issue,detail
+band,0455-205,suspicious_uvmin_small,"{'wavelength': '90cm', 'uvmin_kl': 0.7, 'threshold': 1.0}"
+band,1220+292,suspicious_uvmin_small,"{'wavelength': '20cm', 'uvmin_kl': 0.0, 'threshold': 1.0}"
+band,1337-129,uvmin_gt_uvmax,"{'wavelength': '20cm', 'uvmin_kl': 60.0, 'uvmax_kl': 3.0}"
+band,1733-130,uvmin_gt_uvmax,"{'wavelength': '20cm', 'uvmin_kl': 40.0, 'uvmax_kl': 3.0}"
+band,1748+700,uvmin_gt_uvmax,"{'wavelength': '3.7cm', 'uvmin_kl': 400.0, 'uvmax_kl': 100.0}"
+band,2023+318,uvmin_gt_uvmax,"{'wavelength': '20cm', 'uvmin_kl': 45.0, 'uvmax_kl': 10.0}"
+source,1118-465,no_bands,

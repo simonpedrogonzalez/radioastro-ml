@@ -20,7 +20,7 @@ SEED = 12345
 
 # Make it obvious (increase if you still don't see it; decrease if it nukes everything)
 # In simplenoise mode, this is sigma added to real/imag parts of visibilities (with units).
-NOISE_SIGMA = "100.0Jy"
+NOISE_SIGMA = "50.0Jy"
 NOISE_MODE  = "simplenoise"
 
 TCLEAN_KW = dict(

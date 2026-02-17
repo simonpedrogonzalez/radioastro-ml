@@ -1,0 +1,1618 @@
+{
+    "details": {
+        "dataset_title": "24B-465.sb47226343.eb47329790.60643.9672167824",
+        "execution_blocks": [
+            {
+                "sdm_id": "24B-465.sb47226343.eb47329790.60643.9672167824",
+                "project_code": "24B-465",
+                "obs_start": "2024-11-29 23:12:48.150",
+                "obs_stop": 60643.99040972223,
+                "cal_status": "Calibrated",
+                "band_code": "C",
+                "num_antennas": 25,
+                "configuration": "A",
+                "instrument_name": "EVLA",
+                "alma_ous_id": None,
+                "legacy_id": "AR1176",
+                "access_estsize": 9222748000,
+                "configurations": [
+                    {
+                        "observation_configuration_id": "252895",
+                        "observation_configuration_number": "0",
+                        "band": "C",
+                        "aggregate_bandwidth": 256000000.0,
+                        "min_frequency": 4833000000.0,
+                        "max_frequency": 5089000000.0,
+                        "min_spec_resolution": 2000000.0,
+                        "max_spec_resolution": 2000000.0,
+                        "spws": [
+                            {
+                                "spw_name": "EVLA_C#A0C0#0",
+                                "obs_spw_number": 0,
+                                "center_frequency": 4897000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#B0D0#1",
+                                "obs_spw_number": 1,
+                                "center_frequency": 5025000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            }
+                        ],
+                        "target_durs": []
+                    },
+                    {
+                        "observation_configuration_id": "252896",
+                        "observation_configuration_number": "1",
+                        "band": "C",
+                        "aggregate_bandwidth": 2024000000.0,
+                        "min_frequency": 4489000000.0,
+                        "max_frequency": 6513000000.0,
+                        "min_spec_resolution": 2000000.0,
+                        "max_spec_resolution": 2000000.0,
+                        "spws": [
+                            {
+                                "spw_name": "EVLA_C#A0C0#2",
+                                "obs_spw_number": 2,
+                                "center_frequency": 4553000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#A0C0#3",
+                                "obs_spw_number": 3,
+                                "center_frequency": 4681000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#A0C0#4",
+                                "obs_spw_number": 4,
+                                "center_frequency": 4809000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#A0C0#5",
+                                "obs_spw_number": 5,
+                                "center_frequency": 4937000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#A0C0#6",
+                                "obs_spw_number": 6,
+                                "center_frequency": 5065000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#A0C0#7",
+                                "obs_spw_number": 7,
+                                "center_frequency": 5193000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#A0C0#8",
+                                "obs_spw_number": 8,
+                                "center_frequency": 5321000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#A0C0#9",
+                                "obs_spw_number": 9,
+                                "center_frequency": 5449000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#B0D0#10",
+                                "obs_spw_number": 10,
+                                "center_frequency": 5553000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#B0D0#11",
+                                "obs_spw_number": 11,
+                                "center_frequency": 5681000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#B0D0#12",
+                                "obs_spw_number": 12,
+                                "center_frequency": 5809000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#B0D0#13",
+                                "obs_spw_number": 13,
+                                "center_frequency": 5937000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#B0D0#14",
+                                "obs_spw_number": 14,
+                                "center_frequency": 6065000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#B0D0#15",
+                                "obs_spw_number": 15,
+                                "center_frequency": 6193000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#B0D0#16",
+                                "obs_spw_number": 16,
+                                "center_frequency": 6321000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#B0D0#17",
+                                "obs_spw_number": 17,
+                                "center_frequency": 6449000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            }
+                        ],
+                        "target_durs": [
+                            {
+                                "target_name": "3C48",
+                                "ra": 24.422080963402365,
+                                "dec": 33.15975916513661,
+                                "duration": 0.002769675920717418
+                            },
+                            {
+                                "target_name": "J0005+3820",
+                                "ra": 1.4882308693514288,
+                                "dec": 38.33754127110532,
+                                "duration": 0.006233217602130026
+                            },
+                            {
+                                "target_name": "iPTF15dof",
+                                "ra": 351.0546874980072,
+                                "dec": 35.12695555291087,
+                                "duration": 0.0096956018533092
+                            }
+                        ]
+                    }
+                ],
+                "scan_rows": [
+                    {
+                        "scan_num": "1",
+                        "subscan_num": "1",
+                        "target_name": "3C48",
+                        "starttime": "2024-11-29 23:12:48.150",
+                        "endtime": "2024-11-29 23:18:16.000",
+                        "duration": 0.0037945601870887913,
+                        "integration_time": 1.003,
+                        "band": "C",
+                        "polarizations": "RR, RL, LR, LL",
+                        "ra": 24.422080963402365,
+                        "dec": 33.15975916513661,
+                        "observation_configuration_number": "0",
+                        "observation_configuration_id": "252895",
+                        "intent": "SYSTEM_CONFIGURATION",
+                        "subscan_id": "109263352",
+                        "aggregate_bandwidth": 256000000.0,
+                        "min_frequency": 4833000000.0,
+                        "max_frequency": 5089000000.0,
+                        "spws": [
+                            {
+                                "spw_name": "EVLA_C#A0C0#0",
+                                "obs_spw_number": 0,
+                                "center_frequency": 4897000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#B0D0#1",
+                                "obs_spw_number": 1,
+                                "center_frequency": 5025000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            }
+                        ]
+                    },
+                    {
+                        "scan_num": "2",
+                        "subscan_num": "1",
+                        "target_name": "3C48",
+                        "starttime": "2024-11-29 23:18:16.000",
+                        "endtime": "2024-11-29 23:19:15.850",
+                        "duration": 0.000692708337737713,
+                        "integration_time": 2.064,
+                        "band": "C",
+                        "polarizations": "RR, RL, LR, LL",
+                        "ra": 24.422080963402365,
+                        "dec": 33.15975916513661,
+                        "observation_configuration_number": "1",
+                        "observation_configuration_id": "252896",
+                        "intent": "SYSTEM_CONFIGURATION",
+                        "subscan_id": "109263353",
+                        "aggregate_bandwidth": 2024000000.0,
+                        "min_frequency": 4489000000.0,
+                        "max_frequency": 6513000000.0,
+                        "spws": [
+                            {
+                                "spw_name": "EVLA_C#A0C0#2",
+                                "obs_spw_number": 2,
+                                "center_frequency": 4553000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#A0C0#3",
+                                "obs_spw_number": 3,
+                                "center_frequency": 4681000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#A0C0#4",
+                                "obs_spw_number": 4,
+                                "center_frequency": 4809000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#A0C0#5",
+                                "obs_spw_number": 5,
+                                "center_frequency": 4937000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#A0C0#6",
+                                "obs_spw_number": 6,
+                                "center_frequency": 5065000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#A0C0#7",
+                                "obs_spw_number": 7,
+                                "center_frequency": 5193000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#A0C0#8",
+                                "obs_spw_number": 8,
+                                "center_frequency": 5321000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#A0C0#9",
+                                "obs_spw_number": 9,
+                                "center_frequency": 5449000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#B0D0#10",
+                                "obs_spw_number": 10,
+                                "center_frequency": 5553000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#B0D0#11",
+                                "obs_spw_number": 11,
+                                "center_frequency": 5681000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#B0D0#12",
+                                "obs_spw_number": 12,
+                                "center_frequency": 5809000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#B0D0#13",
+                                "obs_spw_number": 13,
+                                "center_frequency": 5937000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#B0D0#14",
+                                "obs_spw_number": 14,
+                                "center_frequency": 6065000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#B0D0#15",
+                                "obs_spw_number": 15,
+                                "center_frequency": 6193000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#B0D0#16",
+                                "obs_spw_number": 16,
+                                "center_frequency": 6321000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#B0D0#17",
+                                "obs_spw_number": 17,
+                                "center_frequency": 6449000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            }
+                        ]
+                    },
+                    {
+                        "scan_num": "3",
+                        "subscan_num": "1",
+                        "target_name": "3C48",
+                        "starttime": "2024-11-29 23:19:15.850",
+                        "endtime": "2024-11-29 23:23:15.150",
+                        "duration": 0.002769675920717418,
+                        "integration_time": 2.011,
+                        "band": "C",
+                        "polarizations": "RR, RL, LR, LL",
+                        "ra": 24.422080963402365,
+                        "dec": 33.15975916513661,
+                        "observation_configuration_number": "1",
+                        "observation_configuration_id": "252896",
+                        "intent": "CALIBRATE_BANDPASS CALIBRATE_DELAY CALIBRATE_FLUX",
+                        "subscan_id": "109263354",
+                        "aggregate_bandwidth": 2024000000.0,
+                        "min_frequency": 4489000000.0,
+                        "max_frequency": 6513000000.0,
+                        "spws": [
+                            {
+                                "spw_name": "EVLA_C#A0C0#2",
+                                "obs_spw_number": 2,
+                                "center_frequency": 4553000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#A0C0#3",
+                                "obs_spw_number": 3,
+                                "center_frequency": 4681000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#A0C0#4",
+                                "obs_spw_number": 4,
+                                "center_frequency": 4809000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#A0C0#5",
+                                "obs_spw_number": 5,
+                                "center_frequency": 4937000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#A0C0#6",
+                                "obs_spw_number": 6,
+                                "center_frequency": 5065000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#A0C0#7",
+                                "obs_spw_number": 7,
+                                "center_frequency": 5193000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#A0C0#8",
+                                "obs_spw_number": 8,
+                                "center_frequency": 5321000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#A0C0#9",
+                                "obs_spw_number": 9,
+                                "center_frequency": 5449000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#B0D0#10",
+                                "obs_spw_number": 10,
+                                "center_frequency": 5553000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#B0D0#11",
+                                "obs_spw_number": 11,
+                                "center_frequency": 5681000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#B0D0#12",
+                                "obs_spw_number": 12,
+                                "center_frequency": 5809000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#B0D0#13",
+                                "obs_spw_number": 13,
+                                "center_frequency": 5937000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#B0D0#14",
+                                "obs_spw_number": 14,
+                                "center_frequency": 6065000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#B0D0#15",
+                                "obs_spw_number": 15,
+                                "center_frequency": 6193000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#B0D0#16",
+                                "obs_spw_number": 16,
+                                "center_frequency": 6321000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#B0D0#17",
+                                "obs_spw_number": 17,
+                                "center_frequency": 6449000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            }
+                        ]
+                    },
+                    {
+                        "scan_num": "4",
+                        "subscan_num": "1",
+                        "target_name": "J0005+3820",
+                        "starttime": "2024-11-29 23:23:15.150",
+                        "endtime": "2024-11-29 23:26:14.700",
+                        "duration": 0.002078124991385266,
+                        "integration_time": 2.017,
+                        "band": "C",
+                        "polarizations": "RR, RL, LR, LL",
+                        "ra": 1.4882308693514288,
+                        "dec": 38.33754127110532,
+                        "observation_configuration_number": "1",
+                        "observation_configuration_id": "252896",
+                        "intent": "CALIBRATE_AMPLI CALIBRATE_PHASE",
+                        "subscan_id": "109263355",
+                        "aggregate_bandwidth": 2024000000.0,
+                        "min_frequency": 4489000000.0,
+                        "max_frequency": 6513000000.0,
+                        "spws": [
+                            {
+                                "spw_name": "EVLA_C#A0C0#2",
+                                "obs_spw_number": 2,
+                                "center_frequency": 4553000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#A0C0#3",
+                                "obs_spw_number": 3,
+                                "center_frequency": 4681000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#A0C0#4",
+                                "obs_spw_number": 4,
+                                "center_frequency": 4809000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#A0C0#5",
+                                "obs_spw_number": 5,
+                                "center_frequency": 4937000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#A0C0#6",
+                                "obs_spw_number": 6,
+                                "center_frequency": 5065000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#A0C0#7",
+                                "obs_spw_number": 7,
+                                "center_frequency": 5193000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#A0C0#8",
+                                "obs_spw_number": 8,
+                                "center_frequency": 5321000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#A0C0#9",
+                                "obs_spw_number": 9,
+                                "center_frequency": 5449000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#B0D0#10",
+                                "obs_spw_number": 10,
+                                "center_frequency": 5553000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#B0D0#11",
+                                "obs_spw_number": 11,
+                                "center_frequency": 5681000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#B0D0#12",
+                                "obs_spw_number": 12,
+                                "center_frequency": 5809000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#B0D0#13",
+                                "obs_spw_number": 13,
+                                "center_frequency": 5937000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#B0D0#14",
+                                "obs_spw_number": 14,
+                                "center_frequency": 6065000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#B0D0#15",
+                                "obs_spw_number": 15,
+                                "center_frequency": 6193000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#B0D0#16",
+                                "obs_spw_number": 16,
+                                "center_frequency": 6321000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#B0D0#17",
+                                "obs_spw_number": 17,
+                                "center_frequency": 6449000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            }
+                        ]
+                    },
+                    {
+                        "scan_num": "5",
+                        "subscan_num": "1",
+                        "target_name": "iPTF15dof",
+                        "starttime": "2024-11-29 23:26:14.700",
+                        "endtime": "2024-11-29 23:31:13.850",
+                        "duration": 0.0034623842730070464,
+                        "integration_time": 2.021,
+                        "band": "C",
+                        "polarizations": "RR, RL, LR, LL",
+                        "ra": 351.0546874980072,
+                        "dec": 35.12695555291087,
+                        "observation_configuration_number": "1",
+                        "observation_configuration_id": "252896",
+                        "intent": "OBSERVE_TARGET",
+                        "subscan_id": "109263356",
+                        "aggregate_bandwidth": 2024000000.0,
+                        "min_frequency": 4489000000.0,
+                        "max_frequency": 6513000000.0,
+                        "spws": [
+                            {
+                                "spw_name": "EVLA_C#A0C0#2",
+                                "obs_spw_number": 2,
+                                "center_frequency": 4553000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#A0C0#3",
+                                "obs_spw_number": 3,
+                                "center_frequency": 4681000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#A0C0#4",
+                                "obs_spw_number": 4,
+                                "center_frequency": 4809000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#A0C0#5",
+                                "obs_spw_number": 5,
+                                "center_frequency": 4937000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#A0C0#6",
+                                "obs_spw_number": 6,
+                                "center_frequency": 5065000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#A0C0#7",
+                                "obs_spw_number": 7,
+                                "center_frequency": 5193000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#A0C0#8",
+                                "obs_spw_number": 8,
+                                "center_frequency": 5321000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#A0C0#9",
+                                "obs_spw_number": 9,
+                                "center_frequency": 5449000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#B0D0#10",
+                                "obs_spw_number": 10,
+                                "center_frequency": 5553000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#B0D0#11",
+                                "obs_spw_number": 11,
+                                "center_frequency": 5681000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#B0D0#12",
+                                "obs_spw_number": 12,
+                                "center_frequency": 5809000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#B0D0#13",
+                                "obs_spw_number": 13,
+                                "center_frequency": 5937000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#B0D0#14",
+                                "obs_spw_number": 14,
+                                "center_frequency": 6065000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#B0D0#15",
+                                "obs_spw_number": 15,
+                                "center_frequency": 6193000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#B0D0#16",
+                                "obs_spw_number": 16,
+                                "center_frequency": 6321000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#B0D0#17",
+                                "obs_spw_number": 17,
+                                "center_frequency": 6449000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            }
+                        ]
+                    },
+                    {
+                        "scan_num": "6",
+                        "subscan_num": "1",
+                        "target_name": "J0005+3820",
+                        "starttime": "2024-11-29 23:31:13.850",
+                        "endtime": "2024-11-29 23:33:13.550",
+                        "duration": 0.0013854166681994684,
+                        "integration_time": 2.029,
+                        "band": "C",
+                        "polarizations": "RR, RL, LR, LL",
+                        "ra": 1.4882308693514288,
+                        "dec": 38.33754127110532,
+                        "observation_configuration_number": "1",
+                        "observation_configuration_id": "252896",
+                        "intent": "CALIBRATE_AMPLI CALIBRATE_PHASE",
+                        "subscan_id": "109263357",
+                        "aggregate_bandwidth": 2024000000.0,
+                        "min_frequency": 4489000000.0,
+                        "max_frequency": 6513000000.0,
+                        "spws": [
+                            {
+                                "spw_name": "EVLA_C#A0C0#2",
+                                "obs_spw_number": 2,
+                                "center_frequency": 4553000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#A0C0#3",
+                                "obs_spw_number": 3,
+                                "center_frequency": 4681000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#A0C0#4",
+                                "obs_spw_number": 4,
+                                "center_frequency": 4809000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#A0C0#5",
+                                "obs_spw_number": 5,
+                                "center_frequency": 4937000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#A0C0#6",
+                                "obs_spw_number": 6,
+                                "center_frequency": 5065000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#A0C0#7",
+                                "obs_spw_number": 7,
+                                "center_frequency": 5193000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#A0C0#8",
+                                "obs_spw_number": 8,
+                                "center_frequency": 5321000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#A0C0#9",
+                                "obs_spw_number": 9,
+                                "center_frequency": 5449000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#B0D0#10",
+                                "obs_spw_number": 10,
+                                "center_frequency": 5553000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#B0D0#11",
+                                "obs_spw_number": 11,
+                                "center_frequency": 5681000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#B0D0#12",
+                                "obs_spw_number": 12,
+                                "center_frequency": 5809000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#B0D0#13",
+                                "obs_spw_number": 13,
+                                "center_frequency": 5937000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#B0D0#14",
+                                "obs_spw_number": 14,
+                                "center_frequency": 6065000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#B0D0#15",
+                                "obs_spw_number": 15,
+                                "center_frequency": 6193000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#B0D0#16",
+                                "obs_spw_number": 16,
+                                "center_frequency": 6321000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#B0D0#17",
+                                "obs_spw_number": 17,
+                                "center_frequency": 6449000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            }
+                        ]
+                    },
+                    {
+                        "scan_num": "7",
+                        "subscan_num": "1",
+                        "target_name": "iPTF15dof",
+                        "starttime": "2024-11-29 23:33:13.550",
+                        "endtime": "2024-11-29 23:37:42.800",
+                        "duration": 0.0031163194362306967,
+                        "integration_time": 2.009,
+                        "band": "C",
+                        "polarizations": "RR, RL, LR, LL",
+                        "ra": 351.0546874980072,
+                        "dec": 35.12695555291087,
+                        "observation_configuration_number": "1",
+                        "observation_configuration_id": "252896",
+                        "intent": "OBSERVE_TARGET",
+                        "subscan_id": "109263358",
+                        "aggregate_bandwidth": 2024000000.0,
+                        "min_frequency": 4489000000.0,
+                        "max_frequency": 6513000000.0,
+                        "spws": [
+                            {
+                                "spw_name": "EVLA_C#A0C0#2",
+                                "obs_spw_number": 2,
+                                "center_frequency": 4553000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#A0C0#3",
+                                "obs_spw_number": 3,
+                                "center_frequency": 4681000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#A0C0#4",
+                                "obs_spw_number": 4,
+                                "center_frequency": 4809000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#A0C0#5",
+                                "obs_spw_number": 5,
+                                "center_frequency": 4937000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#A0C0#6",
+                                "obs_spw_number": 6,
+                                "center_frequency": 5065000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#A0C0#7",
+                                "obs_spw_number": 7,
+                                "center_frequency": 5193000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#A0C0#8",
+                                "obs_spw_number": 8,
+                                "center_frequency": 5321000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#A0C0#9",
+                                "obs_spw_number": 9,
+                                "center_frequency": 5449000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#B0D0#10",
+                                "obs_spw_number": 10,
+                                "center_frequency": 5553000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#B0D0#11",
+                                "obs_spw_number": 11,
+                                "center_frequency": 5681000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#B0D0#12",
+                                "obs_spw_number": 12,
+                                "center_frequency": 5809000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#B0D0#13",
+                                "obs_spw_number": 13,
+                                "center_frequency": 5937000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#B0D0#14",
+                                "obs_spw_number": 14,
+                                "center_frequency": 6065000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#B0D0#15",
+                                "obs_spw_number": 15,
+                                "center_frequency": 6193000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#B0D0#16",
+                                "obs_spw_number": 16,
+                                "center_frequency": 6321000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#B0D0#17",
+                                "obs_spw_number": 17,
+                                "center_frequency": 6449000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            }
+                        ]
+                    },
+                    {
+                        "scan_num": "8",
+                        "subscan_num": "1",
+                        "target_name": "J0005+3820",
+                        "starttime": "2024-11-29 23:37:42.800",
+                        "endtime": "2024-11-29 23:39:42.450",
+                        "duration": 0.0013848379676346667,
+                        "integration_time": 2.028,
+                        "band": "C",
+                        "polarizations": "RR, RL, LR, LL",
+                        "ra": 1.4882308693514288,
+                        "dec": 38.33754127110532,
+                        "observation_configuration_number": "1",
+                        "observation_configuration_id": "252896",
+                        "intent": "CALIBRATE_AMPLI CALIBRATE_PHASE",
+                        "subscan_id": "109263359",
+                        "aggregate_bandwidth": 2024000000.0,
+                        "min_frequency": 4489000000.0,
+                        "max_frequency": 6513000000.0,
+                        "spws": [
+                            {
+                                "spw_name": "EVLA_C#A0C0#2",
+                                "obs_spw_number": 2,
+                                "center_frequency": 4553000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#A0C0#3",
+                                "obs_spw_number": 3,
+                                "center_frequency": 4681000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#A0C0#4",
+                                "obs_spw_number": 4,
+                                "center_frequency": 4809000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#A0C0#5",
+                                "obs_spw_number": 5,
+                                "center_frequency": 4937000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#A0C0#6",
+                                "obs_spw_number": 6,
+                                "center_frequency": 5065000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#A0C0#7",
+                                "obs_spw_number": 7,
+                                "center_frequency": 5193000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#A0C0#8",
+                                "obs_spw_number": 8,
+                                "center_frequency": 5321000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#A0C0#9",
+                                "obs_spw_number": 9,
+                                "center_frequency": 5449000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#B0D0#10",
+                                "obs_spw_number": 10,
+                                "center_frequency": 5553000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#B0D0#11",
+                                "obs_spw_number": 11,
+                                "center_frequency": 5681000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#B0D0#12",
+                                "obs_spw_number": 12,
+                                "center_frequency": 5809000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#B0D0#13",
+                                "obs_spw_number": 13,
+                                "center_frequency": 5937000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#B0D0#14",
+                                "obs_spw_number": 14,
+                                "center_frequency": 6065000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#B0D0#15",
+                                "obs_spw_number": 15,
+                                "center_frequency": 6193000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#B0D0#16",
+                                "obs_spw_number": 16,
+                                "center_frequency": 6321000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#B0D0#17",
+                                "obs_spw_number": 17,
+                                "center_frequency": 6449000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            }
+                        ]
+                    },
+                    {
+                        "scan_num": "9",
+                        "subscan_num": "1",
+                        "target_name": "iPTF15dof",
+                        "starttime": "2024-11-29 23:39:42.450",
+                        "endtime": "2024-11-29 23:44:11.750",
+                        "duration": 0.003116898144071456,
+                        "integration_time": 2.025,
+                        "band": "C",
+                        "polarizations": "RR, RL, LR, LL",
+                        "ra": 351.0546874980072,
+                        "dec": 35.12695555291087,
+                        "observation_configuration_number": "1",
+                        "observation_configuration_id": "252896",
+                        "intent": "OBSERVE_TARGET",
+                        "subscan_id": "109263360",
+                        "aggregate_bandwidth": 2024000000.0,
+                        "min_frequency": 4489000000.0,
+                        "max_frequency": 6513000000.0,
+                        "spws": [
+                            {
+                                "spw_name": "EVLA_C#A0C0#2",
+                                "obs_spw_number": 2,
+                                "center_frequency": 4553000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#A0C0#3",
+                                "obs_spw_number": 3,
+                                "center_frequency": 4681000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#A0C0#4",
+                                "obs_spw_number": 4,
+                                "center_frequency": 4809000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#A0C0#5",
+                                "obs_spw_number": 5,
+                                "center_frequency": 4937000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#A0C0#6",
+                                "obs_spw_number": 6,
+                                "center_frequency": 5065000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#A0C0#7",
+                                "obs_spw_number": 7,
+                                "center_frequency": 5193000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#A0C0#8",
+                                "obs_spw_number": 8,
+                                "center_frequency": 5321000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#A0C0#9",
+                                "obs_spw_number": 9,
+                                "center_frequency": 5449000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#B0D0#10",
+                                "obs_spw_number": 10,
+                                "center_frequency": 5553000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#B0D0#11",
+                                "obs_spw_number": 11,
+                                "center_frequency": 5681000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#B0D0#12",
+                                "obs_spw_number": 12,
+                                "center_frequency": 5809000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#B0D0#13",
+                                "obs_spw_number": 13,
+                                "center_frequency": 5937000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#B0D0#14",
+                                "obs_spw_number": 14,
+                                "center_frequency": 6065000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#B0D0#15",
+                                "obs_spw_number": 15,
+                                "center_frequency": 6193000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#B0D0#16",
+                                "obs_spw_number": 16,
+                                "center_frequency": 6321000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#B0D0#17",
+                                "obs_spw_number": 17,
+                                "center_frequency": 6449000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            }
+                        ]
+                    },
+                    {
+                        "scan_num": "10",
+                        "subscan_num": "1",
+                        "target_name": "J0005+3820",
+                        "starttime": "2024-11-29 23:44:11.750",
+                        "endtime": "2024-11-29 23:46:11.400",
+                        "duration": 0.0013848379749106243,
+                        "integration_time": 2.028,
+                        "band": "C",
+                        "polarizations": "RR, RL, LR, LL",
+                        "ra": 1.4882308693514288,
+                        "dec": 38.33754127110532,
+                        "observation_configuration_number": "1",
+                        "observation_configuration_id": "252896",
+                        "intent": "CALIBRATE_AMPLI CALIBRATE_PHASE",
+                        "subscan_id": "109263361",
+                        "aggregate_bandwidth": 2024000000.0,
+                        "min_frequency": 4489000000.0,
+                        "max_frequency": 6513000000.0,
+                        "spws": [
+                            {
+                                "spw_name": "EVLA_C#A0C0#2",
+                                "obs_spw_number": 2,
+                                "center_frequency": 4553000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#A0C0#3",
+                                "obs_spw_number": 3,
+                                "center_frequency": 4681000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#A0C0#4",
+                                "obs_spw_number": 4,
+                                "center_frequency": 4809000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#A0C0#5",
+                                "obs_spw_number": 5,
+                                "center_frequency": 4937000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#A0C0#6",
+                                "obs_spw_number": 6,
+                                "center_frequency": 5065000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#A0C0#7",
+                                "obs_spw_number": 7,
+                                "center_frequency": 5193000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#A0C0#8",
+                                "obs_spw_number": 8,
+                                "center_frequency": 5321000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#A0C0#9",
+                                "obs_spw_number": 9,
+                                "center_frequency": 5449000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#B0D0#10",
+                                "obs_spw_number": 10,
+                                "center_frequency": 5553000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#B0D0#11",
+                                "obs_spw_number": 11,
+                                "center_frequency": 5681000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#B0D0#12",
+                                "obs_spw_number": 12,
+                                "center_frequency": 5809000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#B0D0#13",
+                                "obs_spw_number": 13,
+                                "center_frequency": 5937000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#B0D0#14",
+                                "obs_spw_number": 14,
+                                "center_frequency": 6065000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#B0D0#15",
+                                "obs_spw_number": 15,
+                                "center_frequency": 6193000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#B0D0#16",
+                                "obs_spw_number": 16,
+                                "center_frequency": 6321000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            },
+                            {
+                                "spw_name": "EVLA_C#B0D0#17",
+                                "obs_spw_number": 17,
+                                "center_frequency": 6449000000.0,
+                                "bandwidth": 128000000.0,
+                                "num_channels": 64,
+                                "spectral_resolution": 2000000.0
+                            }
+                        ]
+                    }
+                ],
+                "cals": [
+                    {
+                        "sci_prod_locator": "uid://evla/calibration/9747ecdb-a873-483f-b610-9210695e0b51",
+                        "file_name": "24B-465.sb47226343.eb47329790.60643.9672167824.2024_11_30T00_01_18.caltables.tar",
+                        "mousId": None
+                    }
+                ],
+                "sci_prod_locator": "uid://evla/execblock/80b73112-43b1-439d-938d-1d83d46974cb",
+                "acknowledgements": [
+                    "The National Radio Astronomy Observatory and Green Bank Observatory are facilities of the U.S. National Science Foundation operated under cooperative agreement by Associated Universities, Inc."
+                ]
+            }
+        ]
+    },
+    "response_msg": {
+        "success": True,
+        "code": 0,
+        "message": "Request processed"
+    }
+}

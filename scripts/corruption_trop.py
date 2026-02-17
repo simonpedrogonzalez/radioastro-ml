@@ -11,8 +11,8 @@ from casatasks import tclean, rmtables, immath, flagdata, visstat
 from casatools import simulator, image, msmetadata
 
 
-MS_IN  = "3c391_ctm_mosaic_10s_spw0.gaincal_corr.ms"
-MS_OUT = "3c391_ctm_mosaic_10s_spw0.gaincal_corr.tropcorrupt.ms"
+MS_IN  = "data/J1822_spw0.calibrated.ms"
+MS_OUT = "data/J1822_spw0.tropcorrupt.ms"
 
 GAINCAL_FIELD = "J1822-0938"
 SPW = "0"
@@ -23,7 +23,7 @@ PWV_MM = 50.0        # total PWV [mm] (bigger -> stronger effect)
 DELTAPWV_FRAC = 0.7   # RMS PWV fluctuations as fraction of PWV (big for "obvious")
 BETA = 1.7             # exponent of fractional brownian motion
 WINDSPEED_MPS = 44.0    # screen advection speed [m/s]
-SIMINT_S = 0.5         # simulation timestep [s] (-1 lets tool choose)
+SIMINT_S = -1        # simulation timestep [s] (-1 lets tool choose)
 
 TCLEAN_KW = dict(
     field=GAINCAL_FIELD,

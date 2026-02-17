@@ -1,0 +1,43 @@
+Using table: tap_schema.obscore
+             column_name        datatype unit ucd                                        description
+0         access_estsize    votable:long                         Estimated size of dataset in kbytes
+1          access_format    votable:char                                         File content format
+2             access_url    votable:char                          URL used to access (download) data
+3    aggregate_bandwidth  votable:double           Aggregate bandwidth across all spectral window...
+4             bandwidths    votable:char           Bandwidths of the spectral windows in this pro...
+5            calib_level     votable:int                              Calibration level {0, 1, 2, 3}
+6     center_frequencies    votable:char           Center frequencies of the spectral windows in ...
+7          configuration    votable:char                                    Array configuration used
+8       dataproduct_type    votable:char                      Logical data product type (image etc.)
+9                 em_max  votable:double                                Stop in spectral coordinates
+10                em_min  votable:double                               Start in spectral coordinates
+11          em_res_power  votable:double                                    Spectral resolving power
+12                em_xel  votable:double                                                            
+13         facility_name    votable:char                   Name of the facility used for observation
+14              freq_max  votable:double                                          frequency high end
+15              freq_min  votable:double                                           frequency low end
+16       instrument_name    votable:char                        Name of the instrument for this obs.
+17           max_uv_dist  votable:double                                         Maximum UV Distance
+18          num_antennas   votable:short                                     Number of antennas used
+19         nums_channels    votable:char           Number of channels of each spectral window in ...
+20        obs_collection    votable:char                                 Name of the data collection
+21                obs_id    votable:char                                              Observation ID
+22     obs_publisher_did    votable:char                   Dataset identifier given by the publisher
+23                 o_ucd    votable:char                  UCD of observable (eg. phot. flux density)
+24            pol_states    votable:char                         List of polarization states or NULL
+25          project_code    votable:char                            The project code for this entry.
+26    proprietary_status    votable:char                        The proprietary status of this entry
+27              qa_notes    votable:char                         QA notes associated with this entry
+28              scan_num     votable:int                             The scan number for this entry.
+29                 s_dec  votable:double                                   Central declination, ICRS
+30                 s_fov  votable:double                     Diameter (bounds) of the covered region
+31  spectral_resolutions    votable:char           Spectral Resolutions of the spectral windows i...
+32             spw_names    votable:char           Names of the spectral windows in this product,...
+33                  s_ra  votable:double                               Central right ascension, ICRS
+34              s_region    votable:char                  Region covered as specified in STC or ADQL
+35          s_resolution  votable:double                          Spatial resolution of data as FWHM
+36           target_name    votable:char                        Astronomical object observed, if any
+37             t_exptime  votable:double                                         Total exposure time
+38                 t_max  votable:double                                            Stop time in MJD
+39                 t_min  votable:double                                           Start time in MJD
+40          t_resolution  votable:double                                 Temporal resolution in FWHM
