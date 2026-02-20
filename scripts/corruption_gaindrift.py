@@ -6,12 +6,15 @@
 import os; os.environ.setdefault("DISPLAY", ":0")
 # MY HELPERS
 import importlib
-from scripts import io_utils, img_utils, closure
-for lib in [io_utils, img_utils, closure]:
+from scripts import io_utils, img_utils, closure, corruption, corrfn, timegrid
+for lib in [io_utils, img_utils, closure, corruption, corrfn, timegrid]:
     importlib.reload(lib)
 from .img_utils import make_frac_residuals, casa_image_to_png, make_clean, make_dirty, make_diff, img_rms, fracres_before_after_png
 from .io_utils import copy_ms, hash_casa_table_cols, col_diff
 from .closure import compare_closure_three_int, plot_phase_closure, constant_per_antena_phase_corruption, baseline_phase_corruption
+from .corruption import AntennaGainCorruption
+from .corrfn import MaxSineWave, MaxLinearDrift
+from .timegrid import TimeGrid
 
 import numpy as np
 from casatasks import tclean, rmtables, immath, gaincal, ft
@@ -1263,9 +1266,9 @@ def compare_cols(ms, colA="DATA", colB="CORRECTED_DATA"):
 
 def main():
     # SETUP
-    print(f"MS_IN hash: {hash_casa_table_cols(MS_IN, cols=["DATA"])}")
+    print(f"MS_IN hash: {hash_casa_table_cols(MS_IN, cols=['DATA'])}")
     copy_ms(MS_IN, MS_OUT)
-    print(f"MS_OUT hash:  {hash_casa_table_cols(MS_OUT, cols=["DATA"])}")
+    print(f"MS_OUT hash:  {hash_casa_table_cols(MS_OUT, cols=['DATA'])}")
     col_diff(MS_IN, MS_OUT)
 
     # CORRUPTION
@@ -1333,7 +1336,7 @@ def main():
 
     plot_before_after_vis_time(MS_IN, MS_OUT, GAINCAL_FIELD, SPW)
     col_diff(MS_IN, MS_OUT)
-    print(f"MS_OUT hash:  {hash_casa_table_cols(MS_OUT, cols=["DATA"])}")
+    print(f"MS_OUT hash:  {hash_casa_table_cols(MS_OUT, cols=['DATA'])}")
 
     print("[DONE] Outputs:")
     print(f"  - {MS_OUT}")
@@ -1548,6 +1551,273 @@ def main_recoverable_corruption():
     )
 
     col_diff(MS_IN, MS_OUT)
+
+
+
+    print("[DONE OptionA] Outputs:")
+    print(f"  - Corrupted MS: {MS_OUT}")
+    print(f"  - Injected gain table: {gtab_injected}")
+    print(f"  - Solved (recovered) gain table: {gtab_solved}")
+    print(f"  - Clean images: {IMG_BASE_C}.image, {IMG_CORR_C}.image, {IMG_RECOV_C}.image")
+
+
+
+def new_corruption():
+    
+    MS_BASE = "data/J1822_spw0.calibrated.ms"
+    MS_IN  = "J1822_spw0.calibrated.twice.ms"
+
+    # RECALIBRATE
+    copy_ms(MS_BASE, MS_IN)
+    gtab_base = f"{MS_IN}.initial-recalibration.G"
+    gaincal(
+        vis=MS_IN,
+        caltable=gtab_base,
+        field=GAINCAL_FIELD,
+        spw=SPW,
+        refant="ea21",
+        refantmode="strict",
+        gaintype="G",
+        calmode="p",
+        solint="int",
+        combine="scan",
+        minsnr=10,
+        solnorm=False,
+        smodel=[1,0,0,0],
+    )
+
+    applycal(
+        vis=MS_IN,
+        field=GAINCAL_FIELD,
+        spw=SPW,
+        gaintable=[gtab_base],
+        interp=["linear"],
+        calwt=False,
+    )
+
+    tb = table()
+    tb.open(MS_IN, nomodify=False)
+    tb.putcol("DATA", tb.getcol("CORRECTED_DATA"))
+    tb.close()
+
+    print("INIT CAL")
+    col_diff(MS_BASE, MS_IN)
+
+    # DONE RECALIBRATED, MS_IN is the recalibrated copy
+
+
+    # SETUP
+    # print(f"MS_IN hash: {hash_casa_table_cols(MS_IN, cols=['DATA'])}")
+    copy_ms(MS_IN, MS_OUT)
+    # print(f"MS_OUT hash (pre-corrupt): {hash_casa_table_cols(MS_OUT, cols=['DATA'])}")
+    # col_diff(MS_IN, MS_OUT)
+
+    # CORRUPT
+
+    gtab_injected = f"{MS_OUT}.Gcorr"
+
+    AntennaGainCorruption(
+        timegrid=TimeGrid(solint='int'),
+        amp_fn=None,
+        phase_fn=MaxSineWave(max_amp=np.deg2rad(10.0), period_s=60*60)
+    ).build_corrtable(MS_OUT, gtab_injected)\
+        .apply_corrtable(MS_OUT, gtab_injected)
+    
+    
+
+    print("CORRUPTION")
+    col_diff(MS_IN, MS_OUT)
+
+    print(f"[INFO] Injected corruption table: {gtab_injected}")
+
+    # RECOVER
+
+    gtab_solved = MS_OUT + f".recover"
+    rmtables(gtab_solved)
+
+    print(f"[INFO] Solving gains back into: {gtab_solved}")
+
+    gaincal(
+        vis=MS_OUT,
+        caltable=gtab_solved,
+        field=GAINCAL_FIELD,
+        spw=SPW,
+        refant="ea21",
+        refantmode="strict",
+        gaintype="G",
+        calmode="p",
+        solint="int",
+        combine="scan",
+        minsnr=10,
+        solnorm=False,
+        smodel=[1,0,0,0],
+        # gaintable=[gtab_base],     # <-- critical
+        interp=["linear"],
+    )
+
+    # gaincal(
+    #     vis=MS_OUT,
+    #     caltable=gtab_solved,
+    #     field=GAINCAL_FIELD,
+    #     spw=SPW,
+    #     refant="ea21",
+    #     gaintype="G",
+    #     calmode="p",
+    #     solint="int", # scan
+    #     # minsnr=5,
+    #     solnorm=True,
+
+    # )
+
+    # gaincal(
+    #     vis=MS_OUT,
+    #     caltable=gtab_solved,
+    #     field=GAINCAL_FIELD,
+    #     spw=SPW,
+    #     refant="ea21",
+    #     gaintype="G",
+    #     calmode="p",
+    #     solint="int", # scan
+    #     combine='scan',
+    #     # minsnr=5,
+    #     solnorm=False
+    # )
+
+    # gaincal(
+    #     vis=MS_OUT,
+    #     caltable=gtab_solved,
+    #     field=GAINCAL_FIELD,
+    #     spw=SPW,
+    #     refant="ea21",
+    #     refantmode="strict",
+    #     gaintype="G",
+    #     calmode="p",
+    #     solint="int",
+    #     combine="scan",
+    #     minsnr=10,
+    #     solnorm=False,
+    #     smodel=[1, 0, 0, 0],   # <--- 1 Jy Stokes I point source model
+    # )
+
+    MS_REC = MS_OUT + ".recovered_for_imaging.ms"
+    
+    rmtables(MS_REC)
+    copy_ms(MS_OUT, MS_REC)
+    print("[INFO] Applying solved gains to undo corruption (-> CORRECTED_DATA)")
+    applycal(
+        vis=MS_REC,
+        field=GAINCAL_FIELD,
+        spw=SPW,
+        gaintable=[gtab_solved],
+        interp=["linear"],
+        calwt=False,
+    )
+    tb = table()
+    tb.open(MS_REC, nomodify=False)
+    data = tb.getcol("CORRECTED_DATA")
+    tb.putcol("DATA", data)
+    tb.close()
+
+
+    print("RECOVERY OUT VS REC")
+    col_diff(MS_OUT, MS_REC)
+
+    print("RECOVERY IN VS REC")
+    col_diff(MS_IN, MS_REC)
+
+
+    # Check phase closure
+    a, b, c = 18, 0, 1 # antenna IDs
+    ddid = 0 # DATA_DESC_ID ~ (SPW, corr) so it should be 0
+    chan_idx = 32 # channel
+    corr_idx = 0 # corr hand RR
+
+    times, P0, P1, P2, _, _, _, report = compare_closure_three_int(
+        MS_IN, MS_OUT, MS_REC,
+        a=a, b=b, c=c,
+        ddid=ddid,
+        chan_idx=chan_idx,
+        corr_idx=corr_idx,
+        timerange=ZOOM,
+        col="DATA",
+    )
+
+    with open("images/closure.txt", "a") as f:
+        f.write(report + "\n\n")
+
+    plot_phase_closure(
+        times,
+        P0,
+        P1,
+        P2,
+        title=f"Closure phase ants=({a},{b},{c}), corr={corr_idx}, spw={SPW}, chan={chan_idx}, timerange={ZOOM}",
+        out_png="images/closure_phase_vs_time.png",
+    )
+
+    # Before / After visibilities
+    plot_zoomed_before_after_vis_time_2x2(MS_IN, MS_OUT, "images/zoom_base_corrupted.png")
+    plot_before_after_vis_time(MS_IN, MS_OUT, GAINCAL_FIELD, SPW)
+
+    # Before / After visibilities
+    plot_zoomed_before_after_vis_time_2x2(MS_IN, MS_REC, "images/zoom_base_recovered.png")
+    plot_before_after_vis_time(MS_IN, MS_REC, GAINCAL_FIELD, SPW)
+
+    
+    IMG_BASE_C     = "img_base_clean"
+    IMG_CORR_C     = "img_corrupted_clean"
+    IMG_RECOV_C    = "img_recovered_clean"
+    
+    make_clean(MS_IN,  IMG_BASE_C,  TCLEAN_KW)
+    make_clean(MS_OUT, IMG_CORR_C,  TCLEAN_KW)
+    make_clean(MS_REC, IMG_RECOV_C, TCLEAN_KW)
+
+    IMG_FRAC_BASE = "img_base_fracres"
+    make_frac_residuals(
+        residual_im=IMG_BASE_C,
+        reference_im=IMG_BASE_C,
+        out_im=IMG_FRAC_BASE,
+    )
+
+    IMG_FRAC_CORR = "img_corrupted_fracres"
+    make_frac_residuals(
+        residual_im=IMG_CORR_C,
+        reference_im=IMG_BASE_C,
+        out_im=IMG_FRAC_CORR,
+    )
+
+    IMG_FRAC_REC = "img_recovered_fracres"
+    make_frac_residuals(
+        residual_im=IMG_RECOV_C,
+        reference_im=IMG_BASE_C,
+        out_im=IMG_FRAC_REC,
+    )
+
+    fracres_before_after_png(
+        before_im=f"{IMG_FRAC_BASE}.image",      # or baseline vs corrupted measure
+        after_im=f"{IMG_FRAC_REC}.image",
+        out_png="images/fracres_base_recovered.png",
+        crop_half=64,
+    )
+
+    fracres_before_after_png(
+        before_im=f"{IMG_FRAC_BASE}.image",      # or baseline vs corrupted measure
+        after_im=f"{IMG_FRAC_CORR}.image",
+        out_png="images/fracres_base_corrupted.png",
+        crop_half=64,
+    )
+
+    fracres_before_after_png(
+        before_im=f"{IMG_FRAC_CORR}.image",      # or baseline vs corrupted measure
+        after_im=f"{IMG_FRAC_REC}.image",
+        out_png="images/fracres_corrupted_recovered.png",
+        crop_half=64,
+    )
+
+    col_diff(MS_IN, MS_OUT)
+
+    plot_gtab_corrupt_vs_recovered_all_ants_2x2(
+        gtab_injected, gtab_solved
+    )
 
 
 

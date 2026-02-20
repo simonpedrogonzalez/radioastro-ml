@@ -7,4 +7,4 @@ for lib in [corruption_gaindrift]:
     importlib.reload(lib)
 
 
-corruption_gaindrift.main_recoverable_corruption()
+corruption_gaindrift.new_corruption()

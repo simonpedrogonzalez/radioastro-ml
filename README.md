@@ -1,6 +1,64 @@
 # radioastro-ml
 ML for Radoastronomy calibration debugging
 
+# Week 6: Feb 16
+
+Recap from Week 5:
+
+I already had a filtered list of calibrators that are:
+- Bright (0.5 Jy)
+- Are "P" ('great calibrator') on at least one configuration and band (I'm going to use only data on that configuration and band).
+
+Week 6 progress:
+
+1. Code to query the NRAO TAP service to **get a list of projects** that:
+- are public, contain visibilities, observed a source in the calibrator coordinates.
+- observed in the band and configuration I'm looking for.
+- Data > Sept 2026, when the VLA calibration pipeline was introduced.
+- There is a column that is supposed to indicate the level of calibration of the project, but it isn't usable currently.
+
+2. Code that hits the url of the VLA archive website to **gather the list of files and info about the project**, and checks that:
+- The calibrator is an observed target and is used indeed as a gain calibrator.
+- The calibrator is observed in the band and config I want.
+- The data is calibrated by the VLA pipeline (there are caltables included).
+- How large is the data and how much cumulative time do we have on the calibrator (ideally I'd prefer smaller data with higher time on the calibrator).
+
+If the project passes the checks, it's good to download.
+
+**Next step**:
+- After selecting the project, I can download it by getting the url from the metadata, manually requesting the MS in the website, getting and email (~30 mins after the request) with a `wget` command, and executing it. I need to figure out if there's **a faster / more automatic way to download the data**.
+
+3. **Verified some discrepancy in previous experiments**. Recap: when I was doing the "recoverable calibration test" (calibrated -> corrupted -> calibrated) there was always a small phase difference between the corruption gain table and the calibration table recovered by the calibration procedure. Turns out there was some uncalibrated phase "noise" in the data. The calibration process was correcting for it on top of the corruption I added. Hence, the corruption table and the table recovered by calibration didn't match. If I calibrate for it, and then apply the corruption and recalibrate, the corruption table and the recalibration table match more closely.
+
+
+| ![](images/gaintable_phase_diff/without_initial_cal.png) |
+|:--:|
+| **Fig 1:** Corruption gain table (Top right) vs Recovered gain table (Bottom right) phases. Here, I inject 0 phase corruption, but the gain calibration was correcting for something. |
+
+
+| ![](images/gaintable_phase_diff/with_initial_cal.png) |
+|:--:|
+| **Fig 1:** Corruption gain table (Top right) vs Recovered gain table (Bottom right) phases. In this example, I first calibrated, then applied corruption, then calibrated again. The image shows that the gain table of the 0 corruption injected and the the cal table match closely (the plot has weird y axis, but the value is closer to 0 in both). |
+
+4. **Code to make my own gain calibration**. It works like this:
+
+```python
+AntennaGainCorruption(
+    amp_fn=None,
+    phase_fn=MaxSineWave(max_amp=np.deg2rad(10.0), period_s=60*60)
+).build_corrtable(MS_OUT, gtab_injected)\
+    .apply_corrtable(MS_OUT, gtab_injected)
+```
+
+The idea is that we change the corruption model to something more realistic down the line by just changing the corruption function we use.
+
+| ![](images/sine_corruption.png) |
+|:--:|
+| **Fig 1:** The corruption table the function yields, when applied to 1 antenna, phases only. It makes a sine function with a 10 deg crest and a 1 hour period and sampled at the observation times. It is recovered by the calibration, as shown in the image. |
+
+Next step:
+- currently it works at "`solit=int`", I'm working on something that would work with user defined time intervals, so we don't run into irrecoverable territory.
+
 # Week 5: Feb 9
 
 Project goals:
