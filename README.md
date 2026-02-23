@@ -1,6 +1,24 @@
 # radioastro-ml
 ML for Radoastronomy calibration debugging
 
+# Week 7: Feb 23
+
+I'm working on user defined intervals for the corruption application. They work like:
+
+```python
+
+    AntennaGainCorruption(
+        timegrid=TimeGrid(solint='60m', interp="constant"),
+        amp_fn=None,
+        phase_fn=MaxSineWave(max_amp=np.deg2rad(10.0), period_s=60*60*2)
+    ).build_corrtable(MS_OUT, gtab_injected)\
+        .apply_corrtable(MS_OUT, gtab_injected)
+```
+
+| ![](images/time_intervaled_gaindrift.png) |
+|:--:|
+| **Fig 1:** Top right (ignore rest) phase corruption defined as piece-wise constant with the values sampled at 60 min intervals from the sine wave, for just one antenna. |
+
 # Week 6: Feb 16
 
 Recap from Week 5:
@@ -90,12 +108,6 @@ Since last Wednesday I've been working on (1a), having some programatic way of g
 - VLA instrument
 - Project has visibilities
 - The project data is not huge in size (since I will not be using most of the data in them probably, I'm looking for one specific source).
-
-
-## Training dataset building: what to use
-
-
-
 
 # Week 4: Feb 4
 
