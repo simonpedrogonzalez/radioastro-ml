@@ -22,6 +22,9 @@ class CorrFn:
       - eval(t) returns a corruption series aligned with t.
       - Units are defined by the specific subclass (e.g., degrees for phase, fractional for amp).
     """
+    def sample(self, rng):
+        raise NotImplementedError
+
     def eval(self, t: np.ndarray, *, rng: np.random.Generator) -> np.ndarray:
         raise NotImplementedError
 
@@ -79,6 +82,34 @@ class MaxSineWave(CorrFn):
         if self.period_s <= 0:
             raise ValueError(f"period_s must be > 0, got {self.period_s}")
 
-        t0 = float(np.min(t))
-        # crest amplitude is max_amp by construction
-        return self.max_amp * np.sin(2 * np.pi * (t - t0) / self.period_s + self.phase0)
+        return self.max_amp * np.sin(2 * np.pi * t / self.period_s + self.phase0)
+
+@dataclass
+class RandomPhaseMaxSineWave(CorrFn):
+    """
+    Sine wave with fixed amplitude and period,
+    but a random global phase offset drawn per eval() call.
+
+    Output range is [-max_amp, +max_amp].
+    """
+    max_amp: float
+    period_s: float
+    phase0: float = None
+
+    def sample(self, rng):
+        self.phase0 = rng.uniform(0.0, 2.0 * np.pi)
+        return self
+
+    def eval(self, t: np.ndarray) -> np.ndarray:
+        t = np.asarray(t, dtype=float)
+        if t.size == 0:
+            return t
+
+        if self.phase0 is None:
+            raise ValueError('call .sample first')
+
+        if self.period_s <= 0:
+            raise ValueError(f"period_s must be > 0, got {self.period_s}")
+
+        return self.max_amp * np.sin(2.0 * np.pi * t / self.period_s + self.phase0)
+

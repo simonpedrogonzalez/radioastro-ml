@@ -6,15 +6,16 @@
 import os; os.environ.setdefault("DISPLAY", ":0")
 # MY HELPERS
 import importlib
-from scripts import io_utils, img_utils, closure, corruption, corrfn, timegrid
-for lib in [io_utils, img_utils, closure, corruption, corrfn, timegrid]:
+from scripts import io_utils, img_utils, closure, corruption, corrfn, timegrid, corrtab_utils
+for lib in [io_utils, img_utils, closure, corruption, corrfn, timegrid, corrtab_utils]:
     importlib.reload(lib)
 from .img_utils import make_frac_residuals, casa_image_to_png, make_clean, make_dirty, make_diff, img_rms, fracres_before_after_png
 from .io_utils import copy_ms, hash_casa_table_cols, col_diff
 from .closure import compare_closure_three_int, plot_phase_closure, constant_per_antena_phase_corruption, baseline_phase_corruption
 from .corruption import AntennaGainCorruption
-from .corrfn import MaxSineWave, MaxLinearDrift
+from .corrfn import MaxSineWave, MaxLinearDrift, RandomPhaseMaxSineWave
 from .timegrid import TimeGrid
+from .corrtab_utils import GTabQuery, GCOLS, get_unflagged_antennas
 
 import numpy as np
 from casatasks import tclean, rmtables, immath, gaincal, ft
@@ -1615,15 +1616,17 @@ def new_corruption():
     # CORRUPT
 
     gtab_injected = f"{MS_OUT}.Gcorr"
+    
+    ants, _ = get_unflagged_antennas(MS_IN)
+    # ants = [ants['ea01'], ants['ea02'], ants['ea03']]
 
     AntennaGainCorruption(
-        timegrid=TimeGrid(solint='int'),
+        timegrid=TimeGrid(solint='int', interp="linear"),
         amp_fn=None,
-        phase_fn=MaxSineWave(max_amp=np.deg2rad(10.0), period_s=60*60)
-    ).build_corrtable(MS_OUT, gtab_injected)\
+        query=GTabQuery().where_in(GCOLS.ANTENNA1, [0, 1]).group_by([GCOLS.ANTENNA1]),
+        phase_fn=RandomPhaseMaxSineWave(max_amp=np.deg2rad(10.0), period_s=60*60*2)
+    ).build_corrtable(MS_OUT, gtab_injected, seed=0)\
         .apply_corrtable(MS_OUT, gtab_injected)
-    
-    
 
     print("CORRUPTION")
     col_diff(MS_IN, MS_OUT)
@@ -1745,73 +1748,77 @@ def new_corruption():
     with open("images/closure.txt", "a") as f:
         f.write(report + "\n\n")
 
-    plot_phase_closure(
-        times,
-        P0,
-        P1,
-        P2,
-        title=f"Closure phase ants=({a},{b},{c}), corr={corr_idx}, spw={SPW}, chan={chan_idx}, timerange={ZOOM}",
-        out_png="images/closure_phase_vs_time.png",
-    )
+    ## BEGIN FRAC RES ANALYSIS
 
-    # Before / After visibilities
-    plot_zoomed_before_after_vis_time_2x2(MS_IN, MS_OUT, "images/zoom_base_corrupted.png")
-    plot_before_after_vis_time(MS_IN, MS_OUT, GAINCAL_FIELD, SPW)
+    # plot_phase_closure(
+    #     times,
+    #     P0,
+    #     P1,
+    #     P2,
+    #     title=f"Closure phase ants=({a},{b},{c}), corr={corr_idx}, spw={SPW}, chan={chan_idx}, timerange={ZOOM}",
+    #     out_png="images/closure_phase_vs_time.png",
+    # )
 
-    # Before / After visibilities
-    plot_zoomed_before_after_vis_time_2x2(MS_IN, MS_REC, "images/zoom_base_recovered.png")
-    plot_before_after_vis_time(MS_IN, MS_REC, GAINCAL_FIELD, SPW)
+    # # Before / After visibilities
+    # plot_zoomed_before_after_vis_time_2x2(MS_IN, MS_OUT, "images/zoom_base_corrupted.png")
+    # plot_before_after_vis_time(MS_IN, MS_OUT, GAINCAL_FIELD, SPW)
+
+    # # Before / After visibilities
+    # plot_zoomed_before_after_vis_time_2x2(MS_IN, MS_REC, "images/zoom_base_recovered.png")
+    # plot_before_after_vis_time(MS_IN, MS_REC, GAINCAL_FIELD, SPW)
 
     
-    IMG_BASE_C     = "img_base_clean"
-    IMG_CORR_C     = "img_corrupted_clean"
-    IMG_RECOV_C    = "img_recovered_clean"
+    # IMG_BASE_C     = "img_base_clean"
+    # IMG_CORR_C     = "img_corrupted_clean"
+    # IMG_RECOV_C    = "img_recovered_clean"
     
-    make_clean(MS_IN,  IMG_BASE_C,  TCLEAN_KW)
-    make_clean(MS_OUT, IMG_CORR_C,  TCLEAN_KW)
-    make_clean(MS_REC, IMG_RECOV_C, TCLEAN_KW)
+    # make_clean(MS_IN,  IMG_BASE_C,  TCLEAN_KW)
+    # make_clean(MS_OUT, IMG_CORR_C,  TCLEAN_KW)
+    # make_clean(MS_REC, IMG_RECOV_C, TCLEAN_KW)
 
-    IMG_FRAC_BASE = "img_base_fracres"
-    make_frac_residuals(
-        residual_im=IMG_BASE_C,
-        reference_im=IMG_BASE_C,
-        out_im=IMG_FRAC_BASE,
-    )
+    # IMG_FRAC_BASE = "img_base_fracres"
+    # make_frac_residuals(
+    #     residual_im=IMG_BASE_C,
+    #     reference_im=IMG_BASE_C,
+    #     out_im=IMG_FRAC_BASE,
+    # )
 
-    IMG_FRAC_CORR = "img_corrupted_fracres"
-    make_frac_residuals(
-        residual_im=IMG_CORR_C,
-        reference_im=IMG_BASE_C,
-        out_im=IMG_FRAC_CORR,
-    )
+    # IMG_FRAC_CORR = "img_corrupted_fracres"
+    # make_frac_residuals(
+    #     residual_im=IMG_CORR_C,
+    #     reference_im=IMG_BASE_C,
+    #     out_im=IMG_FRAC_CORR,
+    # )
 
-    IMG_FRAC_REC = "img_recovered_fracres"
-    make_frac_residuals(
-        residual_im=IMG_RECOV_C,
-        reference_im=IMG_BASE_C,
-        out_im=IMG_FRAC_REC,
-    )
+    # IMG_FRAC_REC = "img_recovered_fracres"
+    # make_frac_residuals(
+    #     residual_im=IMG_RECOV_C,
+    #     reference_im=IMG_BASE_C,
+    #     out_im=IMG_FRAC_REC,
+    # )
 
-    fracres_before_after_png(
-        before_im=f"{IMG_FRAC_BASE}.image",      # or baseline vs corrupted measure
-        after_im=f"{IMG_FRAC_REC}.image",
-        out_png="images/fracres_base_recovered.png",
-        crop_half=64,
-    )
+    # fracres_before_after_png(
+    #     before_im=f"{IMG_FRAC_BASE}.image",      # or baseline vs corrupted measure
+    #     after_im=f"{IMG_FRAC_REC}.image",
+    #     out_png="images/fracres_base_recovered.png",
+    #     crop_half=64,
+    # )
 
-    fracres_before_after_png(
-        before_im=f"{IMG_FRAC_BASE}.image",      # or baseline vs corrupted measure
-        after_im=f"{IMG_FRAC_CORR}.image",
-        out_png="images/fracres_base_corrupted.png",
-        crop_half=64,
-    )
+    # fracres_before_after_png(
+    #     before_im=f"{IMG_FRAC_BASE}.image",      # or baseline vs corrupted measure
+    #     after_im=f"{IMG_FRAC_CORR}.image",
+    #     out_png="images/fracres_base_corrupted.png",
+    #     crop_half=64,
+    # )
 
-    fracres_before_after_png(
-        before_im=f"{IMG_FRAC_CORR}.image",      # or baseline vs corrupted measure
-        after_im=f"{IMG_FRAC_REC}.image",
-        out_png="images/fracres_corrupted_recovered.png",
-        crop_half=64,
-    )
+    # fracres_before_after_png(
+    #     before_im=f"{IMG_FRAC_CORR}.image",      # or baseline vs corrupted measure
+    #     after_im=f"{IMG_FRAC_REC}.image",
+    #     out_png="images/fracres_corrupted_recovered.png",
+    #     crop_half=64,
+    # )
+
+    ## END FRAC RES ANALYSIS
 
     col_diff(MS_IN, MS_OUT)
 
@@ -1825,4 +1832,4 @@ def new_corruption():
     print(f"  - Corrupted MS: {MS_OUT}")
     print(f"  - Injected gain table: {gtab_injected}")
     print(f"  - Solved (recovered) gain table: {gtab_solved}")
-    print(f"  - Clean images: {IMG_BASE_C}.image, {IMG_CORR_C}.image, {IMG_RECOV_C}.image")
+    # print(f"  - Clean images: {IMG_BASE_C}.image, {IMG_CORR_C}.image, {IMG_RECOV_C}.image")
