@@ -81,3 +81,25 @@ class TimeGrid:
         # print(f"START:{mjd_to_iso(t0/86400.0)}")
 
         return bin_ids, centers
+
+    def full_grid(self, t0: float, tf: float) -> np.ndarray:
+        """
+        Full uniform grid from t0 up to tf, PLUS one extra knot at tf+dt
+        (aligned to t0), so the last interval always exists for interpolation.
+        """
+        if self.dt == "int":
+            raise ValueError("full_grid requires numeric solint (e.g. '5s'), not solint='int'.")
+
+        dt = float(self.dt)
+        t0 = float(t0)
+        tf = float(tf)
+
+        if tf < t0:
+            raise ValueError(f"tf must be >= t0, got {t0}..{tf}")
+
+        # bins covering up to tf
+        n = int(np.floor((tf - t0) / dt))
+
+        # include 0..n plus one extra (n+1)
+        grid = t0 + np.arange(n + 2, dtype=np.int64) * dt
+        return grid

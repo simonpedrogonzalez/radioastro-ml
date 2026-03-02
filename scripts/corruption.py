@@ -1,11 +1,12 @@
 from __future__ import annotations
 import numpy as np
 from casatools import table, simulator
-from .corrfn import CorrFn
+from .corrfn import CorrFn, fBM
 from .corrtab_utils import make_template_gain_corrtab, GTab, GTabQuery, GCOLS
 import matplotlib.pyplot as plt
 from .time_utils import mjd_seconds_to_iso
 from .plot_utils import corrfun_plot_add, corrfun_plot_finish, corrfun_plot_start
+import inspect
 
 class Corruption:
     def build_corrtable(self, ms: str, corrtab: str, *, seed: int = 0):
@@ -38,6 +39,10 @@ class AntennaGainCorruption(GainCorruption):
             gtab0 = GTab.from_casa_table(tb)
 
             t0_global = float(gtab0.TIME.min())
+            tf_global = float(gtab0.TIME.max())
+
+            # IF I DEFINED CENTERS GLOBALLY HERE>..
+            centers = self.tg.full_grid(t0_global, tf_global)
 
             CP = np.asarray(tb.getcol("CPARAM"))  # (nCorr, nChan, nRow)
             CP_new = CP.copy()
@@ -71,20 +76,16 @@ class AntennaGainCorruption(GainCorruption):
                 t = gtab.TIME
                 rowids = gtab.ROWID  # indices into CP_new last dimension
 
-                # Build time grid for this group
-                bin_ids, centers = self.tg.get_times(t, t0=t0_global)
-                unique_bins = np.unique(bin_ids)
-
                 # Evaluate at centers
                 if self.amp_fn is None:
                     amp_c = np.ones_like(centers, dtype=float)
                 else:
-                    amp_c = self.amp_fn.sample(rng).eval(centers)
+                    amp_c = self.amp_fn.sample(rng, times=centers).eval(centers)
 
                 if self.phase_fn is None:
                     phase_c = np.zeros_like(centers, dtype=float)
                 else:
-                    phase_c = self.phase_fn.sample(rng).eval(centers)
+                    phase_c = self.phase_fn.sample(rng, times=centers).eval(centers)
 
                 if amp_c.shape != centers.shape or phase_c.shape != centers.shape:
                     raise ValueError(
@@ -93,22 +94,36 @@ class AntennaGainCorruption(GainCorruption):
 
                 gain_centers = amp_c * np.exp(1j * phase_c)
 
-                # Map each row time -> its bin center
-                # Map each row time -> gain according to TimeGrid interp
                 if self.tg.dt == "int":
-                    # no binning: centers are the row times, so just use 1:1
-                    gain = gain_centers
+                # If dt=="int", you shouldn't be using a global grid at all.
+                # Just evaluate at row times 1:1.
+                    if self.amp_fn is None:
+                        amp_row = np.ones_like(t, dtype=float)
+                    else:
+                        amp_row = self.amp_fn.sample(rng, times=t).eval(t)
+
+                    if self.phase_fn is None:
+                        phase_row = np.zeros_like(t, dtype=float)
+                    else:
+                        phase_row = self.phase_fn.sample(rng, times=t).eval(t)
+
+                    gain = amp_row * np.exp(1j * phase_row)
+
                 else:
-                    unique_bins = np.unique(bin_ids)
+                    if self.tg.interp == "linear":
+                        amp_row = np.interp(t, centers, amp_c)
+                        phase_row = np.interp(t, centers, np.unwrap(phase_c))
+                        gain = amp_row * np.exp(1j * phase_row)
 
-                    if self.tg.interp == "nearest":
-                        pos = np.searchsorted(unique_bins, bin_ids)
-                        gain = gain_centers[pos]  # piecewise constant
+                    elif self.tg.interp == "nearest":
+                        # nearest neighbor on centers
+                        idx = np.searchsorted(centers, t, side="left")
+                        idx = np.clip(idx, 0, len(centers) - 1)
+                        left = np.maximum(idx - 1, 0)
+                        use_left = (t - centers[left]) <= (centers[idx] - t)
+                        idx = np.where(use_left, left, idx)
 
-                    elif self.tg.interp == "linear":
-                        amp_interp = np.interp(t, centers, amp_c)
-                        phase_interp = np.interp(t, centers, np.unwrap(phase_c))
-                        gain = amp_interp * np.exp(1j * phase_interp)
+                        gain = gain_centers[idx]
 
                     else:
                         raise ValueError(f"Unsupported TimeGrid.interp='{self.tg.interp}'. Use 'linear' or 'nearest'.")

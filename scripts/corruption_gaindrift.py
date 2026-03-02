@@ -13,7 +13,7 @@ from .img_utils import make_frac_residuals, casa_image_to_png, make_clean, make_
 from .io_utils import copy_ms, hash_casa_table_cols, col_diff
 from .closure import compare_closure_three_int, plot_phase_closure, constant_per_antena_phase_corruption, baseline_phase_corruption
 from .corruption import AntennaGainCorruption
-from .corrfn import MaxSineWave, MaxLinearDrift, RandomPhaseMaxSineWave
+from .corrfn import MaxSineWave, MaxLinearDrift, RandomPhaseMaxSineWave, fBM
 from .timegrid import TimeGrid
 from .corrtab_utils import GTabQuery, GCOLS, get_unflagged_antennas
 
@@ -1621,10 +1621,11 @@ def new_corruption():
     # ants = [ants['ea01'], ants['ea02'], ants['ea03']]
 
     AntennaGainCorruption(
-        timegrid=TimeGrid(solint='int', interp="linear"),
+        timegrid=TimeGrid(solint='10m', interp="linear"),
         amp_fn=None,
         query=GTabQuery().where_in(GCOLS.ANTENNA1, [0, 1]).group_by([GCOLS.ANTENNA1]),
-        phase_fn=RandomPhaseMaxSineWave(max_amp=np.deg2rad(10.0), period_s=60*60*2)
+        # phase_fn=RandomPhaseMaxSineWave(max_amp=np.deg2rad(10.0), period_s=60*60*2)
+        phase_fn=fBM(max_amp=0.15 * np.pi, H=0.05),
     ).build_corrtable(MS_OUT, gtab_injected, seed=0)\
         .apply_corrtable(MS_OUT, gtab_injected)
 

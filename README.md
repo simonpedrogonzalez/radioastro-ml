@@ -1,6 +1,66 @@
 # radioastro-ml
 ML for Radoastronomy calibration debugging
 
+# Week 8: Mar 2
+
+Correct implementation of time gridding with nearest / linear interpolation and fractional brownian motion support. Examples:
+
+```python
+AntennaGainCorruption(
+    timegrid=TimeGrid(solint='int'),
+    amp_fn=None,
+    phase_fn=MaxSineWave(
+        max_amp=np.deg2rad(10.0),
+        period_s=60*60*2
+    )
+)
+```
+
+| ![](images/mycorr/sine_int.png) |
+|:--:|
+| **Fig 1:** Phase corruption sampled at each measurement time. |
+
+| ![](images/mycorr/sine_int_corrtab.png) |
+|:--:|
+| **Fig 2:** Resulting corruption stored in the gain table. |
+
+
+```python
+AntennaGainCorruption(
+    timegrid=TimeGrid(solint='60m', interp="linear"),
+    amp_fn=None,
+    phase_fn=MaxSineWave(
+        max_amp=np.deg2rad(10.0),
+        period_s=60*60*2
+    )
+)
+```
+
+| ![](images/mycorr/sine_linear.png) |
+|:--:|
+| **Fig 4:** Function sampled at 60-minute intervals, linear interpolation between sampled knots. |
+
+
+```python
+AntennaGainCorruption(
+    timegrid=TimeGrid(solint='10m', interp="linear"),
+    amp_fn=None,
+    phase_fn=fBM(
+        max_amp=0.15 * np.pi,
+        H=0.05
+    )
+)
+```
+
+| ![](images/mycorr/fbm.png) |
+|:--:|
+| **Fig 5:** fractional Brownian motion sampled and applied at 10-mins intervals. `max_amp` and `H` are the same used by CASA. |
+
+`max_amp` is used to re-scale the process to a certain maximum value. `H` $\in (0,1)$ determines the behavior:
+- `0.5`: standard brownian motion (random walk). Equally likely to maintain directino than to change direction.
+- `<0.5`: anti-persistent behavior, the process tends to reverse direction more frequently. Jagged.
+- `>0.5`: tends to maintain direction. Smoother.
+
 # Week 7: Feb 23
 
 I'm working on user defined intervals for the corruption application. They work like:
