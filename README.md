@@ -9,6 +9,7 @@ Correct implementation of time gridding with nearest / linear interpolation and 
 AntennaGainCorruption(
     timegrid=TimeGrid(solint='int'),
     amp_fn=None,
+    query=GTabQuery().where_in(GCOLS.ANTENNA1, [0, 1]).group_by([GCOLS.ANTENNA1]),
     phase_fn=MaxSineWave(
         max_amp=np.deg2rad(10.0),
         period_s=60*60*2
@@ -29,6 +30,7 @@ AntennaGainCorruption(
 AntennaGainCorruption(
     timegrid=TimeGrid(solint='60m', interp="linear"),
     amp_fn=None,
+    query=GTabQuery().where_in(GCOLS.ANTENNA1, [0, 1]).group_by([GCOLS.ANTENNA1]),
     phase_fn=MaxSineWave(
         max_amp=np.deg2rad(10.0),
         period_s=60*60*2
@@ -45,6 +47,7 @@ AntennaGainCorruption(
 AntennaGainCorruption(
     timegrid=TimeGrid(solint='10m', interp="linear"),
     amp_fn=None,
+    query=GTabQuery().where_in(GCOLS.ANTENNA1, [0, 1]).group_by([GCOLS.ANTENNA1]),
     phase_fn=fBM(
         max_amp=0.15 * np.pi,
         H=0.05
