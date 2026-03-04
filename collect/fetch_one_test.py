@@ -6,7 +6,7 @@ from astropy.coordinates import SkyCoord
 pos = SkyCoord("00h05m57.175409s","38d20'15.148570\"", frame="icrs")
 
 q = (
-    NRAOQuery(limit=3)
+    NRAOQuery(limit=10)
     .where_timespan(TIMESPANS.FROM_2016_SEP)
     .where_in_circle(pos, 20 * u.arcsec)
     .where_instruments(INSTRUMENTS.VLA_VARIANTS())
@@ -14,12 +14,13 @@ q = (
     .where_configs([CONFIGS.A, CONFIGS.B, CONFIGS.C, CONFIGS.D])
     .where_band(BANDS.C)
     .where_proprietary_status(PROPRIETARY.PUBLIC)
-    .order_by("t_min DESC")
+    .order_by("access_estsize ASC")
 )
 
 df = q.get()
 print(df.columns)
-print(df.head())
+print(df['access_estsize'].head())
+print(f"Size: {float(df.loc[0, 'access_estsize']) / 1_000_000 }")
 url = df.loc[0, "access_url"]
 
 from product_details import fetch_product_details, summarize_product_details, print_summary

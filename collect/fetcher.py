@@ -446,17 +446,73 @@ class NRAOQuery:
             where_clause = "WHERE " + " AND ".join(self._where)
         order_clause = f"ORDER BY {self._order_by}" if self._order_by else ""
         return f"SELECT TOP {int(self.limit)} {select_list} FROM {self.table} {where_clause} {order_clause}"
-
-    def get(self) -> pd.DataFrame:
+    
+    def get(
+        self,
+        *,
+        retries: int = 6,
+        backoff: float = 1.5,
+        jitter: float = 0.25,
+        verbose: bool = True,
+    ) -> pd.DataFrame:
         q = self.build()
-        
-        print("\n" + "=" * 80)
-        print("Executing ADQL query:")
-        print("-" * 80)
-        print(_pretty_format_query(q))
-        print("=" * 80 + "\n")
-        
-        return self.svc.run_sync(q).to_table().to_pandas()
+
+        if verbose:
+            print("\n" + "=" * 80)
+            print("Executing ADQL query:")
+            print("-" * 80)
+            print(_pretty_format_query(q))
+            print("=" * 80 + "\n")
+
+        last_err: Exception | None = None
+
+        for attempt in range(retries):
+            try:
+                return self.svc.run_sync(q).to_table().to_pandas()
+            except Exception as e:
+                last_err = e
+                msg = str(e).lower()
+
+                # Transient errors that are worth retrying
+                transient = any(s in msg for s in [
+                    "conflict with recovery",
+                    "canceling statement due to conflict with recovery",
+                    "could not connect",
+                    "connection refused",
+                    "connection reset",
+                    "read timed out",
+                    "timed out",
+                    "timeout",
+                    "temporary failure",
+                    "temporarily unavailable",
+                    "service unavailable",
+                    "bad gateway",
+                    "gateway timeout",
+                    "502",
+                    "503",
+                    "504",
+                    "internal server error",
+                    "server error",
+                    "http error 5",
+                ])
+
+                # If it doesn't look transient, or we are out of retries, raise
+                if (not transient) or (attempt == retries - 1):
+                    raise
+
+                # Exponential backoff with a little jitter to avoid sync-thundering
+                sleep_s = backoff * (2 ** attempt)
+                sleep_s *= (1.0 + random.uniform(-jitter, jitter))
+                sleep_s = max(0.5, sleep_s)
+
+                if verbose:
+                    print(f"[WARN] TAP query failed (attempt {attempt+1}/{retries}): {e}")
+                    print(f"[WARN] Retrying in {sleep_s:.1f}s...\n")
+
+                time.sleep(sleep_s)
+
+        # Shouldn't reach here, but just in case:
+        raise RuntimeError("TAP query failed after retries") from last_err
 
 
 # =============================================================================
