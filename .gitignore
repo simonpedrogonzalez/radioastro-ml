@@ -209,3 +209,5 @@ raw/*
 data/*
 runs/*
 collect/data/*
+collect/extracted/*
+collect/downloads/*

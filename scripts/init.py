@@ -7,8 +7,10 @@ sys.path.insert(0, site.getusersitepackages())
 # Add scripts/ so you can import modules without "scripts."
 sys.path.insert(0, os.getcwd())
 from scripts import corruption_gaindrift
-for lib in [corruption_gaindrift]:
+from scripts import extraction_pipeline
+for lib in [corruption_gaindrift, extraction_pipeline]:
     importlib.reload(lib)
 
 
-corruption_gaindrift.new_corruption()
+# corruption_gaindrift.new_corruption()
+extraction_pipeline.run()

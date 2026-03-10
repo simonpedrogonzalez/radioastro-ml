@@ -24,10 +24,10 @@ def rm_im_products(imbase: str):
                 f"Close it in CARTA or write to a new output name."
             )
 
-def make_clean(msname: str, outbase: str, config: dict):
+def make_clean(msname: str, outbase: str, config: dict, niter:int =100):
     rm_im_products(outbase)
     print(f"[INFO] CLEAN imaging {msname} field={config['field']} -> {outbase}.residual")
-    tclean(vis=msname, imagename=outbase, niter=1000, **config)
+    tclean(vis=msname, imagename=outbase, niter=niter, **config)
 
 def make_dirty(msname: str, outbase: str, config: dict):
     rm_im_products(outbase)
