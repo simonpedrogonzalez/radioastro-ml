@@ -55,9 +55,9 @@ where $\Delta_i$ is a sample from $N(0,1)$ (but correlated with previous increme
 
 Once the "path" of values is done, I re-scale it so that the RMS amplitude of the path matches a user defined parameter.
 
-$
+$$
 x_{\mathrm{scaled}}(t)=x(t)\,\frac{\texttt{max\_amp}}{\sqrt{\frac{1}{N-1}\sum_{i=1}^{N-1}x(t_i)^2}}
-$
+$$
 
 Then, if `max_amp = 0.15 pi`, then the path represents a phase drift with a magnitude of about 0.47 rad (~27°) over time.
 
