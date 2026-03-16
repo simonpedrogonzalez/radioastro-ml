@@ -632,7 +632,7 @@ def store_spw_info(df: pd.DataFrame, idx: int, spw: str, info: dict, csv_path: s
 # -------------------------
 # Continue after download
 # -------------------------
-def continue_after_download(df: pd.DataFrame, idx: int, csv_path: str | Path) -> None:
+def continue_after_download(df: pd.DataFrame, idx: int, csv_path: str | Path, delete_original: bool = False) -> None:
     row = df.loc[idx].to_dict()
 
     name = str(row.get("name") or "").strip()
@@ -736,24 +736,22 @@ def continue_after_download(df: pd.DataFrame, idx: int, csv_path: str | Path) ->
     # image_ms(ms_src, out_top, field=gain_field, spw=spw, prefer_corrected=prefer_corrected, suffix='src_filt')
     # image_ms(ms_out, out_top, field="", spw="", prefer_corrected=prefer_corrected, suffix='ext_no_filt')
     
-    image_ms(ms_out, out_top, field="", spw="", prefer_corrected=True, suffix='_corrected')
-    image_ms(ms_out, out_top, field="", spw="", prefer_corrected=False, suffix='_data')
-    
+    image_ms(ms_out, out_top, field="", spw="", prefer_corrected=True, suffix='_corrected_clean')    
     image_ms(ms_out, out_top, field="", spw="", prefer_corrected=True, suffix='_corrected_dirty', niter=0)
-
-
-    
 
     set_row(df, idx, status="done")
     save_projects(df, csv_path)
 
-    print(f"[DONE] {name} | extracted={ms_out} | new_size={new_size:.3f} GB | spw={spw} | tos~{tos:.2f} min")
+    if delete_original:
+        print(f"[CLEANUP] deleting original download folder: {download_root}")
+        shutil.rmtree(download_root)
 
+    print(f"[DONE] {name} | extracted={ms_out} | new_size={new_size:.3f} GB | spw={spw} | tos~{tos:.2f} min")
 
 # -------------------------
 # Pipeline for one row
 # -------------------------
-def process_one(df: pd.DataFrame, idx: int, csv_path: str | Path) -> None:
+def process_one(df: pd.DataFrame, idx: int, csv_path: str | Path, delete_original=False) -> None:
     row = df.loc[idx].to_dict()
 
     name = str(row.get("name") or "").strip()
@@ -767,7 +765,7 @@ def process_one(df: pd.DataFrame, idx: int, csv_path: str | Path) -> None:
     # case 1: already downloaded -> continue from there
     if status == "downloaded":
         print(f"[RESUME] continuing downloaded row: {name}")
-        continue_after_download(df, idx, csv_path)
+        continue_after_download(df, idx, csv_path, delete_original=delete_original)
         return
 
     # case 2: empty status -> start new download, then continue
@@ -780,7 +778,7 @@ def process_one(df: pd.DataFrame, idx: int, csv_path: str | Path) -> None:
         if download_root is None:
             return
 
-        continue_after_download(df, idx, csv_path)
+        continue_after_download(df, idx, csv_path, delete_original=delete_original)
         return
 
     print(f"[SKIP] idx={idx} name={name} status={status}")
@@ -789,7 +787,7 @@ def process_one(df: pd.DataFrame, idx: int, csv_path: str | Path) -> None:
 # -------------------------
 # Main loop
 # -------------------------
-def main(project_list: str | Path):
+def main(project_list: str | Path, delete_original=False):
     DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
     EXTRACTED_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -823,7 +821,7 @@ def main(project_list: str | Path):
         print(f"[PROCESS] idx={idx} name={df.at[idx, 'name']}")
         print("=" * 80)
         try:
-            process_one(df, idx, project_list)
+            process_one(df, idx, project_list, delete_original=delete_original)
         except Exception as e:
             msg = f"{type(e).__name__}: {e}"
             print(f"[ERROR] idx={idx} {msg}")
@@ -832,7 +830,7 @@ def main(project_list: str | Path):
 
 
 def run():
-    main(PROJECT_LIST)
+    main(PROJECT_LIST, delete_original=True)
 
 
 # if __name__ == "__main__":

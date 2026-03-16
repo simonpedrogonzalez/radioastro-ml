@@ -8,9 +8,11 @@ sys.path.insert(0, site.getusersitepackages())
 sys.path.insert(0, os.getcwd())
 from scripts import corruption_gaindrift
 from scripts import extraction_pipeline
-for lib in [corruption_gaindrift, extraction_pipeline]:
+from scripts import plot_extracted
+for lib in [corruption_gaindrift, extraction_pipeline, plot_extracted]:
     importlib.reload(lib)
 
 
 # corruption_gaindrift.new_corruption()
-extraction_pipeline.run()
+# extraction_pipeline.run()
+plot_extracted.main()

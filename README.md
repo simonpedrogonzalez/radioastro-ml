@@ -1,6 +1,70 @@
 # radioastro-ml
 ML for Radoastronomy calibration debugging
 
+# Week 10: Mar 16
+
+The "download / extract" pipeline is working:
+- I started downloading the first batch of projects that will probably result in ~100 different calibrators (I can't give an exact number since some projects have most calibrator data flagged, hence not being useful, and I made it so the pipeline automatically discards them).
+- I prioritized projects with more time on the calibrator but smaller project sizes.
+- Storage will not be an issue since I only keep the calibrator data.
+- The most time consuming part is downloading, I might look into paralelizing downloads once we need more samples.
+
+| ![](images/all_samples_12.png) |
+|:--:|
+| **Fig 1:** First 12 samples, cleaned vs dirty (not corrupted). |
+
+Currently I'm working on creating the labeled examples (corrupted phase, corrupted amp, not corrupted) for the simplest setup for the experiments.
+
+### Revisiting fBM
+
+fBM as a gaussian process is defined in the following way. If we sample values at times  
+$t_0, t_1, \dots, t_n$, the vector
+
+$$
+(B_H(t_0), B_H(t_1), \dots, B_H(t_n))
+$$
+
+is drawn from a multivariate Gaussian distribution whose covariance matrix relates nearby time points:
+
+$$
+\mathrm{Cov}(B_H(t_i), B_H(t_j)) =
+\frac{1}{2}\left(t_i^{2H} + t_j^{2H} - |t_i - t_j|^{2H}\right)
+$$
+
+$H$ controls how strongly neighboring samples influence each other (small = jittery, large = smooth drift).
+
+| ![](images/fbm/cov1.png) |
+|:--:|
+| **Fig 1:** Covariance matrix \(H=0.1\). |
+
+| ![](images/fbm/cov2.png) |
+|:--:|
+| **Fig 2:** Covariance matrix \(H=0.5\). |
+
+| ![](images/fbm/cov3.png) |
+|:--:|
+| **Fig 3:** Covariance matrix \(H=0.9\). |
+
+- How big is the step size? The step from $t_i$ to $t_{i+1}$ can be viewed as:
+
+$$
+B(t_{i+1}) \approx B(t_i) + \Delta_i
+$$
+
+where $\Delta_i$ is a sample from $N(0,1)$ (but correlated with previous increments). Meaning, the step size falls within 0 and 3 (unitless), tending to follow or reverse the previous step direction depending on H.
+
+Once the "path" of values is done, I re-scale it so that the RMS amplitude of the path matches a user defined parameter.
+
+$
+x_{\mathrm{scaled}}(t)=x(t)\,\frac{\texttt{max\_amp}}{\sqrt{\frac{1}{N-1}\sum_{i=1}^{N-1}x(t_i)^2}}
+$
+
+Then, if `max_amp = 0.15 pi`, then the path represents a phase drift with a magnitude of about 0.47 rad (~27°) over time.
+
+- In practice: sampling a multivariate Gaussian with this covariance matrix is expensive, so implementations (both CASA's and what I'm using) use an equivalent algorithm that generate the same correlated noise process through spectral synthesis (mixtures of random sinusoidal components).
+
+- Is the phase "wrapped" when corrupting? yes, suppose $\phi(t)=3.05$ rad and the next step is $\Delta\phi=0.2$ rad, I produced phase value $3.25$ rad, but then I calculate the complex gain and write the results, which wraps the phase in the $[-\pi,\pi]$ range, so the resulting phase is \(-3.03\) rad.
+
 # Week 8: Mar 2
 
 Correct implementation of time gridding with nearest / linear interpolation and fractional brownian motion support. Examples:
