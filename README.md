@@ -1,6 +1,44 @@
 # radioastro-ml
 ML for Radoastronomy calibration debugging
 
+# Week 11: Mar 23
+
+- 35 samples (23 more than last week). The pipeline continues to download.
+
+| ![](images/all_samples_contact_sheet.png) |
+|:--:|
+| **Fig 1:** 35 samples, cleaned vs dirty. |
+
+All samples are imaged using:
+
+- Cell size: 4 pixels per beam (beam minor axis)  
+- Field of View: 64 beams across
+- Deconvolution: Hogbom CLEAN  
+- Iterations: 100  
+- Weighting: Briggs (robust = 0.5)  
+
+I analized some of the "weirdier" samples to better understand artifacts.
+
+### 0739+016 - Regular pattern
+
+| ![](images/sample_diagnosis/0739+016/0739+016_clean_comparison.png) |
+|:--:|
+| **Fig 2:** 0739+016, different imaging strategies. |
+
+| ![](images/sample_diagnosis/0739+016/baseline_uv.png) |
+|:--:|
+| **Fig 2:** 0739+016, uv coverage. |
+
+- The dirty image already shows structure. Natural weighting seems to remove the artifacts, and we get a low vertical resolution point, can the poor uv coverage be the problem?
+
+### 0259+077 - Spokes
+
+| ![](images/sample_diagnosis/0259+077/0259+077_clean_comparison.png) |
+|:--:|
+| **Fig 4:** 0259+077, different imaging configurations. |
+
+Radial spokes centered on the source that are persistent, which match the PSF.
+
 # Week 10: Mar 16
 
 The "download / extract" pipeline is working:

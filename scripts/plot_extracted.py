@@ -6,47 +6,38 @@ import matplotlib.pyplot as plt
 import matplotlib.image as mpimg
 
 
-PROJECT_LIST = Path("/Users/u1528314/repos/radioastro-ml/collect/small_subset/small_selection.csv")
 EXTRACTED_DIR = Path("/Users/u1528314/repos/radioastro-ml/collect/extracted")
+SUMMARY_CSV = EXTRACTED_DIR / "beam_imaging_summary.csv"
 OUT_FIG = EXTRACTED_DIR / "all_samples_contact_sheet.png"
 
 
-def load_minutes_map(csv_path: Path) -> dict:
-    df = pd.read_csv(csv_path)
+def load_meta_map(summary_csv: Path) -> dict:
+    df = pd.read_csv(summary_csv)
 
-    # keep only rows that have a folder name
-    df = df[df["folder"].notna()].copy()
-
-    minutes_map = {}
+    meta_map = {}
     for _, row in df.iterrows():
-        folder = str(row["folder"]).strip()
+        folder = str(row.get("folder", "")).strip()
         if not folder:
             continue
 
-        minutes = row.get("extracted_gain_onsource_min", None)
-        name = str(row.get("name", folder)).strip() or folder
-        status = str(row.get("status", "")).strip().lower()
-
-        minutes_map[folder] = {
-            "minutes": minutes,
-            "name": name,
-            "status": status,
+        meta_map[folder] = {
+            "name": str(row.get("name", folder)).strip() or folder,
+            "minutes": row.get("minutes"),
+            "beam_major_arcsec": row.get("beam_major_arcsec"),
+            "beam_minor_arcsec": row.get("beam_minor_arcsec"),
+            "beam_pa_deg": row.get("beam_pa_deg"),
+            "cell_arcsec": row.get("cell_arcsec"),
+            "imsize": row.get("imsize"),
+            "fov_arcsec": row.get("fov_arcsec"),
+            "fov_in_beams_minor": row.get("fov_in_beams_minor"),
+            "pixels_per_beam_minor": row.get("pixels_per_beam_minor"),
+            "status_csv": str(row.get("status_csv", "")).strip(),
         }
 
-    return minutes_map
+    return meta_map
 
 
-def find_valid_samples(extracted_dir: Path, minutes_map: dict):
-    """
-    Return a list of dicts:
-      {
-        "folder": folder_name,
-        "name": display_name,
-        "minutes": float or nan,
-        "clean": Path(..._corrected_clean.png),
-        "dirty": Path(..._corrected_dirty.png),
-      }
-    """
+def find_valid_samples(extracted_dir: Path, meta_map: dict):
     samples = []
 
     for sample_dir in sorted(extracted_dir.iterdir()):
@@ -55,11 +46,9 @@ def find_valid_samples(extracted_dir: Path, minutes_map: dict):
 
         folder = sample_dir.name
 
-        # expected outputs from your pipeline
         clean_png = sample_dir / "clean_corrected_clean.png"
         dirty_png = sample_dir / "clean_corrected_dirty.png"
 
-        # fallback in case exact names differ
         if not clean_png.exists():
             hits = sorted(sample_dir.glob("*_corrected_clean.png"))
             if hits:
@@ -70,17 +59,24 @@ def find_valid_samples(extracted_dir: Path, minutes_map: dict):
             if hits:
                 dirty_png = hits[0]
 
-        # "correctly extracted thing" = has both images
         if not (clean_png.exists() and dirty_png.exists()):
             continue
 
-        meta = minutes_map.get(folder, {})
+        meta = meta_map.get(folder, {})
         samples.append(
             {
                 "folder": folder,
                 "name": meta.get("name", folder),
-                "minutes": meta.get("minutes", float("nan")),
-                "status": meta.get("status", ""),
+                "minutes": meta.get("minutes"),
+                "beam_major_arcsec": meta.get("beam_major_arcsec"),
+                "beam_minor_arcsec": meta.get("beam_minor_arcsec"),
+                "beam_pa_deg": meta.get("beam_pa_deg"),
+                "cell_arcsec": meta.get("cell_arcsec"),
+                "imsize": meta.get("imsize"),
+                "fov_arcsec": meta.get("fov_arcsec"),
+                "fov_in_beams_minor": meta.get("fov_in_beams_minor"),
+                "pixels_per_beam_minor": meta.get("pixels_per_beam_minor"),
+                "status_csv": meta.get("status_csv", ""),
                 "clean": clean_png,
                 "dirty": dirty_png,
             }
@@ -89,22 +85,38 @@ def find_valid_samples(extracted_dir: Path, minutes_map: dict):
     return samples
 
 
-def fmt_minutes(x) -> str:
+def fmt_float(x, fmt: str, fallback: str = "?") -> str:
     try:
         x = float(x)
         if pd.notna(x):
-            return f"{x:.1f} min"
+            return format(x, fmt)
     except Exception:
         pass
-    return "min ?"
+    return fallback
+
+
+def make_title(sample: dict) -> str:
+    name = sample["name"]
+
+    beam_maj = fmt_float(sample["beam_major_arcsec"], ".2f")
+    beam_min = fmt_float(sample["beam_minor_arcsec"], ".2f")
+    beam_pa = fmt_float(sample["beam_pa_deg"], ".1f")
+    cell = fmt_float(sample["cell_arcsec"], ".3f")
+    ppb = fmt_float(sample["pixels_per_beam_minor"], ".1f")
+    fov_arcsec = fmt_float(sample["fov_arcsec"], ".1f")
+    fov_beams = fmt_float(sample["fov_in_beams_minor"], ".1f")
+    minutes = fmt_float(sample["minutes"], ".1f", fallback="?")
+
+    return (
+        f"{name}\n"
+        f"beam={beam_maj}\"×{beam_min}\"  pa={beam_pa}°\n"
+        f"cell={cell}\"/pix  ppb={ppb}\n"
+        f"FoV={fov_arcsec}\"  ({fov_beams} beams)\n"
+        f"time={minutes} min"
+    )
 
 
 def make_contact_sheet(samples, out_path: Path, samples_per_row: int = 3):
-    """
-    Layout:
-      6 columns total = (clean, dirty) x 3 samples per row
-      each sample occupies 2 columns
-    """
     if not samples:
         print("[INFO] No valid samples found.")
         return
@@ -116,7 +128,7 @@ def make_contact_sheet(samples, out_path: Path, samples_per_row: int = 3):
     fig, axes = plt.subplots(
         nrows=nrows,
         ncols=ncols,
-        figsize=(4 * ncols, 4 * nrows),
+        figsize=(4.8 * ncols, 5.2 * nrows),
         squeeze=False,
     )
 
@@ -142,8 +154,7 @@ def make_contact_sheet(samples, out_path: Path, samples_per_row: int = 3):
         ax_clean.axis("off")
         ax_dirty.axis("off")
 
-        title = f'{sample["name"]}\n{fmt_minutes(sample["minutes"])}'
-        ax_clean.set_title(title, fontsize=10)
+        ax_clean.set_title(make_title(sample), fontsize=9)
         ax_dirty.set_title("dirty", fontsize=10)
 
     fig.suptitle(
@@ -159,7 +170,7 @@ def make_contact_sheet(samples, out_path: Path, samples_per_row: int = 3):
 
 
 def main():
-    minutes_map = load_minutes_map(PROJECT_LIST)
-    samples = find_valid_samples(EXTRACTED_DIR, minutes_map)
+    meta_map = load_meta_map(SUMMARY_CSV)
+    samples = find_valid_samples(EXTRACTED_DIR, meta_map)
     print(f"[INFO] valid samples found: {len(samples)}")
-    make_contact_sheet(samples, OUT_FIG, samples_per_row=3)
+    make_contact_sheet(samples, OUT_FIG, samples_per_row=1)
