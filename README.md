@@ -5,7 +5,7 @@ ML for Radoastronomy calibration debugging
 
 - 35 samples (23 more than last week). The pipeline continues to download.
 
-| ![](images/all_samples_contact_sheet.png) |
+| ![](images/sample_diagnosis/all_samples_contact_sheet.png) |
 |:--:|
 | **Fig 1:** 35 samples, cleaned vs dirty. |
 
