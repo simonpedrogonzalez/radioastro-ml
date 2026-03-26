@@ -210,4 +210,5 @@ data/*
 runs/*
 collect/data/*
 collect/extracted/*
+collect/extracted2/*
 collect/downloads/*

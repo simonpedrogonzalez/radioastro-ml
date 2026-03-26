@@ -95,7 +95,7 @@ def fmt_float(x, fmt: str, fallback: str = "?") -> str:
     return fallback
 
 
-def make_title(sample: dict) -> str:
+def make_title(i:int, sample: dict) -> str:
     name = sample["name"]
 
     beam_maj = fmt_float(sample["beam_major_arcsec"], ".2f")
@@ -108,6 +108,7 @@ def make_title(sample: dict) -> str:
     minutes = fmt_float(sample["minutes"], ".1f", fallback="?")
 
     return (
+        f"# {i}\n"
         f"{name}\n"
         f"beam={beam_maj}\"×{beam_min}\"  pa={beam_pa}°\n"
         f"cell={cell}\"/pix  ppb={ppb}\n"
@@ -154,7 +155,7 @@ def make_contact_sheet(samples, out_path: Path, samples_per_row: int = 3):
         ax_clean.axis("off")
         ax_dirty.axis("off")
 
-        ax_clean.set_title(make_title(sample), fontsize=9)
+        ax_clean.set_title(make_title(i, sample), fontsize=9)
         ax_dirty.set_title("dirty", fontsize=10)
 
     fig.suptitle(

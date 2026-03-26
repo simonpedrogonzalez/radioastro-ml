@@ -19,7 +19,7 @@ for lib in [corruption_gaindrift, extraction_pipeline, plot_extracted, asdm_util
 
 
 # corruption_gaindrift.new_corruption()
-# extraction_pipeline.run()
+extraction_pipeline.run()
 # image_extracted.main()
 # plot_extracted.main()
 # asdm_utils.main()
@@ -31,6 +31,6 @@ for lib in [corruption_gaindrift, extraction_pipeline, plot_extracted, asdm_util
 # image_extracted_selfcal.main("0259+077")
 # image_extracted_in_depth.main("0259+077")
 
-image_diagnosis.main("1719+177")
-image_extracted_selfcal.main("1719+177")
-image_extracted_in_depth.main("1719+177")
+# image_diagnosis.main("1719+177")
+# image_extracted_selfcal.main("1719+177")
+# image_extracted_in_depth.main("1719+177")
