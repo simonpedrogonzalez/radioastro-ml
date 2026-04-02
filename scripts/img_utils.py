@@ -6,6 +6,7 @@ import matplotlib.pyplot as plt
 from casatools import image as ia_tool
 from astropy.io import fits
 from astropy.wcs import WCS
+from matplotlib.patches import Ellipse
 
 def image_to_numpy(imname: str) -> np.ndarray:
     ia = image()
@@ -85,11 +86,15 @@ def casa_image_to_png(
     out_png: str,
     chan: int = 0,
     stokes: int = 0,
-    robust_pct: float = 99.5,
+    robust_pct: float = 99.0,
     symmetric: bool = True,
     log: bool = False,
     cmap: str = "inferno",
     dpi: int = 180,
+    title: str | None = None,
+    draw_beam_ellipse: bool = False,
+    beam_edgecolor: str = "lime",
+    beam_linewidth: float = 1.5,
 ):
     """
     Save a CASA image as a PNG with CARTA-like autoscaling and RA/Dec axes.
@@ -110,6 +115,7 @@ def casa_image_to_png(
     with fits.open(fitsname) as hdul:
         data = hdul[0].data
         wcs = WCS(hdul[0].header)
+        header = hdul[0].header
 
     # CASA/FITS order is usually (stokes, chan, y, x)
     data = np.squeeze(data)
@@ -128,7 +134,9 @@ def casa_image_to_png(
     if not np.any(finite):
         raise RuntimeError(f"No finite pixels in {imname}")
 
-    vals = img2d[finite]
+    # Display in mJy/beam to make the colorbar easier to read.
+    img2d_mjy = img2d * 1e3
+    vals = img2d_mjy[finite]
 
     # 3) CARTA-like autoscaling
     if log:
@@ -143,7 +151,7 @@ def casa_image_to_png(
             vmin = -vmax
         else:
             vmin, vmax = np.percentile(vals, [100 - robust_pct, robust_pct])
-        img_plot = img2d
+        img_plot = img2d_mjy
 
     # 4) Plot with RA/Dec axes
     fig = plt.figure()
@@ -158,8 +166,41 @@ def casa_image_to_png(
 
     ax.set_xlabel("RA")
     ax.set_ylabel("Dec")
-    plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-    ax.set_title(f"{imname}  (chan={chan}, stokes={stokes})")
+    cbar = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    cbar.set_label("mJy/beam")
+    ax.set_title(title or f"{imname}  (chan={chan}, stokes={stokes})")
+
+    if draw_beam_ellipse:
+        bmaj_deg = header.get("BMAJ")
+        bmin_deg = header.get("BMIN")
+        bpa_deg = header.get("BPA", 0.0)
+        cdelt1 = abs(header.get("CDELT1", np.nan))
+        cdelt2 = abs(header.get("CDELT2", np.nan))
+
+        if (
+            bmaj_deg is not None
+            and bmin_deg is not None
+            and np.isfinite(cdelt1)
+            and np.isfinite(cdelt2)
+            and cdelt1 > 0
+            and cdelt2 > 0
+        ):
+            beam_width_px = float(bmin_deg) / cdelt1
+            beam_height_px = float(bmaj_deg) / cdelt2
+            ny, nx = img_plot.shape
+            x0 = 0.12 * nx
+            y0 = 0.12 * ny
+            ax.add_patch(
+                Ellipse(
+                    xy=(x0, y0),
+                    width=beam_width_px,
+                    height=beam_height_px,
+                    angle=float(bpa_deg),
+                    fill=False,
+                    edgecolor=beam_edgecolor,
+                    linewidth=beam_linewidth,
+                )
+            )
 
     plt.tight_layout()
     plt.savefig(out_png, dpi=dpi)

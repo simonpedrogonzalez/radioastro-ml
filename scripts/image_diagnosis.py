@@ -15,12 +15,19 @@ from casatools import table
 from casaplotms import plotms
 
 from scripts.img_utils import casa_image_to_png
+from scripts.image_extracted import (
+    PROJECT_LIST,
+    choose_band_and_frequency,
+    choose_firstpass_imaging_setup,
+    row_for_folder,
+)
 
 
 # -------------------------------------------------------------------
 # CONFIG
 # -------------------------------------------------------------------
 EXTRACTED_DIR = Path("/Users/u1528314/repos/radioastro-ml/collect/extracted")
+CALIBRATOR_BANDS_CSV = Path("/Users/u1528314/repos/radioastro-ml/collect/vla_calibrators_bands_v2.csv")
 
 FOLDER_NAME = "0739+016"
 
@@ -78,6 +85,95 @@ def find_sample_ms(folder_name: str) -> tuple[Path, Path]:
     for p in hits:
         print(f"    candidate: {p}")
     return sample_top, hits[0]
+
+
+def load_projects(csv_path: Path) -> pd.DataFrame:
+    return pd.read_csv(csv_path)
+
+
+def normalize_calibrator_name(name: str | None) -> str:
+    if name is None:
+        return ""
+    return str(name).strip().upper()
+
+
+def band_to_receiver_code(band: str | None) -> str | None:
+    mapping = {
+        "P": "P",
+        "L": "L",
+        "S": "S",
+        "C": "C",
+        "X": "X",
+        "KU": "U",
+        "K": "K",
+        "KA": "A",
+        "Q": "Q",
+    }
+    if band is None:
+        return None
+    return mapping.get(str(band).strip().upper())
+
+
+def load_calibrator_uv_limits(csv_path: Path) -> pd.DataFrame:
+    return pd.read_csv(csv_path)
+
+
+def lookup_calibrator_uv_limits(
+    calib_df: pd.DataFrame,
+    *,
+    calibrator_name: str | None,
+    band: str | None,
+) -> dict | None:
+    name = normalize_calibrator_name(calibrator_name)
+    receiver = band_to_receiver_code(band)
+    if not name or receiver is None:
+        return None
+
+    name_col = calib_df["name"].astype("string").fillna("").str.upper().str.strip()
+    recv_col = calib_df["receiver"].astype("string").fillna("").str.upper().str.strip()
+    match = calib_df.loc[(name_col == name) & (recv_col == receiver)]
+    if match.empty:
+        return None
+
+    row = match.iloc[0]
+    uvmin = row.get("uvmin_kl")
+    uvmax = row.get("uvmax_kl")
+
+    try:
+        uvmin = float(uvmin) if pd.notna(uvmin) else np.nan
+    except (TypeError, ValueError):
+        uvmin = np.nan
+    try:
+        uvmax = float(uvmax) if pd.notna(uvmax) else np.nan
+    except (TypeError, ValueError):
+        uvmax = np.nan
+
+    if np.isfinite(uvmin) and np.isfinite(uvmax) and uvmin > uvmax:
+        uvmin, uvmax = uvmax, uvmin
+
+    return {
+        "calibrator_name": str(row.get("name", calibrator_name)),
+        "receiver": str(row.get("receiver", receiver)),
+        "uvmin_kl": uvmin,
+        "uvmax_kl": uvmax,
+    }
+
+
+def make_uvrange_string(uvmin_kl: float | None, uvmax_kl: float | None) -> str:
+    lo = ""
+    hi = ""
+    if uvmin_kl is not None and np.isfinite(uvmin_kl) and uvmin_kl > 0:
+        lo = f"{uvmin_kl:.3f}klambda"
+    if uvmax_kl is not None and np.isfinite(uvmax_kl) and uvmax_kl > 0:
+        hi = f"{uvmax_kl:.3f}klambda"
+
+    if lo and hi:
+        return f"{lo}~{hi}"
+    if lo:
+        return f">{lo}"
+    if hi:
+        return f"<{hi}"
+    return ""
 
 
 def remove_path(path: Path) -> None:
@@ -214,16 +310,17 @@ def export_png(casa_image: Path, out_png: Path, *, symmetric: bool = False) -> N
     )
 
 
-def export_uv_png(ms_path: Path, out_png: Path, *, spw: str = "") -> None:
+def export_uv_png(ms_path: Path, out_png: Path, *, spw: str = "", uvrange: str = "") -> None:
     if out_png.exists():
         out_png.unlink()
 
-    print(f"[PLOTMS] uv coverage -> {out_png} | spw={spw or 'all'}")
+    print(f"[PLOTMS] uv coverage -> {out_png} | spw={spw or 'all'} | uvrange={uvrange or 'all'}")
     plotms(
         vis=str(ms_path),
         xaxis="u",
         yaxis="v",
         spw=spw,
+        uvrange=uvrange,
         avgchannel="1e8",
         avgtime="1e8",
         coloraxis="spw",
@@ -321,6 +418,7 @@ def run_tclean(
     scales: Optional[list[int]] = None,
     usemask: str = "",
     mask: str = "",
+    uvrange: str = "",
 ) -> None:
     remove_casa_products(imagename)
 
@@ -335,6 +433,7 @@ def run_tclean(
         datacolumn=datacolumn,
         weighting=weighting,
         deconvolver=deconvolver,
+        uvrange=uvrange,
     )
 
     if weighting == "briggs":
@@ -351,7 +450,8 @@ def run_tclean(
     print(
         f"[TCLEAN] {Path(imagename).name} | spw={spw or 'all'} | "
         f"cell={cell_arcsec:.4f}\" | imsize={imsize} | niter={niter} | "
-        f"weighting={weighting} | deconvolver={deconvolver}"
+        f"weighting={weighting} | deconvolver={deconvolver} | "
+        f"uvrange={uvrange or 'all'}"
     )
     tclean(**cfg)
 
@@ -360,12 +460,28 @@ def run_tclean(
 # DIAGNOSTIC RUNNERS
 # -------------------------------------------------------------------
 def estimate_grid(ms_path: Path, outdir: Path) -> tuple[float, int, float, float, float]:
+    raise RuntimeError("estimate_grid now requires row metadata; use estimate_grid_from_metadata")
+
+
+def estimate_grid_from_metadata(
+    ms_path: Path,
+    outdir: Path,
+    row: Optional[pd.Series],
+) -> tuple[float, int, float, float, float, dict]:
+    gain_array_config = None if row is None else row.get("gain_array_config")
+    band_info = choose_band_and_frequency(ms_path, row)
+    firstpass_cell, firstpass_imsize, beam_est = choose_firstpass_imaging_setup(
+        gain_array_config,
+        band_info["ms_freq_ghz"],
+        band_info["selected_band"],
+    )
+
     base = outdir / "grid_firstpass"
     run_tclean(
         ms_path,
         str(base),
-        cell_arcsec=FIRSTPASS_CELL_ARCSEC,
-        imsize=FIRSTPASS_IMSIZE,
+        cell_arcsec=firstpass_cell,
+        imsize=firstpass_imsize,
         niter=0,
         datacolumn="corrected",
         usemask="",
@@ -377,9 +493,22 @@ def estimate_grid(ms_path: Path, outdir: Path) -> tuple[float, int, float, float
 
     print(
         f"[GRID] beam=({bmaj:.3f}\", {bmin:.3f}\", pa={bpa:.1f} deg) | "
-        f"cell={cell:.4f}\" | imsize={imsize} | FoV={fov_arcsec:.2f}\""
+        f"cell={cell:.4f}\" | imsize={imsize} | FoV={fov_arcsec:.2f}\" | "
+        f"config={gain_array_config} | band={band_info['selected_band']} | "
+        f"beam_est={beam_est if beam_est is not None else float('nan'):.3f}\""
     )
-    return cell, imsize, bmaj, bmin, bpa
+    return cell, imsize, bmaj, bmin, bpa, {
+        "gain_array_config": gain_array_config,
+        "band_used_for_firstpass": band_info["selected_band"],
+        "band_detected_from_freq": band_info["detected_band"],
+        "band_matches_frequency": band_info["band_match"],
+        "spw_used_for_band_check": band_info["used_spw"],
+        "spw_center_ghz_ms": band_info["ms_freq_ghz"],
+        "spw_center_ghz_csv": band_info.get("csv_freq_ghz"),
+        "firstpass_beam_estimate_arcsec": beam_est,
+        "firstpass_cell_arcsec": firstpass_cell,
+        "firstpass_imsize": firstpass_imsize,
+    }
 
 
 def central_mask_string(imsize: int, radius_frac: float = 0.12) -> str:
@@ -404,6 +533,7 @@ def run_product_set(
     scales: Optional[list[int]] = None,
     usemask: str = "",
     mask: str = "",
+    uvrange: str = "",
 ) -> dict:
     dirty_base = outdir / f"{key}_dirty"
     clean_base = outdir / f"{key}_clean"
@@ -421,6 +551,7 @@ def run_product_set(
         deconvolver=deconvolver,
         scales=scales,
         usemask="",
+        uvrange=uvrange,
     )
 
     run_tclean(
@@ -437,6 +568,7 @@ def run_product_set(
         scales=scales,
         usemask=usemask,
         mask=mask,
+        uvrange=uvrange,
     )
 
     psf_img = dirty_base.with_suffix(".psf")
@@ -454,7 +586,7 @@ def run_product_set(
     export_png(clean_img, clean_png, symmetric=False)
     export_png(psf_img, psf_png, symmetric=True)
     export_png(resid_img, resid_png, symmetric=True)
-    export_uv_png(ms_path, uv_png, spw=spw)
+    export_uv_png(ms_path, uv_png, spw=spw, uvrange=uvrange)
 
     stats = image_stats(clean_img)
 
@@ -467,6 +599,7 @@ def run_product_set(
         "deconvolver": deconvolver,
         "usemask": usemask,
         "mask": mask,
+        "uvrange": uvrange,
         "dirty_png": str(dirty_png),
         "clean_png": str(clean_png),
         "psf_png": str(psf_png),
@@ -552,7 +685,8 @@ def make_summary_plot(
             subtitle = f"spw={row.get('spw', '') or 'all'}"
         else:
             subtitle = (
-                f"spw={row.get('spw', '') or 'all'} | {row.get('weighting', '')} | {row.get('deconvolver', '')}\n"
+                f"spw={row.get('spw', '') or 'all'} | {row.get('weighting', '')} | "
+                f"{row.get('deconvolver', '')} | uv={row.get('uvrange', '') or 'all'}\n"
                 f"peak={peak:.3e} Jy/bm | rms={rms:.3e} | DR={dr:.1f}"
                 if np.isfinite(peak) and np.isfinite(rms) else
                 f"spw={row.get('spw', '') or 'all'}"
@@ -577,6 +711,9 @@ def make_summary_plot(
 # -------------------------------------------------------------------
 def run_one(folder_name: str) -> tuple[Path, list[Path], Path]:
     sample_top, src_ms = find_sample_ms(folder_name)
+    projects_df = load_projects(PROJECT_LIST)
+    calib_df = load_calibrator_uv_limits(CALIBRATOR_BANDS_CSV)
+    row = row_for_folder(projects_df, folder_name)
     outdir = sample_top / OUTDIR_NAME
     outdir.mkdir(parents=True, exist_ok=True)
 
@@ -585,9 +722,25 @@ def run_one(folder_name: str) -> tuple[Path, list[Path], Path]:
     probe = copy_ms(src_ms, probe_ms)
     flag_zero_visibilities(probe)
 
-    cell, imsize, bmaj, bmin, bpa = estimate_grid(probe, outdir)
+    cell, imsize, bmaj, bmin, bpa, grid_meta = estimate_grid_from_metadata(probe, outdir, row)
     scales = choose_multiscale_scales(cell, bmaj, bmin)
     mask_str = central_mask_string(imsize)
+    uv_limit_info = lookup_calibrator_uv_limits(
+        calib_df,
+        calibrator_name=folder_name if row is None else row.get("name", folder_name),
+        band=grid_meta["band_used_for_firstpass"],
+    )
+    uv_limit_range = ""
+    if uv_limit_info is not None:
+        uv_limit_range = make_uvrange_string(uv_limit_info["uvmin_kl"], uv_limit_info["uvmax_kl"])
+        print(
+            f"[UVLIMIT] {folder_name} | receiver={uv_limit_info['receiver']} | "
+            f"uvmin={uv_limit_info['uvmin_kl']} klambda | "
+            f"uvmax={uv_limit_info['uvmax_kl']} klambda | "
+            f"uvrange={uv_limit_range or 'none'}"
+        )
+    else:
+        print(f"[UVLIMIT] {folder_name} | no catalog uv limits found")
 
     rows: list[dict] = []
 
@@ -602,6 +755,19 @@ def run_one(folder_name: str) -> tuple[Path, list[Path], Path]:
             imsize=imsize,
         )
     )
+
+    if uv_limit_range:
+        rows.append(
+            run_product_set(
+                probe,
+                outdir,
+                key="catalog_uvsafe",
+                title="catalog uv limits",
+                cell=cell,
+                imsize=imsize,
+                uvrange=uv_limit_range,
+            )
+        )
 
     # 2) Weighting tests
     rows.append(
@@ -703,6 +869,13 @@ def run_one(folder_name: str) -> tuple[Path, list[Path], Path]:
     df.insert(2, "beam_pa_deg", bpa)
     df.insert(3, "cell_arcsec", cell)
     df.insert(4, "imsize", imsize)
+    for key, value in reversed(list(grid_meta.items())):
+        df.insert(5, key, value)
+    if uv_limit_info is not None:
+        df.insert(5, "catalog_uvmax_kl", uv_limit_info["uvmax_kl"])
+        df.insert(5, "catalog_uvmin_kl", uv_limit_info["uvmin_kl"])
+        df.insert(5, "catalog_uv_receiver", uv_limit_info["receiver"])
+        df.insert(5, "catalog_uvrange", uv_limit_range)
     df.to_csv(summary_csv, index=False)
     print(f"[OK] wrote CSV: {summary_csv}")
 

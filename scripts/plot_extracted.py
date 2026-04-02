@@ -26,6 +26,12 @@ def load_meta_map(summary_csv: Path) -> dict:
             "beam_major_arcsec": row.get("beam_major_arcsec"),
             "beam_minor_arcsec": row.get("beam_minor_arcsec"),
             "beam_pa_deg": row.get("beam_pa_deg"),
+            "band_used_for_firstpass": str(row.get("band_used_for_firstpass", "")).strip(),
+            "gain_array_config": str(row.get("gain_array_config", "")).strip(),
+            "catalog_uvrange": str(row.get("catalog_uvrange", "")).strip(),
+            "catalog_uvmin_kl": row.get("catalog_uvmin_kl"),
+            "catalog_uvmax_kl": row.get("catalog_uvmax_kl"),
+            "uv_fraction_inside_limits": row.get("uv_fraction_inside_limits"),
             "cell_arcsec": row.get("cell_arcsec"),
             "imsize": row.get("imsize"),
             "fov_arcsec": row.get("fov_arcsec"),
@@ -71,6 +77,12 @@ def find_valid_samples(extracted_dir: Path, meta_map: dict):
                 "beam_major_arcsec": meta.get("beam_major_arcsec"),
                 "beam_minor_arcsec": meta.get("beam_minor_arcsec"),
                 "beam_pa_deg": meta.get("beam_pa_deg"),
+                "band_used_for_firstpass": meta.get("band_used_for_firstpass", ""),
+                "gain_array_config": meta.get("gain_array_config", ""),
+                "catalog_uvrange": meta.get("catalog_uvrange", ""),
+                "catalog_uvmin_kl": meta.get("catalog_uvmin_kl"),
+                "catalog_uvmax_kl": meta.get("catalog_uvmax_kl"),
+                "uv_fraction_inside_limits": meta.get("uv_fraction_inside_limits"),
                 "cell_arcsec": meta.get("cell_arcsec"),
                 "imsize": meta.get("imsize"),
                 "fov_arcsec": meta.get("fov_arcsec"),
@@ -101,6 +113,16 @@ def make_title(i:int, sample: dict) -> str:
     beam_maj = fmt_float(sample["beam_major_arcsec"], ".2f")
     beam_min = fmt_float(sample["beam_minor_arcsec"], ".2f")
     beam_pa = fmt_float(sample["beam_pa_deg"], ".1f")
+    band = str(sample.get("band_used_for_firstpass", "")).strip() or "?"
+    config = str(sample.get("gain_array_config", "")).strip() or "?"
+    uvrange = str(sample.get("catalog_uvrange", "")).strip() or "all"
+    uvmin = fmt_float(sample.get("catalog_uvmin_kl"), ".1f", fallback="-")
+    uvmax = fmt_float(sample.get("catalog_uvmax_kl"), ".1f", fallback="-")
+    uv_inside = fmt_float(
+        None if pd.isna(sample.get("uv_fraction_inside_limits")) else 100.0 * float(sample.get("uv_fraction_inside_limits")),
+        ".1f",
+        fallback="?",
+    )
     cell = fmt_float(sample["cell_arcsec"], ".3f")
     ppb = fmt_float(sample["pixels_per_beam_minor"], ".1f")
     fov_arcsec = fmt_float(sample["fov_arcsec"], ".1f")
@@ -110,7 +132,9 @@ def make_title(i:int, sample: dict) -> str:
     return (
         f"# {i}\n"
         f"{name}\n"
-        f"beam={beam_maj}\"×{beam_min}\"  pa={beam_pa}°\n"
+        f"beam={beam_maj}\"x{beam_min}\"  pa={beam_pa}°\n"
+        f"band={band}  config={config}\n"
+        f"uv={uvrange}  in={uv_inside}%  [{uvmin},{uvmax}] kl\n"
         f"cell={cell}\"/pix  ppb={ppb}\n"
         f"FoV={fov_arcsec}\"  ({fov_beams} beams)\n"
         f"time={minutes} min"
