@@ -4,12 +4,7 @@ ML for Radoastronomy calibration debugging
 # Week 12-13: Apr 6
 
 - Automated some parts of the data requesting / downloading.
-- 54 more samples.
-
-| ![](images/better_imaging/new_set.png) |
-|:--:|:--:|
-| **Fig 0:** New set. |
-
+- 54 more samples. [Here](images/better_imaging/new_set.png)
 - Experimented with solving imaging issues.
 
 ### Better beam size estimation
