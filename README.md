@@ -1,6 +1,53 @@
 # radioastro-ml
 ML for Radoastronomy calibration debugging
 
+# Week 12-13: Apr 6
+
+- Automated some parts of the data requesting / downloading.
+- 54 more samples.
+
+| ![](images/better_imaging/new_set.png) |
+|:--:|:--:|
+| **Fig 0:** New set. |
+
+- Experimented with solving imaging issues.
+
+### Better beam size estimation
+
+First-pass beam using the estimated initial beam from the calibrator resolution information (https://science.nrao.edu/facilities/vla/docs/manuals/oss/performance/resolution).
+
+| ![](images/better_imaging/old_beam_size.png) | ![](images/better_imaging/new_beam_size.png) |
+|:--:|:--:|
+| **Fig 1:** Arbitrary beam pass setup. | **Fig 2:** New beam size estimation. Small improvements in some images. |
+
+For the samples where beam size seemed to be the issue:
+
+| ![](images/better_imaging/beam_size_issue_before.png) | ![](images/better_imaging/beam_size_issue_after.png) |
+|:--:|:--:|
+| **Fig 3:** Beam-size issue (weird FoV images). | **Fig 4:** Beam-size-issue fixed (better FoV). |
+
+### UV-limit filtering per calibrator
+
+Applying uv limits from the calibrator catalog.
+
+| ![](images/better_imaging/worse_uvlim.png) | ![](images/better_imaging/better_uvlim.png) |
+|:--:|:--:|
+| **Fig 5:** Before uv-limit filtering. | **Fig 6:** After uv-limit filtering. |
+
+### Things that didn't seem to improve images
+
+MT-MFS:
+
+| ![](images/better_imaging/needs_multiterm_not_applied.png) | ![](images/better_imaging/needs_multiterm.png) |
+|:--:|:--:|
+| **Fig 7:** Needs-multiterm group before. | **Fig 8:** Needs-multiterm group after. |
+
+Larger FoV for sources where bigger image might help either inlcude more sources or figure out the problem:
+
+| ![](images/better_imaging/needs_bigger_image_not_applied.png) | ![](images/better_imaging/needs_bigger_image.png) |
+|:--:|:--:|
+| **Fig 9:** Needs-bigger-image group before. | **Fig 10:** Needs-bigger-image group after. |
+
 # Week 11: Mar 23
 
 - 35 samples (23 more than last week). The pipeline continues to download.

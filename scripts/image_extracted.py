@@ -10,6 +10,17 @@ import pandas as pd
 from casatasks import tclean, flagdata, imhead
 from casatools import table
 from scripts.img_utils import casa_image_to_png
+from scripts.sample_groups import (
+    BAD_ANT,
+    BAD_BASELINE,
+    BAD_DATA,
+    BEAM_SIZE_ISSUE,
+    EXTRA_SOURCE,
+    GOOD_ONES,
+    NEEDS_BIGGER_IMAGE,
+    NEEDS_MULTITERM,
+    RESOLVED,
+)
 from scripts.vla_config import (
     band_for_frequency_ghz,
     band_matches_frequency,
@@ -23,13 +34,21 @@ from scripts.vla_config import (
 # Paths
 # -------------------------------------------------------------------
 PROJECT_LIST = Path("/Users/u1528314/repos/radioastro-ml/collect/small_subset/small_selection.csv")
-EXTRACTED_DIR = Path("/Users/u1528314/repos/radioastro-ml/collect/extracted")
+EXTRACTED_DIR = Path("/Users/u1528314/repos/radioastro-ml/collect/extracted2")
 CALIBRATOR_BANDS_CSV = Path("/Users/u1528314/repos/radioastro-ml/collect/vla_calibrators_bands_v2.csv")
 
 # -------------------------------------------------------------------
 # Imaging policy
 # -------------------------------------------------------------------
-MODIFY_MS_IN_PLACE = True
+MODIFY_MS_IN_PLACE = False
+USE_METADATA_FIRSTPASS = True
+ARBITRARY_FIRSTPASS_BEAM_ARCSEC = 2.0
+USE_ARBITRARY_FINAL_GRID = False
+ARBITRARY_FINAL_BEAM_ARCSEC = 2.0
+USE_MULTITERM_MFS = False
+MULTITERM_NTERMS = 2
+PRODUCT_PREFIX = "clean_corrected"
+SELECTED_FOLDERS: list[str] | None = None
 
 # beam-normalized final image policy
 PIXELS_PER_BEAM = 4.0
@@ -50,6 +69,7 @@ TCLEAN_BASE = dict(
     deconvolver="hogbom",
     gridder="standard",
     interactive=False,
+    datacolumn="corrected",
 )
 
 FIRSTPASS_NITER = 0
@@ -84,6 +104,24 @@ def find_extracted_ms_paths(extracted_dir: Path) -> list[Path]:
             hits.append(ms_list[0])
 
     return hits
+
+
+def filter_ms_paths(ms_paths: list[Path], selected_folders: list[str] | None) -> list[Path]:
+    if not selected_folders:
+        return ms_paths
+
+    wanted = [str(x).strip() for x in selected_folders if str(x).strip()]
+    wanted_set = set(wanted)
+    filtered = [ms_path for ms_path in ms_paths if ms_path.parent.parent.name in wanted_set]
+
+    found_folders = {ms_path.parent.parent.name for ms_path in filtered}
+    missing = [folder for folder in wanted if folder not in found_folders]
+    if missing:
+        print(f"[WARN] requested folders not found in extracted MS paths: {missing}")
+
+    order = {folder: i for i, folder in enumerate(wanted)}
+    filtered.sort(key=lambda ms_path: order.get(ms_path.parent.parent.name, 10**9))
+    return filtered
 
 
 def row_for_folder(df: pd.DataFrame, folder_name: str) -> Optional[pd.Series]:
@@ -378,6 +416,7 @@ def run_tclean(
     imsize: int,
     niter: int,
     uvrange: str = "",
+    use_multiterm_mfs: bool = False,
 ) -> None:
     remove_casa_products(imagename)
 
@@ -390,6 +429,9 @@ def run_tclean(
         niter=int(niter),
         uvrange=uvrange,
     )
+    if use_multiterm_mfs:
+        cfg["deconvolver"] = "mtmfs"
+        cfg["nterms"] = int(MULTITERM_NTERMS)
 
     print(
         f"[TCLEAN] vis={ms_path.name} "
@@ -397,7 +439,9 @@ def run_tclean(
         f"cell={cell_arcsec:.6f}arcsec "
         f"imsize={imsize} "
         f"niter={niter} "
-        f"uvrange={uvrange or 'all'}"
+        f"uvrange={uvrange or 'all'} "
+        f"deconvolver={cfg.get('deconvolver')} "
+        f"nterms={cfg.get('nterms', 1)}"
     )
     tclean(**cfg)
 
@@ -475,6 +519,19 @@ def choose_firstpass_imaging_setup(
     reference_freq_ghz: float | None,
     band: str | None,
 ) -> tuple[float, int, float | None]:
+    if not USE_METADATA_FIRSTPASS:
+        cell_arcsec = choose_beam_based_cell_arcsec(
+            ARBITRARY_FIRSTPASS_BEAM_ARCSEC,
+            ARBITRARY_FIRSTPASS_BEAM_ARCSEC,
+            pixels_per_beam=PIXELS_PER_BEAM,
+        )
+        imsize, _ = choose_imsize_for_beam_normalized_fov(
+            ARBITRARY_FIRSTPASS_BEAM_ARCSEC,
+            cell_arcsec,
+            fov_in_beams=FOV_IN_BEAMS,
+        )
+        return cell_arcsec, imsize, ARBITRARY_FIRSTPASS_BEAM_ARCSEC
+
     if reference_freq_ghz is None or not np.isfinite(reference_freq_ghz) or reference_freq_ghz <= 0:
         reference_freq_ghz = representative_frequency_for_band_ghz(band)
 
@@ -496,6 +553,32 @@ def choose_firstpass_imaging_setup(
         fov_in_beams=FOV_IN_BEAMS,
     )
     return cell_arcsec, imsize, estimated_beam_arcsec
+
+
+def choose_final_imaging_setup(
+    bmaj_arcsec: float,
+    bmin_arcsec: float,
+) -> tuple[float, int, float]:
+    if USE_ARBITRARY_FINAL_GRID:
+        final_cell = choose_beam_based_cell_arcsec(
+            ARBITRARY_FINAL_BEAM_ARCSEC,
+            ARBITRARY_FINAL_BEAM_ARCSEC,
+            pixels_per_beam=PIXELS_PER_BEAM,
+        )
+        final_imsize, final_fov_arcsec = choose_imsize_for_beam_normalized_fov(
+            ARBITRARY_FINAL_BEAM_ARCSEC,
+            final_cell,
+            fov_in_beams=FOV_IN_BEAMS,
+        )
+        return final_cell, final_imsize, final_fov_arcsec
+
+    final_cell = choose_beam_based_cell_arcsec(
+        bmaj_arcsec, bmin_arcsec, pixels_per_beam=PIXELS_PER_BEAM
+    )
+    final_imsize, final_fov_arcsec = choose_imsize_for_beam_normalized_fov(
+        bmin_arcsec, final_cell, fov_in_beams=FOV_IN_BEAMS
+    )
+    return final_cell, final_imsize, final_fov_arcsec
 
 
 def image_to_png_if_exists(
@@ -563,6 +646,7 @@ def process_one_sample(
     firstpass_base = sample_top / "beam_firstpass_dirty"
     print(
         f"[FIRSTPASS] {folder_name} | "
+        f"mode={'metadata' if USE_METADATA_FIRSTPASS else 'arbitrary'} | "
         f"config={gain_array_config} | "
         f"band_csv={band_info['row_band_codes']} | "
         f"band_detected={band_info['detected_band']} | "
@@ -585,16 +669,14 @@ def process_one_sample(
     firstpass_image = firstpass_base.with_suffix(".image")
     bmaj, bmin, bpa = read_restoring_beam_arcsec(firstpass_image)
 
-    # 3) beam-based cell, beam-normalized FoV
-    final_cell = choose_beam_based_cell_arcsec(
-        bmaj, bmin, pixels_per_beam=PIXELS_PER_BEAM
-    )
-    final_imsize, final_fov_arcsec = choose_imsize_for_beam_normalized_fov(
-        bmin, final_cell, fov_in_beams=FOV_IN_BEAMS
+    # 3) final imaging grid
+    final_cell, final_imsize, final_fov_arcsec = choose_final_imaging_setup(
+        bmaj,
+        bmin,
     )
 
     # 4) final dirty
-    dirty_base = sample_top / "clean_corrected_dirty"
+    dirty_base = sample_top / f"{PRODUCT_PREFIX}_dirty"
     run_tclean(
         ms_for_imaging,
         str(dirty_base),
@@ -605,7 +687,7 @@ def process_one_sample(
     )
 
     # 5) final clean
-    clean_base = sample_top / "clean_corrected_clean"
+    clean_base = sample_top / f"{PRODUCT_PREFIX}_clean"
     run_tclean(
         ms_for_imaging,
         str(clean_base),
@@ -613,9 +695,14 @@ def process_one_sample(
         imsize=final_imsize,
         niter=FINAL_CLEAN_NITER,
         uvrange=uv_range,
+        use_multiterm_mfs=USE_MULTITERM_MFS,
     )
 
-    final_clean_image = clean_base.with_suffix(".image")
+    final_clean_image = (
+        Path(str(clean_base) + ".image.tt0")
+        if USE_MULTITERM_MFS
+        else clean_base.with_suffix(".image")
+    )
     final_bmaj, final_bmin, final_bpa = read_restoring_beam_arcsec(final_clean_image)
     uv_inside_pct = 100.0 * uv_cov["uv_fraction_inside_limits"] if np.isfinite(uv_cov["uv_fraction_inside_limits"]) else np.nan
 
@@ -633,13 +720,13 @@ def process_one_sample(
     # 6) export pngs
     image_to_png_if_exists(
         dirty_base.with_suffix(".image"),
-        sample_top / "clean_corrected_dirty.png",
+        sample_top / f"{PRODUCT_PREFIX}_dirty.png",
         title=dirty_title,
         draw_beam_ellipse=True,
     )
     image_to_png_if_exists(
-        clean_base.with_suffix(".image"),
-        sample_top / "clean_corrected_clean.png",
+        final_clean_image,
+        sample_top / f"{PRODUCT_PREFIX}_clean.png",
         title=clean_title,
         draw_beam_ellipse=True,
     )
@@ -647,12 +734,15 @@ def process_one_sample(
     result = {
         "folder": folder_name,
         "ms": str(ms_path),
-        "beam_major_arcsec": final_bmaj,
-        "beam_minor_arcsec": final_bmin,
-        "beam_pa_deg": final_bpa,
+        "beam_major_arcsec": bmaj,
+        "beam_minor_arcsec": bmin,
+        "beam_pa_deg": bpa,
         "firstpass_beam_major_arcsec": bmaj,
         "firstpass_beam_minor_arcsec": bmin,
         "firstpass_beam_pa_deg": bpa,
+        "final_beam_major_arcsec": final_bmaj,
+        "final_beam_minor_arcsec": final_bmin,
+        "final_beam_pa_deg": final_bpa,
         "gain_array_config": gain_array_config,
         "band_code_csv": " ".join(band_info["row_band_codes"]),
         "band_detected_from_freq": band_info["detected_band"],
@@ -664,6 +754,10 @@ def process_one_sample(
         "firstpass_beam_estimate_arcsec": estimated_beam_arcsec,
         "firstpass_cell_arcsec": firstpass_cell,
         "firstpass_imsize": firstpass_imsize,
+        "firstpass_mode": "metadata" if USE_METADATA_FIRSTPASS else "arbitrary",
+        "final_grid_mode": "arbitrary" if USE_ARBITRARY_FINAL_GRID else "beam_based",
+        "clean_mode": "mtmfs" if USE_MULTITERM_MFS else "standard",
+        "product_prefix": PRODUCT_PREFIX,
         "catalog_uv_receiver": None if uv_limit_info is None else uv_limit_info["receiver"],
         "catalog_uvmin_kl": np.nan if uv_limit_info is None else uv_limit_info["uvmin_kl"],
         "catalog_uvmax_kl": np.nan if uv_limit_info is None else uv_limit_info["uvmax_kl"],
@@ -677,13 +771,14 @@ def process_one_sample(
         "cell_arcsec": final_cell,
         "imsize": final_imsize,
         "fov_arcsec": final_fov_arcsec,
-        "fov_in_beams_minor": final_fov_arcsec / final_bmin if final_bmin > 0 else np.nan,
-        "pixels_per_beam_minor": final_bmin / final_cell if final_cell > 0 else np.nan,
+        "fov_in_beams_minor": final_fov_arcsec / bmin if bmin > 0 else np.nan,
+        "pixels_per_beam_minor": bmin / final_cell if final_cell > 0 else np.nan,
     }
 
     print(
         f"[DONE] {folder_name} | "
         f"beam=({final_bmaj:.3f}\", {final_bmin:.3f}\", {final_bpa:.1f} deg) | "
+        f"final_grid={'arbitrary' if USE_ARBITRARY_FINAL_GRID else 'beam_based'} | "
         f"uvrange={uv_range or 'all'} | "
         f"inside={uv_inside_pct if np.isfinite(uv_inside_pct) else float('nan'):.1f}% | "
         f"cell={final_cell:.4f}\" | imsize={final_imsize} | "
@@ -698,6 +793,7 @@ def main():
     df = load_projects(PROJECT_LIST)
     calib_df = load_calibrator_uv_limits(CALIBRATOR_BANDS_CSV)
     ms_paths = find_extracted_ms_paths(EXTRACTED_DIR)
+    ms_paths = filter_ms_paths(ms_paths, SELECTED_FOLDERS)
 
     print(f"[INFO] found {len(ms_paths)} extracted MS files")
 

@@ -5,10 +5,25 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.image as mpimg
 
+from scripts.sample_groups import (
+    BAD_ANT,
+    BAD_BASELINE,
+    BAD_DATA,
+    BEAM_SIZE_ISSUE,
+    EXTRA_SOURCE,
+    GOOD_ONES,
+    NEEDS_BIGGER_IMAGE,
+    NEEDS_MULTITERM,
+    RESOLVED,
+)
 
-EXTRACTED_DIR = Path("/Users/u1528314/repos/radioastro-ml/collect/extracted")
+
+EXTRACTED_DIR = Path("/Users/u1528314/repos/radioastro-ml/collect/extracted2")
 SUMMARY_CSV = EXTRACTED_DIR / "beam_imaging_summary.csv"
+IMAGE_PREFIX = "clean_corrected"
 OUT_FIG = EXTRACTED_DIR / "all_samples_contact_sheet.png"
+SELECTED_FOLDERS: list[str] | None = None
+CUSTOM_TITLE: str | None = None
 
 
 def load_meta_map(summary_csv: Path) -> dict:
@@ -28,6 +43,7 @@ def load_meta_map(summary_csv: Path) -> dict:
             "beam_pa_deg": row.get("beam_pa_deg"),
             "band_used_for_firstpass": str(row.get("band_used_for_firstpass", "")).strip(),
             "gain_array_config": str(row.get("gain_array_config", "")).strip(),
+            "clean_mode": str(row.get("clean_mode", "")).strip(),
             "catalog_uvrange": str(row.get("catalog_uvrange", "")).strip(),
             "catalog_uvmin_kl": row.get("catalog_uvmin_kl"),
             "catalog_uvmax_kl": row.get("catalog_uvmax_kl"),
@@ -52,8 +68,8 @@ def find_valid_samples(extracted_dir: Path, meta_map: dict):
 
         folder = sample_dir.name
 
-        clean_png = sample_dir / "clean_corrected_clean.png"
-        dirty_png = sample_dir / "clean_corrected_dirty.png"
+        clean_png = sample_dir / f"{IMAGE_PREFIX}_clean.png"
+        dirty_png = sample_dir / f"{IMAGE_PREFIX}_dirty.png"
 
         if not clean_png.exists():
             hits = sorted(sample_dir.glob("*_corrected_clean.png"))
@@ -79,6 +95,7 @@ def find_valid_samples(extracted_dir: Path, meta_map: dict):
                 "beam_pa_deg": meta.get("beam_pa_deg"),
                 "band_used_for_firstpass": meta.get("band_used_for_firstpass", ""),
                 "gain_array_config": meta.get("gain_array_config", ""),
+                "clean_mode": meta.get("clean_mode", ""),
                 "catalog_uvrange": meta.get("catalog_uvrange", ""),
                 "catalog_uvmin_kl": meta.get("catalog_uvmin_kl"),
                 "catalog_uvmax_kl": meta.get("catalog_uvmax_kl"),
@@ -95,6 +112,23 @@ def find_valid_samples(extracted_dir: Path, meta_map: dict):
         )
 
     return samples
+
+
+def filter_samples(samples: list[dict], selected_folders: list[str] | None) -> list[dict]:
+    if not selected_folders:
+        return samples
+
+    wanted = [str(x).strip() for x in selected_folders if str(x).strip()]
+    wanted_set = set(wanted)
+    filtered = [sample for sample in samples if sample["folder"] in wanted_set]
+
+    missing = [folder for folder in wanted if folder not in {sample["folder"] for sample in filtered}]
+    if missing:
+        print(f"[WARN] requested folders not found in valid samples: {missing}")
+
+    order = {folder: i for i, folder in enumerate(wanted)}
+    filtered.sort(key=lambda sample: order.get(sample["folder"], 10**9))
+    return filtered
 
 
 def fmt_float(x, fmt: str, fallback: str = "?") -> str:
@@ -115,6 +149,7 @@ def make_title(i:int, sample: dict) -> str:
     beam_pa = fmt_float(sample["beam_pa_deg"], ".1f")
     band = str(sample.get("band_used_for_firstpass", "")).strip() or "?"
     config = str(sample.get("gain_array_config", "")).strip() or "?"
+    clean_mode = str(sample.get("clean_mode", "")).strip() or "standard"
     uvrange = str(sample.get("catalog_uvrange", "")).strip() or "all"
     uvmin = fmt_float(sample.get("catalog_uvmin_kl"), ".1f", fallback="-")
     uvmax = fmt_float(sample.get("catalog_uvmax_kl"), ".1f", fallback="-")
@@ -134,6 +169,7 @@ def make_title(i:int, sample: dict) -> str:
         f"{name}\n"
         f"beam={beam_maj}\"x{beam_min}\"  pa={beam_pa}°\n"
         f"band={band}  config={config}\n"
+        f"clean={clean_mode}\n"
         f"uv={uvrange}  in={uv_inside}%  [{uvmin},{uvmax}] kl\n"
         f"cell={cell}\"/pix  ppb={ppb}\n"
         f"FoV={fov_arcsec}\"  ({fov_beams} beams)\n"
@@ -141,7 +177,12 @@ def make_title(i:int, sample: dict) -> str:
     )
 
 
-def make_contact_sheet(samples, out_path: Path, samples_per_row: int = 3):
+def make_contact_sheet(
+    samples,
+    out_path: Path,
+    samples_per_row: int = 3,
+    figure_title: str | None = None,
+):
     if not samples:
         print("[INFO] No valid samples found.")
         return
@@ -183,7 +224,7 @@ def make_contact_sheet(samples, out_path: Path, samples_per_row: int = 3):
         ax_dirty.set_title("dirty", fontsize=10)
 
     fig.suptitle(
-        f"Extracted samples overview ({len(samples)} samples)",
+        figure_title or f"Extracted samples overview ({len(samples)} samples)",
         fontsize=16,
         y=0.995,
     )
@@ -197,5 +238,6 @@ def make_contact_sheet(samples, out_path: Path, samples_per_row: int = 3):
 def main():
     meta_map = load_meta_map(SUMMARY_CSV)
     samples = find_valid_samples(EXTRACTED_DIR, meta_map)
+    samples = filter_samples(samples, SELECTED_FOLDERS)
     print(f"[INFO] valid samples found: {len(samples)}")
-    make_contact_sheet(samples, OUT_FIG, samples_per_row=1)
+    make_contact_sheet(samples, OUT_FIG, samples_per_row=1, figure_title=CUSTOM_TITLE)
