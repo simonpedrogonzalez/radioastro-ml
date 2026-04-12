@@ -86,7 +86,7 @@ def casa_image_to_png(
     out_png: str,
     chan: int = 0,
     stokes: int = 0,
-    robust_pct: float = 99.0,
+    robust_pct: float = 99.5,
     symmetric: bool = True,
     log: bool = False,
     cmap: str = "inferno",

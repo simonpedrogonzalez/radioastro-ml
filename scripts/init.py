@@ -19,9 +19,9 @@ for lib in [corruption_gaindrift, extraction_pipeline, plot_extracted, asdm_util
 
 
 # corruption_gaindrift.new_corruption()
-# extraction_pipeline.run()
-image_extracted.main()
-plot_extracted.main()
+extraction_pipeline.run()
+# image_extracted.main()
+# plot_extracted.main()
 # asdm_utils.main()
 # image_extracted_in_depth.main("0739+016")
 # image_extracted_selfcal.main("0739+016")

@@ -250,7 +250,7 @@ def validate_calibrator_catalog(
 
 # ---- Example usage ----
 if __name__ == "__main__":
-    with open("collect/vla_calibrators.json") as f:
+    with open("collect/vla_calibrators_v2.json") as f:
         sources = json.load(f)
 
     report = validate_calibrator_catalog(
@@ -258,8 +258,8 @@ if __name__ == "__main__":
         suspicious_uvmin_lt=1.0,
         spotcheck_n=10,
         seed=0,
-        save_issues_csv="collect/vla_calibrators_issues.csv",
-        save_bands_csv="collect/vla_calibrators_bands.csv",
+        save_issues_csv="collect/vla_calibrators_issues_v2.csv",
+        save_bands_csv="collect/vla_calibrators_bands_v2.csv",
         normalize_7cm_to_6cm=True,
         ignore_zero_flux=True,
         flux_hi_90cm=500.0,

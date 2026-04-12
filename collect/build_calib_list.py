@@ -29,6 +29,8 @@ BAND_ROW_START_RE = re.compile(
     r"^(?P<wavelength>\d+(?:\.\d+)?cm)\s+(?P<receiver>[A-Za-z])(?:\s+(?P<rest>.*))?$"
 )
 
+BAND_UVMAX_START_COL = 45
+
 # Optional file preamble lines (only these)
 PREAMBLE_ALLOWED = {
     "IAU NAME EQUINOX  PC RA(hh,mm,ss)    DEC(ddd,mm,ss)   POS.REF ALT.NAME",
@@ -94,7 +96,7 @@ class ParseError(RuntimeError):
 
 CFG_SET = set("PSWXC?")  # allowed config codes (case-insensitive in input)
 
-_NUM_RE = re.compile(r"^\d+(?:\.\d+)?$")
+_NUM_RE = re.compile(r"^(?:\d+(?:\.\d+)?|\.\d+)$")
 
 
 def _parse_band_row_strict(line: str, i: int, err):
@@ -118,6 +120,11 @@ def _parse_band_row_strict(line: str, i: int, err):
     receiver = m.group("receiver")
     rest = (m.group("rest") or "")
     toks = rest.split() if rest.strip() else []
+
+    full_tokens = [(tm.group(), tm.start(), tm.end()) for tm in re.finditer(r"\S+", line)]
+    if len(full_tokens) < 2:
+        err(i, "Band row missing receiver token after wavelength")
+    full_tail = full_tokens[2:]
 
     # 0..4 config tokens
     cfg: list[str] = []
@@ -149,29 +156,39 @@ def _parse_band_row_strict(line: str, i: int, err):
             flux = float(t)
             flux_present = True
             j += 1
+        elif t.lower() == "visplot":
+            return wavelength, receiver, config, flux, None, None, " ".join(toks[j:]).strip()
+        else:
+            err(i, f"Invalid flux token in band row: {t!r}")
 
-    # uvmin/uvmax: numbers (optional) BUT only if flux token was present
+    uv_tokens: list[tuple[str, int]] = []
+    k = j
+    while k < len(toks) and _NUM_RE.match(toks[k]):
+        full_idx = k
+        if full_idx >= len(full_tail):
+            err(i, "Token/position mismatch while reading uv columns")
+        tok_text, tok_start, _ = full_tail[full_idx]
+        uv_tokens.append((tok_text, tok_start))
+        k += 1
+
+    notes = " ".join(toks[k:]).strip() or None
     uvmin: Optional[float] = None
     uvmax: Optional[float] = None
 
-    if j < len(toks) and _NUM_RE.match(toks[j]):
-        if not flux_present:
-            err(i, "Found uvmin/uvmax but missing flux (ambiguous band row).")
-        uvmin = float(toks[j])
-        j += 1
+    if uv_tokens and not flux_present:
+        err(i, "Found uvmin/uvmax but missing flux (ambiguous band row).")
 
-    if j < len(toks) and _NUM_RE.match(toks[j]):
-        if not flux_present:
-            err(i, "Found uvmin/uvmax but missing flux (ambiguous band row).")
-        uvmax = float(toks[j])
-        j += 1
-
-    notes = " ".join(toks[j:]).strip() or None
-
-    # Extra strictness: if there are non-empty tokens before flux that are not config tokens,
-    # they would have been left in toks and then become "notes". That is allowed ONLY as notes,
-    # not as "mystery config". This matches your "fail on weird formats" goal.
-    # If you want to disallow notes entirely, set notes must be None and err otherwise.
+    if len(uv_tokens) >= 2:
+        uvmin = float(uv_tokens[0][0])
+        uvmax = float(uv_tokens[1][0])
+        if len(uv_tokens) > 2:
+            err(i, f"Too many numeric uv tokens after flux: {uv_tokens!r}")
+    elif len(uv_tokens) == 1:
+        token_text, token_start = uv_tokens[0]
+        if token_start >= BAND_UVMAX_START_COL:
+            uvmax = float(token_text)
+        else:
+            uvmin = float(token_text)
 
     return wavelength, receiver, config, flux, uvmin, uvmax, notes
 
@@ -265,5 +282,6 @@ def parse_calibrators(path: str) -> List[Dict[str, Any]]:
 if __name__ == "__main__":
     sources = parse_calibrators("collect/calibrators.txt")
     print("Num calibrators:", len(sources))
-    Path("collect/vla_calibrators.json").write_text(json.dumps(sources, indent=2), encoding="utf-8")
-    print("Wrote collect/vla_calibrators.json")
+    out_path = Path("collect/vla_calibrators_v2.json")
+    out_path.write_text(json.dumps(sources, indent=2), encoding="utf-8")
+    print(f"Wrote {out_path}")

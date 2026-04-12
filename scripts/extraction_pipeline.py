@@ -24,7 +24,7 @@ from scripts.img_utils import make_clean, casa_image_to_png
 # -------------------------
 PROJECT_LIST = "/Users/u1528314/repos/radioastro-ml/collect/small_subset/small_selection.csv"
 DOWNLOAD_DIR = Path("/Users/u1528314/repos/radioastro-ml/collect/downloads")
-EXTRACTED_DIR = Path("/Users/u1528314/repos/radioastro-ml/collect/extracted2")
+EXTRACTED_DIR = Path("/Users/u1528314/repos/radioastro-ml/collect/extracted3")
 
 TCLEAN_CFG = dict(
     specmode="mfs",
