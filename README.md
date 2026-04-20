@@ -17,7 +17,7 @@ Tried more iterations and more MT-MFS terms. Some cases improve, but the gains a
 
 ### UV-lim
 
-Convert `uvmin_kl` / `uvmax_kl` from calibrator metadata into a CASA `uvrange`. The uv limit is used for a new gaincal, not for imaging. The variants are phase-only (`gaintype="G"`, `calmode="p"`, `solint="int"`) and then phase+amp (`calmode="ap"`, `solint="inf"`).
+Convert `uvmin_kl` / `uvmax_kl` from calibrator metadata into a CASA `uvrange`. The uv limit is used for a new gaincal with `uvrange` specified, but imaging is done with all baselines. The variants are phase-only (`gaintype="G"`, `calmode="p"`, `solint="int"`) and then phase+amp (`calmode="ap"`, `solint="inf"`).
 
 | ![](images/better_imaging2/my_uvlim.png) |
 |:--:|
