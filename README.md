@@ -1,6 +1,49 @@
 # radioastro-ml
 ML for Radoastronomy calibration debugging
 
+# Week 14-15: Apr 20
+
+### More iter more term MT
+
+Tried more iterations and more MT-MFS terms. Some cases improve, but the gains are still modest.
+
+| ![](images/better_imaging2/mt_old.png) | ![](images/better_imaging2/mt_improved.png) |
+|:--:|:--:|
+| **Before.** | **After.** More iterations / MT terms. |
+
+| ![](images/better_imaging2/mt_old2.png) | ![](images/better_imaging2/mt_improved2.png) |
+|:--:|:--:|
+| **Before.** | **After.** Very small improvement. |
+
+### UV-lim
+
+Convert `uvmin_kl` / `uvmax_kl` from calibrator metadata into a CASA `uvrange`. The uv limit is used for a new gaincal, not for imaging. The variants are phase-only (`gaintype="G"`, `calmode="p"`, `solint="int"`) and then phase+amp (`calmode="ap"`, `solint="inf"`).
+
+| ![](images/better_imaging2/my_uvlim.png) |
+|:--:|
+| **UV-lim test.** Before, phase-only, and phase+amp using the catalog uv range for the solves. Supresses small patterns. |
+
+### VLA selfcal pipeline
+
+Installed a previous CASA version, installed the VLA pipeline script, and ran it over a few samples. I think it mostly does nothing visible, except maybe for 1 case.
+
+- copy the extracted MS and split `CORRECTED_DATA` into `DATA` for the input MS;
+- mark the working MS as `OBSERVE_TARGET#ON_SOURCE` so the calibrator is treated as selfcal target;
+- `datacolumns={"data": "regcal_contline_science"}`, `specline_spws="none"`
+- run `hif_selfcal(apply=True, amplitude_selfcal=False)`, then image the selfcal result.
+
+| ![](images/better_imaging2/selfcal_improved.png) |
+|:--:|
+| **Selfcal pipeline test.** Possible improvement for `0205+322`. |
+
+This may have more to do with different gridding than selfcal. The regular and reproduction images are both 256 x 256 and have very similar beams, but the reproduction has smaller pixels and FoV:
+
+- regular: cell `2.793"`, FoV `714.925"`, beam `26.567" x 11.270"`;
+- reproduction: cell `1.855"`, FoV `474.788"`, beam `26.318" x 11.240"`;
+- cell/FoV ratio is about `1.506`, while beam ratios are about `1.0`.
+
+The estimation difference might have to do with uv-lim filtering in the initial pass.
+
 # Week 12-13: Apr 6
 
 - Automated some parts of the data requesting / downloading.

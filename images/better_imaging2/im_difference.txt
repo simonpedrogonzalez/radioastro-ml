@@ -1,0 +1,24 @@
+[GEOMETRY] regular image
+  image: /Users/u1528314/repos/radioastro-ml/collect/extracted/0205+322/clean_corrected_clean.image
+  imsize: 256 x 256
+  cell: 2.792675 arcsec
+  FoV: 714.925" x 714.925"
+  beam: 26.567" x 11.270"  pa=-66.30 deg
+
+[GEOMETRY] reproduction image
+  image: /Users/u1528314/repos/radioastro-ml/runs/vla_pipe_test/reproduce_before_data_clean.image
+  imsize: 256 x 256
+  cell: 1.854640 arcsec
+  FoV: 474.788" x 474.788"
+  beam: 26.318" x 11.240"  pa=-65.95 deg
+
+[DIFF] regular - reproduction
+  imsize_x: diff=0, ratio=1
+  imsize_y: diff=0, ratio=1
+  cell_arcsec: diff=0.938035, ratio=1.50578
+  fov_x_arcsec: diff=240.137, ratio=1.50578
+  fov_y_arcsec: diff=240.137, ratio=1.50578
+  beam_major_arcsec: diff=0.24909, ratio=1.00946
+  beam_minor_arcsec: diff=0.0300131, ratio=1.00267
+  beam_pa_deg: diff=-0.348938, ratio=1.00529
+  pixels_per_beam_minor: diff=-2.02494, ratio=0.665882
