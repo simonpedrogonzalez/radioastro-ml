@@ -44,6 +44,10 @@ This may have more to do with different gridding than selfcal. The regular and r
 
 The estimation difference might have to do with uv-lim filtering in the initial pass.
 
+### Diagnostics plots
+
+See [Here](images/better_imaging2/needs_multiterm_more_iters.png) and [Here](images/better_imaging2/uv_lim.png).
+
 # Week 12-13: Apr 6
 
 - Automated some parts of the data requesting / downloading.
