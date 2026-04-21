@@ -4,11 +4,13 @@ import shutil
 from pathlib import Path
 from typing import Optional, Tuple
 
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
 from casatasks import tclean, flagdata, imhead
-from casatools import table
+from casatools import image, table
+from casaplotms import plotms
 from scripts.img_utils import casa_image_to_png
 from scripts.sample_groups import (
     BAD_ANT,
@@ -20,6 +22,9 @@ from scripts.sample_groups import (
     NEEDS_BIGGER_IMAGE,
     NEEDS_MULTITERM,
     RESOLVED,
+    UV_LIM,
+    GOOD_ONES_2,
+    NEED_SELFCAL_2,
 )
 from scripts.vla_config import (
     band_for_frequency_ghz,
@@ -34,7 +39,7 @@ from scripts.vla_config import (
 # Paths
 # -------------------------------------------------------------------
 PROJECT_LIST = Path("/Users/u1528314/repos/radioastro-ml/collect/small_subset/small_selection.csv")
-EXTRACTED_DIR = Path("/Users/u1528314/repos/radioastro-ml/collect/extracted2")
+DEFAULT_EXTRACTED_DIR = Path("/Users/u1528314/repos/radioastro-ml/collect/extracted")
 CALIBRATOR_BANDS_CSV = Path("/Users/u1528314/repos/radioastro-ml/collect/vla_calibrators_bands_v2.csv")
 
 # -------------------------------------------------------------------
@@ -46,9 +51,11 @@ ARBITRARY_FIRSTPASS_BEAM_ARCSEC = 2.0
 USE_ARBITRARY_FINAL_GRID = False
 ARBITRARY_FINAL_BEAM_ARCSEC = 2.0
 USE_MULTITERM_MFS = False
-MULTITERM_NTERMS = 2
+MULTITERM_NTERMS = 3
 PRODUCT_PREFIX = "clean_corrected"
-SELECTED_FOLDERS: list[str] | None = None
+SELECTED_FOLDERS: list[str] | None = UV_LIM
+SELFCAL_DIRNAME = "selfcal"
+APPLY_CATALOG_UVLIMIT_FILTERING = False
 
 # beam-normalized final image policy
 PIXELS_PER_BEAM = 4.0
@@ -74,6 +81,9 @@ TCLEAN_BASE = dict(
 
 FIRSTPASS_NITER = 0
 FINAL_CLEAN_NITER = 100
+MULTITERM_NITER = 5000
+MULTITERM_NSIGMA = 3.0
+MULTITERM_CYCLENITER = 100
 
 
 # -------------------------------------------------------------------
@@ -81,6 +91,38 @@ FINAL_CLEAN_NITER = 100
 # -------------------------------------------------------------------
 def load_projects(csv_path: Path) -> pd.DataFrame:
     return pd.read_csv(csv_path)
+
+
+def resolve_extracted_dir(
+    selected_folders: list[str] | None,
+    default_dir: Path = DEFAULT_EXTRACTED_DIR,
+) -> Path:
+    candidate_dirs = [
+        Path("/Users/u1528314/repos/radioastro-ml/collect/extracted"),
+        Path("/Users/u1528314/repos/radioastro-ml/collect/extracted2"),
+        Path("/Users/u1528314/repos/radioastro-ml/collect/extracted3"),
+    ]
+    if not selected_folders:
+        return default_dir
+
+    wanted = [str(x).strip() for x in selected_folders if str(x).strip()]
+    if not wanted:
+        return default_dir
+
+    scored_dirs: list[tuple[int, int, Path]] = []
+    for idx, candidate_dir in enumerate(candidate_dirs):
+        hits = sum((candidate_dir / folder).exists() for folder in wanted)
+        scored_dirs.append((hits, -idx, candidate_dir))
+
+    best_hits, _, best_dir = max(scored_dirs)
+    if best_hits == 0:
+        print(
+            f"[WARN] none of the selected folders were found in extracted/extracted2/extracted3; "
+            f"using default {default_dir}"
+        )
+        return default_dir
+
+    return best_dir
 
 
 def load_calibrator_uv_limits(csv_path: Path) -> pd.DataFrame:
@@ -99,7 +141,11 @@ def find_extracted_ms_paths(extracted_dir: Path) -> list[Path]:
             hits.append(expected_ms)
             continue
 
-        ms_list = sorted(sample_dir.rglob("*.ms"))
+        ms_list = sorted(
+            ms_path
+            for ms_path in sample_dir.rglob("*.ms")
+            if SELFCAL_DIRNAME not in ms_path.relative_to(sample_dir).parts
+        )
         if ms_list:
             hits.append(ms_list[0])
 
@@ -122,6 +168,14 @@ def filter_ms_paths(ms_paths: list[Path], selected_folders: list[str] | None) ->
     order = {folder: i for i, folder in enumerate(wanted)}
     filtered.sort(key=lambda ms_path: order.get(ms_path.parent.parent.name, 10**9))
     return filtered
+
+
+def sample_top_for_ms(ms_path: Path) -> Path:
+    return ms_path.parent.parent
+
+
+def image_output_dir_for_sample(sample_top: Path) -> Path:
+    return sample_top
 
 
 def row_for_folder(df: pd.DataFrame, folder_name: str) -> Optional[pd.Series]:
@@ -387,11 +441,17 @@ def remove_casa_products(imagename: str) -> None:
                 pass
 
 
-def ensure_imaging_ms(ms_path: Path, modify_in_place: bool = True) -> Path:
+def ensure_imaging_ms(
+    ms_path: Path,
+    modify_in_place: bool = True,
+    output_dir: Path | None = None,
+) -> Path:
     if modify_in_place:
         return ms_path
 
-    out_ms = ms_path.with_name(ms_path.stem + "_imgprep.ms")
+    out_parent = ms_path.parent if output_dir is None else output_dir
+    out_parent.mkdir(parents=True, exist_ok=True)
+    out_ms = out_parent / f"{ms_path.stem}_imgprep.ms"
     if out_ms.exists():
         shutil.rmtree(out_ms)
     shutil.copytree(ms_path, out_ms)
@@ -417,6 +477,7 @@ def run_tclean(
     niter: int,
     uvrange: str = "",
     use_multiterm_mfs: bool = False,
+    apply_multiterm_clean_controls: bool = True,
 ) -> None:
     remove_casa_products(imagename)
 
@@ -432,16 +493,23 @@ def run_tclean(
     if use_multiterm_mfs:
         cfg["deconvolver"] = "mtmfs"
         cfg["nterms"] = int(MULTITERM_NTERMS)
+        if apply_multiterm_clean_controls:
+            cfg["niter"] = int(MULTITERM_NITER)
+            cfg["nsigma"] = float(MULTITERM_NSIGMA)
+            cfg["cycleniter"] = int(MULTITERM_CYCLENITER)
 
     print(
         f"[TCLEAN] vis={ms_path.name} "
         f"imagename={imagename} "
         f"cell={cell_arcsec:.6f}arcsec "
         f"imsize={imsize} "
-        f"niter={niter} "
+        f"niter={cfg['niter']} "
         f"uvrange={uvrange or 'all'} "
         f"deconvolver={cfg.get('deconvolver')} "
-        f"nterms={cfg.get('nterms', 1)}"
+        f"nterms={cfg.get('nterms', 1)} "
+        f"nsigma={cfg.get('nsigma', 'default')} "
+        f"cycleniter={cfg.get('cycleniter', 'default')} "
+        f"mt_clean_controls={apply_multiterm_clean_controls}"
     )
     tclean(**cfg)
 
@@ -485,6 +553,180 @@ def read_restoring_beam_arcsec(image_path: str | Path) -> Tuple[float, float, fl
         pa_deg = float(pa)
 
     return bmaj, bmin, pa_deg
+
+
+def load_image_2d(image_path: str | Path) -> np.ndarray:
+    ia = image()
+    ia.open(str(image_path))
+    try:
+        arr = np.asarray(ia.getchunk())
+    finally:
+        ia.close()
+
+    arr = np.squeeze(arr)
+    if arr.ndim == 4:
+        arr = arr[:, :, 0, 0]
+    elif arr.ndim == 3:
+        arr = arr[:, :, 0]
+    elif arr.ndim != 2:
+        raise RuntimeError(f"Unexpected image ndim={arr.ndim} for {image_path}")
+
+    return np.asarray(arr, dtype=float).T
+
+
+def robust_sigma(values: np.ndarray) -> float:
+    x = values[np.isfinite(values)]
+    if x.size == 0:
+        return float("nan")
+    med = float(np.median(x))
+    mad = float(np.median(np.abs(x - med)))
+    return 1.4826 * mad
+
+
+def clean_residual_qa_metrics(clean_image: Path, residual_image: Path) -> dict:
+    clean = load_image_2d(clean_image)
+    residual = load_image_2d(residual_image)
+
+    clean_vals = clean[np.isfinite(clean)]
+    residual_vals = residual[np.isfinite(residual)]
+    if clean_vals.size == 0:
+        raise RuntimeError(f"No finite pixels in {clean_image}")
+    if residual_vals.size == 0:
+        raise RuntimeError(f"No finite pixels in {residual_image}")
+
+    residual_robust_sigma = robust_sigma(residual_vals)
+    residual_max_abs = float(np.max(np.abs(residual_vals)))
+    residual_p99_abs = float(np.percentile(np.abs(residual_vals), 99.0))
+    residual_p995_abs = float(np.percentile(np.abs(residual_vals), 99.5))
+    clean_max_abs = float(np.max(np.abs(clean_vals)))
+    return {
+        "residual_robust_sigma_jy_per_beam": residual_robust_sigma,
+        "residual_p99_abs_over_sigma": (
+            residual_p99_abs / residual_robust_sigma
+            if np.isfinite(residual_robust_sigma) and residual_robust_sigma > 0
+            else float("nan")
+        ),
+        "residual_p995_abs_over_sigma": (
+            residual_p995_abs / residual_robust_sigma
+            if np.isfinite(residual_robust_sigma) and residual_robust_sigma > 0
+            else float("nan")
+        ),
+        "residual_peak_to_sigma": (
+            residual_max_abs / residual_robust_sigma
+            if np.isfinite(residual_robust_sigma) and residual_robust_sigma > 0
+            else float("nan")
+        ),
+        "dynamic_range": (
+            clean_max_abs / residual_robust_sigma
+            if np.isfinite(residual_robust_sigma) and residual_robust_sigma > 0
+            else float("nan")
+        ),
+    }
+
+
+def ratio(after: float, before: float) -> float:
+    try:
+        after = float(after)
+        before = float(before)
+    except (TypeError, ValueError):
+        return float("nan")
+    if not np.isfinite(after) or not np.isfinite(before):
+        return float("nan")
+    if before == 0:
+        return float("inf") if after > 0 else 1.0
+    return float(after / before)
+
+
+def read_one_row_csv(path: Path) -> dict:
+    if not path.exists():
+        return {}
+    try:
+        df = pd.read_csv(path)
+    except Exception as exc:
+        print(f"[WARN] could not read {path}: {exc}")
+        return {}
+    if df.empty:
+        return {}
+    return dict(df.iloc[0])
+
+
+def parse_metric(value) -> float:
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return float("nan")
+    return value if np.isfinite(value) else float("nan")
+
+
+def first_finite_metric(row: dict, keys: list[str]) -> float:
+    for key in keys:
+        value = parse_metric(row.get(key))
+        if np.isfinite(value):
+            return value
+    return float("nan")
+
+
+def load_selfcal_qa_metrics(sample_top: Path, original_metrics: dict) -> dict:
+    metrics_csv = sample_top / SELFCAL_DIRNAME / "selfcal_improvement_metrics.csv"
+    row = read_one_row_csv(metrics_csv)
+    if not row:
+        return {}
+
+    out = {
+        "selfcal_residual_robust_sigma_jy_per_beam": first_finite_metric(
+            row,
+            [
+                "selfcal_residual_robust_sigma_jy_per_beam",
+            ],
+        ),
+        "selfcal_residual_peak_to_sigma": first_finite_metric(
+            row,
+            [
+                "selfcal_residual_peak_to_sigma",
+                "selfcal_residual_max_abs_over_robust_sigma",
+            ],
+        ),
+        "selfcal_residual_p99_abs_over_sigma": first_finite_metric(
+            row,
+            [
+                "selfcal_residual_p99_abs_over_sigma",
+            ],
+        ),
+        "selfcal_residual_p995_abs_over_sigma": first_finite_metric(
+            row,
+            [
+                "selfcal_residual_p995_abs_over_sigma",
+            ],
+        ),
+        "selfcal_dynamic_range": first_finite_metric(
+            row,
+            [
+                "selfcal_dynamic_range",
+                "selfcal_residual_dynamic_range",
+            ],
+        ),
+    }
+    out["residual_robust_sigma_ratio_selfcal_over_original"] = ratio(
+        out["selfcal_residual_robust_sigma_jy_per_beam"],
+        original_metrics.get("residual_robust_sigma_jy_per_beam"),
+    )
+    out["residual_peak_to_sigma_ratio_selfcal_over_original"] = ratio(
+        out["selfcal_residual_peak_to_sigma"],
+        original_metrics.get("residual_peak_to_sigma"),
+    )
+    out["residual_p99_abs_over_sigma_ratio_selfcal_over_original"] = ratio(
+        out["selfcal_residual_p99_abs_over_sigma"],
+        original_metrics.get("residual_p99_abs_over_sigma"),
+    )
+    out["residual_p995_abs_over_sigma_ratio_selfcal_over_original"] = ratio(
+        out["selfcal_residual_p995_abs_over_sigma"],
+        original_metrics.get("residual_p995_abs_over_sigma"),
+    )
+    out["dynamic_range_ratio_selfcal_over_original"] = ratio(
+        out["selfcal_dynamic_range"],
+        original_metrics.get("dynamic_range"),
+    )
+    return out
 
 
 def choose_beam_based_cell_arcsec(
@@ -587,6 +829,8 @@ def image_to_png_if_exists(
     *,
     title: str | None = None,
     draw_beam_ellipse: bool = False,
+    symmetric: bool = True,
+    cmap: str = "inferno",
 ) -> None:
     if casa_image.exists():
         casa_image_to_png(
@@ -594,7 +838,395 @@ def image_to_png_if_exists(
             str(png_path),
             title=title,
             draw_beam_ellipse=draw_beam_ellipse,
+            symmetric=symmetric,
+            cmap=cmap,
         )
+
+
+def export_uv_png(
+    ms_path: Path,
+    png_path: Path,
+    *,
+    spw: str = "",
+    uvrange: str = "",
+) -> None:
+    print(f"[PLOTMS] uv coverage -> {png_path}")
+    plotms(
+        vis=str(ms_path),
+        xaxis="u",
+        yaxis="v",
+        spw=spw,
+        uvrange=uvrange,
+        avgchannel="1e8",
+        avgtime="1e8",
+        coloraxis="spw",
+        plotfile=str(png_path),
+        expformat="png",
+        highres=True,
+        overwrite=True,
+        showgui=False,
+    )
+
+
+def export_amp_vs_uvdist_png(
+    ms_path: Path,
+    png_path: Path,
+    *,
+    spw: str = "",
+    uvrange: str = "",
+) -> None:
+    print(f"[PLOTMS] amp vs uv-dist -> {png_path}")
+    ymin, ymax = _amplitude_yrange(
+        ms_path,
+        spw=spw,
+        uvrange=uvrange,
+        avgchannel=2,
+        min_span=2.0,
+        mode="floor",
+    )
+    data_col = "corrected"
+    tb = table()
+    tb.open(str(ms_path))
+    try:
+        if "CORRECTED_DATA" not in tb.colnames():
+            data_col = "data"
+    finally:
+        tb.close()
+    plotms(
+        vis=str(ms_path),
+        xaxis="UVdist",
+        yaxis="amp",
+        ydatacolumn=data_col,
+        spw=spw,
+        uvrange=uvrange,
+        correlation="RR,LL",
+        averagedata=True,
+        avgchannel="2",
+        avgtime="0",
+        avgscan=False,
+        avgfield=False,
+        coloraxis="antenna1",
+        plotrange=[-1, -1, ymin, ymax],
+        title="amp vs uv-dist | avgch=2 avgtime=0 avgscan=False avgfield=False",
+        plotfile=str(png_path),
+        expformat="png",
+        highres=True,
+        overwrite=True,
+        showgui=False,
+    )
+
+
+def _parse_spw_selection(spw: str) -> set[int] | None:
+    spw = str(spw).strip()
+    if not spw:
+        return None
+
+    selected: set[int] = set()
+    for part in spw.split(","):
+        token = part.strip()
+        if not token:
+            continue
+        token = token.split(":")[0].strip()
+        if "~" in token:
+            lo_str, hi_str = token.split("~", 1)
+            try:
+                lo = int(lo_str)
+                hi = int(hi_str)
+            except ValueError:
+                continue
+            for val in range(min(lo, hi), max(lo, hi) + 1):
+                selected.add(val)
+            continue
+        try:
+            selected.add(int(token))
+        except ValueError:
+            continue
+    return selected or None
+
+
+def _parse_uvrange_limits(uvrange: str) -> tuple[float | None, float | None]:
+    text = str(uvrange).strip().lower().replace(" ", "")
+    if not text:
+        return None, None
+
+    def parse_klambda(value: str) -> float | None:
+        if value.endswith("klambda"):
+            value = value[:-7]
+        try:
+            return float(value)
+        except ValueError:
+            return None
+
+    if text.startswith(">"):
+        return parse_klambda(text[1:]), None
+    if text.startswith("<"):
+        return None, parse_klambda(text[1:])
+    if "~" in text:
+        lo_str, hi_str = text.split("~", 1)
+        return parse_klambda(lo_str), parse_klambda(hi_str)
+    return None, None
+
+
+def _load_selected_visibility_amplitudes(
+    ms_path: Path,
+    *,
+    spw: str = "",
+    uvrange: str = "",
+    avgchannel: int = 1,
+) -> tuple[np.ma.MaskedArray, np.ndarray, np.ndarray, str]:
+    tb = table()
+
+    tb.open(str(ms_path / "DATA_DESCRIPTION"))
+    try:
+        ddid_to_spw = np.array(tb.getcol("SPECTRAL_WINDOW_ID"), dtype=int)
+    finally:
+        tb.close()
+
+    ref_freq_ghz, _ = get_ms_reference_frequency_ghz(ms_path)
+    c_m_s = 299792458.0
+    lam_m = c_m_s / (ref_freq_ghz * 1e9) if ref_freq_ghz and np.isfinite(ref_freq_ghz) and ref_freq_ghz > 0 else None
+
+    tb.open(str(ms_path))
+    try:
+        data_col = "CORRECTED_DATA" if "CORRECTED_DATA" in tb.colnames() else "DATA"
+        data = np.array(tb.getcol(data_col))
+        flags = np.array(tb.getcol("FLAG"), dtype=bool)
+        uvw = np.array(tb.getcol("UVW"), dtype=float)
+        antenna1 = np.array(tb.getcol("ANTENNA1"), dtype=int)
+        ddid = np.array(tb.getcol("DATA_DESC_ID"), dtype=int)
+        flag_row = np.array(tb.getcol("FLAG_ROW"), dtype=bool) if "FLAG_ROW" in tb.colnames() else np.zeros(tb.nrows(), dtype=bool)
+    finally:
+        tb.close()
+
+    uvdist_m = np.sqrt(uvw[0] ** 2 + uvw[1] ** 2)
+    row_mask = ~flag_row
+
+    selected_spws = _parse_spw_selection(spw)
+    if selected_spws is not None:
+        row_spw = ddid_to_spw[ddid]
+        row_mask &= np.isin(row_spw, list(selected_spws))
+
+    if lam_m is not None:
+        uvdist_kl = uvdist_m / lam_m / 1e3
+        uvmin_kl, uvmax_kl = _parse_uvrange_limits(uvrange)
+        if uvmin_kl is not None:
+            row_mask &= uvdist_kl >= uvmin_kl
+        if uvmax_kl is not None:
+            row_mask &= uvdist_kl <= uvmax_kl
+
+    if not np.any(row_mask):
+        return np.ma.array(np.empty((0, 0, 0))), np.array([]), np.array([]), data_col
+
+    data = data[:, :, row_mask]
+    flags = flags[:, :, row_mask]
+    uvdist_m = uvdist_m[row_mask]
+    antenna1 = antenna1[row_mask]
+
+    ncorr = data.shape[0]
+    corr_idx = [0] if ncorr == 1 else [0, ncorr - 1]
+
+    amps = np.abs(data[corr_idx]).astype(float)
+    amp_flags = flags[corr_idx]
+
+    if avgchannel > 1:
+        nchan = amps.shape[1]
+        ntrim = (nchan // avgchannel) * avgchannel
+        if ntrim == 0:
+            ntrim = nchan
+            avgchannel = 1
+        amps = amps[:, :ntrim, :]
+        amp_flags = amp_flags[:, :ntrim, :]
+        if avgchannel > 1:
+            amps = amps.reshape(amps.shape[0], ntrim // avgchannel, avgchannel, amps.shape[2])
+            amp_flags = amp_flags.reshape(amp_flags.shape[0], ntrim // avgchannel, avgchannel, amp_flags.shape[2])
+            amps = np.ma.array(amps, mask=amp_flags).mean(axis=2)
+        else:
+            amps = np.ma.array(amps, mask=amp_flags)
+    else:
+        amps = np.ma.array(amps, mask=amp_flags)
+
+    return amps, uvdist_m, antenna1, data_col
+
+
+def _amplitude_yrange(
+    ms_path: Path,
+    *,
+    spw: str = "",
+    uvrange: str = "",
+    avgchannel: int = 1,
+    min_span: float = 1.0,
+    mode: str = "cap",
+) -> tuple[float, float]:
+    amps, _, _, _ = _load_selected_visibility_amplitudes(
+        ms_path,
+        spw=spw,
+        uvrange=uvrange,
+        avgchannel=avgchannel,
+    )
+    if amps.size == 0:
+        return 0.0, min_span
+
+    amp_flat = np.ma.filled(amps, np.nan).reshape(-1)
+    finite = amp_flat[np.isfinite(amp_flat)]
+    if finite.size == 0:
+        return 0.0, min_span
+
+    ymin = float(np.nanmin(finite))
+    ymax = float(np.nanmax(finite))
+    median = float(np.nanmedian(finite))
+    span = ymax - ymin
+
+    if mode == "cap" and span > min_span:
+        half = 0.5 * min_span
+        return median - half, median + half
+
+    if mode == "floor" and span < min_span:
+        half = 0.5 * min_span
+        return median - half, median + half
+
+    if span <= 0:
+        half = 0.5 * min_span
+        return median - half, median + half
+
+    return ymin, ymax
+
+
+def export_normalized_amp_vs_uvdist_png(
+    ms_path: Path,
+    png_path: Path,
+    *,
+    spw: str = "",
+    uvrange: str = "",
+    avgchannel: int = 2,
+) -> None:
+    print(f"[MATPLOTLIB] normalized amp vs uv-dist -> {png_path}")
+    amps, uvdist_m, antenna1, data_col = _load_selected_visibility_amplitudes(
+        ms_path,
+        spw=spw,
+        uvrange=uvrange,
+        avgchannel=avgchannel,
+    )
+    if data_col != "CORRECTED_DATA":
+        print(f"[WARN] {ms_path.name}: CORRECTED_DATA missing, using DATA for normalized amp vs uv-dist")
+
+    if amps.size == 0:
+        fig, ax = plt.subplots(figsize=(7, 5))
+        ax.text(0.5, 0.5, "No valid visibilities", ha="center", va="center")
+        ax.axis("off")
+        fig.savefig(png_path, dpi=180, bbox_inches="tight")
+        plt.close(fig)
+        return
+
+    amp_flat = np.ma.filled(amps, np.nan).reshape(-1)
+    uv_flat = np.broadcast_to(uvdist_m[np.newaxis, np.newaxis, :], amps.shape).reshape(-1)
+    ant_flat = np.broadcast_to(antenna1[np.newaxis, np.newaxis, :], amps.shape).reshape(-1)
+
+    keep = np.isfinite(amp_flat) & np.isfinite(uv_flat)
+    amp_flat = amp_flat[keep]
+    uv_flat = uv_flat[keep]
+    ant_flat = ant_flat[keep]
+
+    if amp_flat.size == 0:
+        fig, ax = plt.subplots(figsize=(7, 5))
+        ax.text(0.5, 0.5, "No finite amplitudes after filtering", ha="center", va="center")
+        ax.axis("off")
+        fig.savefig(png_path, dpi=180, bbox_inches="tight")
+        plt.close(fig)
+        return
+
+    median_amp = np.nanmedian(amp_flat) if amp_flat.size else np.nan
+
+    if not np.isfinite(median_amp) or median_amp <= 0:
+        fig, ax = plt.subplots(figsize=(7, 5))
+        ax.text(0.5, 0.5, "Median amplitude unavailable", ha="center", va="center")
+        ax.axis("off")
+        fig.savefig(png_path, dpi=180, bbox_inches="tight")
+        plt.close(fig)
+        return
+
+    norm_amp = amp_flat / median_amp
+    ymax = max(2.0, float(np.nanmax(norm_amp))) if norm_amp.size else 2.0
+
+    fig, ax = plt.subplots(figsize=(7, 5))
+    scatter = ax.scatter(
+        uv_flat,
+        norm_amp,
+        c=ant_flat,
+        s=4,
+        alpha=0.55,
+        cmap="tab20",
+        linewidths=0,
+        rasterized=True,
+    )
+    ax.set_xlabel("UVdist")
+    ax.set_ylabel("amp / median(A)")
+    ax.set_ylim(0.0, ymax)
+    ax.set_title("Normalized amp vs uv-dist\navgch=2 avgtime=0 avgscan=False avgfield=False")
+    ax.grid(alpha=0.2)
+
+    cbar = fig.colorbar(scatter, ax=ax, fraction=0.046, pad=0.04)
+    cbar.set_label("ANTENNA1")
+
+    fig.tight_layout()
+    fig.savefig(png_path, dpi=180, bbox_inches="tight")
+    plt.close(fig)
+
+
+def run_optional_export(label: str, fn, *args, **kwargs) -> None:
+    try:
+        fn(*args, **kwargs)
+    except Exception as e:
+        print(f"[WARN] optional diagnostic '{label}' failed: {type(e).__name__}: {e}")
+
+
+def export_spectrum_png(
+    ms_path: Path,
+    png_path: Path,
+    *,
+    spw: str = "",
+    uvrange: str = "",
+    avgbaseline: bool = False,
+) -> None:
+    print(f"[PLOTMS] spectrum -> {png_path}")
+    ymin, ymax = _amplitude_yrange(
+        ms_path,
+        spw=spw,
+        uvrange=uvrange,
+        avgchannel=1,
+        min_span=1.0,
+        mode="floor",
+    )
+    data_col = "corrected"
+    tb = table()
+    tb.open(str(ms_path))
+    try:
+        if "CORRECTED_DATA" not in tb.colnames():
+            data_col = "data"
+    finally:
+        tb.close()
+    avg_label = f"avgtime=1e8 avgscan=True avgfield=True avgbaseline={avgbaseline}"
+    plotms(
+        vis=str(ms_path),
+        xaxis="freq",
+        yaxis="amp",
+        ydatacolumn=data_col,
+        spw=spw,
+        uvrange=uvrange,
+        correlation="RR,LL",
+        averagedata=True,
+        avgtime="1e8",
+        avgscan=True,
+        avgfield=True,
+        avgbaseline=avgbaseline,
+        coloraxis="antenna1",
+        plotrange=[-1, -1, ymin, ymax],
+        title=f"spectrum | {avg_label}",
+        plotfile=str(png_path),
+        expformat="png",
+        highres=True,
+        overwrite=True,
+        showgui=False,
+    )
 
 
 def process_one_sample(
@@ -602,11 +1234,17 @@ def process_one_sample(
     row: Optional[pd.Series] = None,
     calib_df: Optional[pd.DataFrame] = None,
 ) -> dict:
-    sample_leaf = ms_path.parent
-    sample_top = sample_leaf.parent
+    sample_top = sample_top_for_ms(ms_path)
     folder_name = sample_top.name
+    source_label = "original"
+    output_dir = image_output_dir_for_sample(sample_top)
+    output_dir.mkdir(parents=True, exist_ok=True)
 
-    ms_for_imaging = ensure_imaging_ms(ms_path, modify_in_place=MODIFY_MS_IN_PLACE)
+    ms_for_imaging = ensure_imaging_ms(
+        ms_path,
+        modify_in_place=MODIFY_MS_IN_PLACE,
+        output_dir=output_dir,
+    )
     gain_array_config = None if row is None else row.get("gain_array_config")
     band_info = choose_band_and_frequency(ms_for_imaging, row)
     uv_limit_info = None
@@ -633,6 +1271,7 @@ def process_one_sample(
             uv_limit_info["uvmin_kl"],
             uv_limit_info["uvmax_kl"],
         )
+    applied_uvrange = uv_range if APPLY_CATALOG_UVLIMIT_FILTERING else ""
     firstpass_cell, firstpass_imsize, estimated_beam_arcsec = choose_firstpass_imaging_setup(
         gain_array_config,
         band_info["ms_freq_ghz"],
@@ -643,7 +1282,7 @@ def process_one_sample(
     flag_zero_visibilities(ms_for_imaging)
 
     # 2) first-pass dirty image to estimate beam
-    firstpass_base = sample_top / "beam_firstpass_dirty"
+    firstpass_base = output_dir / "beam_firstpass_dirty"
     print(
         f"[FIRSTPASS] {folder_name} | "
         f"mode={'metadata' if USE_METADATA_FIRSTPASS else 'arbitrary'} | "
@@ -653,7 +1292,8 @@ def process_one_sample(
         f"selected_band={band_info['selected_band']} | "
         f"freq_ms={band_info['ms_freq_ghz'] if band_info['ms_freq_ghz'] is not None else float('nan'):.3f} GHz | "
         f"spw={band_info['used_spw']} | "
-        f"uvrange={uv_range or 'all'} | "
+        f"uvrange={applied_uvrange or 'all'} | "
+        f"catalog_uvrange={uv_range or 'none'} | "
         f"beam_est={estimated_beam_arcsec if estimated_beam_arcsec is not None else float('nan'):.3f}\" | "
         f"cell={firstpass_cell:.4f}\" | imsize={firstpass_imsize}"
     )
@@ -663,10 +1303,15 @@ def process_one_sample(
         cell_arcsec=firstpass_cell,
         imsize=firstpass_imsize,
         niter=FIRSTPASS_NITER,
-        uvrange=uv_range,
+        uvrange=applied_uvrange,
+        use_multiterm_mfs=USE_MULTITERM_MFS,
     )
 
-    firstpass_image = firstpass_base.with_suffix(".image")
+    firstpass_image = (
+        Path(str(firstpass_base) + ".image.tt0")
+        if USE_MULTITERM_MFS
+        else firstpass_base.with_suffix(".image")
+    )
     bmaj, bmin, bpa = read_restoring_beam_arcsec(firstpass_image)
 
     # 3) final imaging grid
@@ -676,25 +1321,27 @@ def process_one_sample(
     )
 
     # 4) final dirty
-    dirty_base = sample_top / f"{PRODUCT_PREFIX}_dirty"
+    dirty_base = output_dir / f"{PRODUCT_PREFIX}_dirty"
     run_tclean(
         ms_for_imaging,
         str(dirty_base),
         cell_arcsec=final_cell,
         imsize=final_imsize,
         niter=0,
-        uvrange=uv_range,
+        uvrange=applied_uvrange,
+        use_multiterm_mfs=USE_MULTITERM_MFS,
+        apply_multiterm_clean_controls=False,
     )
 
     # 5) final clean
-    clean_base = sample_top / f"{PRODUCT_PREFIX}_clean"
+    clean_base = output_dir / f"{PRODUCT_PREFIX}_clean"
     run_tclean(
         ms_for_imaging,
         str(clean_base),
         cell_arcsec=final_cell,
         imsize=final_imsize,
         niter=FINAL_CLEAN_NITER,
-        uvrange=uv_range,
+        uvrange=applied_uvrange,
         use_multiterm_mfs=USE_MULTITERM_MFS,
     )
 
@@ -703,37 +1350,104 @@ def process_one_sample(
         if USE_MULTITERM_MFS
         else clean_base.with_suffix(".image")
     )
+    final_residual_image = (
+        Path(str(clean_base) + ".residual.tt0")
+        if USE_MULTITERM_MFS
+        else clean_base.with_suffix(".residual")
+    )
     final_bmaj, final_bmin, final_bpa = read_restoring_beam_arcsec(final_clean_image)
+    qa_metrics = clean_residual_qa_metrics(final_clean_image, final_residual_image)
+    selfcal_qa_metrics = load_selfcal_qa_metrics(sample_top, qa_metrics)
     uv_inside_pct = 100.0 * uv_cov["uv_fraction_inside_limits"] if np.isfinite(uv_cov["uv_fraction_inside_limits"]) else np.nan
 
     clean_title = (
-        f"{folder_name} | {band_info['selected_band'] or '?'} | {gain_array_config or '?'} | "
+        f"{folder_name} | {source_label} | {band_info['selected_band'] or '?'} | {gain_array_config or '?'} | "
         f"beam={final_bmaj:.2f}\"x{final_bmin:.2f}\" | "
-        f"uv={uv_range or 'all'} | in={uv_inside_pct if np.isfinite(uv_inside_pct) else float('nan'):.1f}%"
+        f"uv={applied_uvrange or 'all'} | catalog={uv_range or 'none'} | "
+        f"in={uv_inside_pct if np.isfinite(uv_inside_pct) else float('nan'):.1f}%"
     )
     dirty_title = (
-        f"{folder_name} dirty | {band_info['selected_band'] or '?'} | {gain_array_config or '?'} | "
+        f"{folder_name} dirty | {source_label} | {band_info['selected_band'] or '?'} | {gain_array_config or '?'} | "
         f"beam={final_bmaj:.2f}\"x{final_bmin:.2f}\" | "
-        f"uv={uv_range or 'all'} | in={uv_inside_pct if np.isfinite(uv_inside_pct) else float('nan'):.1f}%"
+        f"uv={applied_uvrange or 'all'} | catalog={uv_range or 'none'} | "
+        f"in={uv_inside_pct if np.isfinite(uv_inside_pct) else float('nan'):.1f}%"
+    )
+    residual_title = (
+        f"{folder_name} residual | "
+        f"p995={qa_metrics['residual_p995_abs_over_sigma']:.3g} | "
+        f"p99={qa_metrics['residual_p99_abs_over_sigma']:.3g} | "
+        f"DR={qa_metrics['dynamic_range']:.1f} | "
+        f"sigma={qa_metrics['residual_robust_sigma_jy_per_beam']:.4g} Jy/bm | "
+        f"max={qa_metrics['residual_peak_to_sigma']:.3g}"
     )
 
     # 6) export pngs
     image_to_png_if_exists(
-        dirty_base.with_suffix(".image"),
-        sample_top / f"{PRODUCT_PREFIX}_dirty.png",
+        Path(str(dirty_base) + ".image.tt0") if USE_MULTITERM_MFS else dirty_base.with_suffix(".image"),
+        output_dir / f"{PRODUCT_PREFIX}_dirty.png",
         title=dirty_title,
         draw_beam_ellipse=True,
     )
     image_to_png_if_exists(
         final_clean_image,
-        sample_top / f"{PRODUCT_PREFIX}_clean.png",
+        output_dir / f"{PRODUCT_PREFIX}_clean.png",
         title=clean_title,
         draw_beam_ellipse=True,
+    )
+    image_to_png_if_exists(
+        final_residual_image,
+        output_dir / f"{PRODUCT_PREFIX}_residual.png",
+        title=residual_title,
+        symmetric=True,
+        cmap="inferno",
+    )
+    run_optional_export(
+        "uv coverage",
+        export_uv_png,
+        ms_for_imaging,
+        output_dir / f"{PRODUCT_PREFIX}_uv.png",
+        spw="",
+        uvrange=applied_uvrange,
+    )
+    run_optional_export(
+        "amp vs uv-dist",
+        export_amp_vs_uvdist_png,
+        ms_for_imaging,
+        output_dir / f"{PRODUCT_PREFIX}_amp_vs_uvdist.png",
+        spw="",
+        uvrange=applied_uvrange,
+    )
+    run_optional_export(
+        "amp / median(A)",
+        export_normalized_amp_vs_uvdist_png,
+        ms_for_imaging,
+        output_dir / f"{PRODUCT_PREFIX}_amp_vs_uvdist_norm.png",
+        spw="",
+        uvrange=applied_uvrange,
+    )
+    run_optional_export(
+        "spectrum by antenna",
+        export_spectrum_png,
+        ms_for_imaging,
+        output_dir / f"{PRODUCT_PREFIX}_spectrum_by_ant.png",
+        spw="",
+        uvrange=applied_uvrange,
+        avgbaseline=False,
+    )
+    run_optional_export(
+        "spectrum",
+        export_spectrum_png,
+        ms_for_imaging,
+        output_dir / f"{PRODUCT_PREFIX}_spectrum.png",
+        spw="",
+        uvrange=applied_uvrange,
+        avgbaseline=True,
     )
 
     result = {
         "folder": folder_name,
         "ms": str(ms_path),
+        "image_output_dir": str(output_dir),
         "beam_major_arcsec": bmaj,
         "beam_minor_arcsec": bmin,
         "beam_pa_deg": bpa,
@@ -762,6 +1476,8 @@ def process_one_sample(
         "catalog_uvmin_kl": np.nan if uv_limit_info is None else uv_limit_info["uvmin_kl"],
         "catalog_uvmax_kl": np.nan if uv_limit_info is None else uv_limit_info["uvmax_kl"],
         "catalog_uvrange": uv_range,
+        "applied_uvrange": applied_uvrange,
+        "uvlimit_filtering_enabled": APPLY_CATALOG_UVLIMIT_FILTERING,
         "uv_observed_min_kl": uv_cov["uv_observed_min_kl"],
         "uv_observed_max_kl": uv_cov["uv_observed_max_kl"],
         "uv_fraction_inside_limits": uv_cov["uv_fraction_inside_limits"],
@@ -773,13 +1489,16 @@ def process_one_sample(
         "fov_arcsec": final_fov_arcsec,
         "fov_in_beams_minor": final_fov_arcsec / bmin if bmin > 0 else np.nan,
         "pixels_per_beam_minor": bmin / final_cell if final_cell > 0 else np.nan,
+        **qa_metrics,
+        **selfcal_qa_metrics,
     }
 
     print(
         f"[DONE] {folder_name} | "
         f"beam=({final_bmaj:.3f}\", {final_bmin:.3f}\", {final_bpa:.1f} deg) | "
         f"final_grid={'arbitrary' if USE_ARBITRARY_FINAL_GRID else 'beam_based'} | "
-        f"uvrange={uv_range or 'all'} | "
+        f"uvrange={applied_uvrange or 'all'} | "
+        f"catalog_uvrange={uv_range or 'none'} | "
         f"inside={uv_inside_pct if np.isfinite(uv_inside_pct) else float('nan'):.1f}% | "
         f"cell={final_cell:.4f}\" | imsize={final_imsize} | "
         f"FoV={final_fov_arcsec:.2f}\" | "
@@ -789,20 +1508,41 @@ def process_one_sample(
     return result
 
 
+def sort_summary_by_residual_p995_abs_over_sigma(rows: list[dict]) -> pd.DataFrame:
+    df = pd.DataFrame(rows)
+    if "residual_p995_abs_over_sigma" not in df.columns:
+        return df
+
+    sort_key = pd.to_numeric(df["residual_p995_abs_over_sigma"], errors="coerce")
+    df = df.assign(_residual_p995_abs_over_sigma_sort=sort_key)
+    df = df.sort_values(
+        ["_residual_p995_abs_over_sigma_sort", "folder"],
+        ascending=[True, True],
+        na_position="last",
+    )
+    return df.drop(columns=["_residual_p995_abs_over_sigma_sort"])
+
+
 def main():
+    extracted_dir = resolve_extracted_dir(SELECTED_FOLDERS)
     df = load_projects(PROJECT_LIST)
     calib_df = load_calibrator_uv_limits(CALIBRATOR_BANDS_CSV)
-    ms_paths = find_extracted_ms_paths(EXTRACTED_DIR)
+    ms_paths = find_extracted_ms_paths(extracted_dir)
     ms_paths = filter_ms_paths(ms_paths, SELECTED_FOLDERS)
 
+    print(f"[INFO] using extracted dir: {extracted_dir}")
     print(f"[INFO] found {len(ms_paths)} extracted MS files")
+    print(f"[INFO] APPLY_CATALOG_UVLIMIT_FILTERING={APPLY_CATALOG_UVLIMIT_FILTERING}")
 
     rows = []
-    for ms_path in ms_paths:
-        folder = ms_path.parent.parent.name
+    for original_ms_path in ms_paths:
+        sample_top = sample_top_for_ms(original_ms_path)
+        folder = sample_top.name
+        ms_path = original_ms_path
         row = row_for_folder(df, folder)
         try:
             out = process_one_sample(ms_path, row=row, calib_df=calib_df)
+            out["original_ms"] = str(original_ms_path)
 
             if row is not None:
                 out["name"] = str(row.get("name", folder))
@@ -819,14 +1559,16 @@ def main():
             print(f"[ERROR] {ms_path}: {type(e).__name__}: {e}")
             rows.append(
                 {
-                    "folder": ms_path.parent.parent.name,
+                    "folder": folder,
                     "ms": str(ms_path),
+                    "original_ms": str(original_ms_path),
+                    "image_output_dir": str(image_output_dir_for_sample(sample_top)),
                     "error": f"{type(e).__name__}: {e}",
                 }
             )
 
-    summary_csv = EXTRACTED_DIR / "beam_imaging_summary.csv"
-    pd.DataFrame(rows).to_csv(summary_csv, index=False)
+    summary_csv = extracted_dir / "beam_imaging_summary.csv"
+    sort_summary_by_residual_p995_abs_over_sigma(rows).to_csv(summary_csv, index=False)
     print(f"[OK] wrote summary to {summary_csv}")
 
 

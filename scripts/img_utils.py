@@ -2,6 +2,8 @@ import os
 import numpy as np
 from casatasks import immath, rmtables, tclean, exportfits
 from casatools import simulator, image
+import matplotlib
+matplotlib.use("Agg", force=True)
 import matplotlib.pyplot as plt
 from casatools import image as ia_tool
 from astropy.io import fits
