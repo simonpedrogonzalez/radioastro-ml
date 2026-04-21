@@ -1,0 +1,15 @@
+Information about the image
+
+Setup (applies to all panels)
+
+Source J1822–0938 (7.5 hours of observation)
+Single spectral window 4.54–4.66 GHz
+
+Figure: fractional residuals under different corruption scenarios (the fraction of brightness that remains unexplained after CLEANing the corrupted visibilities.)
+
+Panels:
+1. Thermal noise corruption: additive gaussian noise used to represent thermal noise generated from instrumental sensitivity.
+2. Tropospheric corruption: phase distortions caused by atmospheric water vapor fluctuations (considerable windspeed and precipitation used for this example).
+3. Single-antenna gain drift: gain instability in only one antenna.
+4. Partial array gain drift (7 antennas (25% of the array) affected)
+5. Combined corruption (thermal noise + troposphere + partial gain drift). An scenario with all the previously shown effects simultaneously.
