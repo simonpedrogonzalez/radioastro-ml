@@ -64,8 +64,8 @@ In practice:
 
 The box was applied only in the final clean with CASA `tclean(usemask="user", mask="box[[x0pix,y0pix],[x1pix,y1pix]]")`, where the box size is set by `FINAL_CLEAN_BOX_MASK_NBEAMS` in synthesized-beam units.
 
-| Mask            | σ = 1.4826·MAD(residual) [Jy/bm] | max = max(|residual|)/σ | p99 = P99(|residual|)/σ | p995 = P99.5(|residual|)/σ | DR = max(|clean|)/σ |
-|-----------------|----------------------------------|------------------------|------------------------|---------------------------|---------------------|
+| Mask            | σ [Jy/bm] | max | p99 | p995 | DR |
+|-----------------|-----------|-----|-----|------|----|
 | No box          | **0.000067**                     | **2.9914**             | **2.4284**             | **2.5789**                | **6908.3093**       |
 | 3 beam box      | 0.000089                         | 4.2139                 | 2.5690                 | 2.7785                    | 5190.5614           |
 | 5 beam box      | 0.000089                         | 4.2104                 | 2.5632                 | 2.7820                    | 5212.5246           |
