@@ -1,6 +1,89 @@
 # radioastro-ml
 ML for Radoastronomy calibration debugging
 
+# Week 15: Apr 27
+
+### Metrics
+
+Added residual-panel QA metrics to the extracted-image reports and contact sheets so the residual map has a compact summary of noise level, tail strength, and source-to-residual contrast.
+
+These metrics are computed from:
+
+- the final clean image, using all finite pixels;
+- the final residual image, using all finite pixels.
+
+The reported quantities are:
+
+- `sigma`: robust residual noise estimate in Jy/beam. Here
+
+$$
+\sigma_{\mathrm{robust}} = 1.4826 \cdot \mathrm{median}\left(\left|r - \mathrm{median}(r)\right|\right)
+$$
+
+where $r$ is the set of finite residual-image pixels. This estimates the typical residual noise floor while being less sensitive to a few bright outliers than the usual standard deviation.
+
+- `p99`: 99th percentile of the absolute residual image, normalized by the robust residual noise:
+
+$$
+p99 = \frac{Q_{0.99}(|r|)}{\sigma_{\mathrm{robust}}}
+$$
+
+where $Q_{0.99}$ is the 99th percentile. This measures how strong the brightest 1% of residual pixels are relative to the residual noise floor.
+
+- `p995`: 99.5th percentile of the absolute residual image, again normalized by the robust residual noise:
+
+$$
+p995 = \frac{Q_{0.995}(|r|)}{\sigma_{\mathrm{robust}}}
+$$
+
+This is a slightly more extreme tail metric than `p99`, so it is more sensitive to structured residual artifacts that occupy only a very small fraction of pixels.
+
+- `max`: maximum absolute residual pixel, normalized by the robust residual noise:
+
+$$
+\mathrm{max} = \frac{\max(|r|)}{\sigma_{\mathrm{robust}}}
+$$
+
+This gives the single worst residual excursion in units of the residual noise.
+
+- `DR`: dynamic range, defined here as the peak absolute value in the clean image divided by the robust residual noise:
+
+$$
+DR = \frac{\max(|c|)}{\sigma_{\mathrm{robust}}}
+$$
+
+where $c$ is the set of finite clean-image pixels. This measures how strong the recovered source peak is compared with the residual noise floor, so larger values are better.
+
+In practice:
+
+- smaller `sigma` means a quieter residual map;
+- smaller `p99`, `p995`, and `max` mean fewer strong residual artifacts;
+- larger `DR` means better source-to-residual contrast.
+
+### Box experiment
+
+The box was applied only in the final clean with CASA `tclean(usemask="user", mask="box[[x0pix,y0pix],[x1pix,y1pix]]")`, where the box size is set by `FINAL_CLEAN_BOX_MASK_NBEAMS` in synthesized-beam units.
+
+| Mask            | σ = 1.4826·MAD(residual) [Jy/bm] | max = max(|residual|)/σ | p99 = P99(|residual|)/σ | p995 = P99.5(|residual|)/σ | DR = max(|clean|)/σ |
+|-----------------|----------------------------------|------------------------|------------------------|---------------------------|---------------------|
+| No box          | **0.000067**                     | **2.9914**             | **2.4284**             | **2.5789**                | **6908.3093**       |
+| 3 beam box      | 0.000089                         | 4.2139                 | 2.5690                 | 2.7785                    | 5190.5614           |
+| 5 beam box      | 0.000089                         | 4.2104                 | 2.5632                 | 2.7820                    | 5212.5246           |
+| 8 beam box      | 0.000088                         | 4.2132                 | 2.5648                 | 2.7813                    | 5223.4161           |
+| 16 beam box     | 0.000087                         | 4.2151                 | 2.5629                 | 2.7802                    | 5289.9149           |
+| 32 beam box     | 0.000082                         | 4.3611                 | 2.5367                 | 2.7298                    | 5638.5538           |
+| 48 beam box     | 0.000077                         | 4.5007                 | 2.5087                 | 2.6996                    | 5957.5231           |
+
+| ![](images/box/before.png) | ![](images/box/3-box.png) | ![](images/box/32-box.png) | ![](images/box/48-box.png) |
+|:--:|:--:|:--:|:--:|
+| **Before.** | **3 beams.** | **32 beams.** | **48 beams.** Artifacts are again visible. |
+
+### Calibrator catalog
+
+The parsed calibrator lists were checked, cleaned up, and added to a separate repository to make them easier to access and reuse:
+
+- [vla-calibrator-catalog](https://github.com/simonpedrogonzalez/vla-calibrator-catalog)
+
 # Week 14-15: Apr 20
 
 ### More iter more term MT
@@ -23,6 +106,22 @@ Convert `uvmin_kl` / `uvmax_kl` from calibrator metadata into a CASA `uvrange`. 
 |:--:|
 | **UV-lim test.** Before, phase-only, and phase+amp using the catalog uv range for the solves. Supresses small patterns. |
 
+### Metrics on the uv-lim process
+
+Recap: convert `uvmin_kl` / `uvmax_kl` from calibrator metadata into a CASA `uvrange`. The uv limit is used for a new gaincal with `uvrange` specified, but imaging is done with all baselines. The variants are phase-only (`gaintype="G"`, `calmode="p"`, `solint="int"`) and then phase+amp (`calmode="ap"`, `solint="inf"`).
+
+| ![](images/better_imaging2/my_uvlim.png) |
+|:--:|
+| **UV-lim test.** Before, phase-only, and phase+amp using the catalog uv range for the solves. Supresses small patterns. |
+
+| Stage              | σ = 1.4826·MAD(residual) [Jy/bm] | max = max(|residual|)/σ | p99 = P99(|residual|)/σ | p995 = P99.5(|residual|)/σ | DR = max(|clean|)/σ |
+|--------------------|----------------------------------|------------------------|------------------------|---------------------------|---------------------|
+| Before             | 0.0006                           | **4.2833**             | **3.0421**             | **3.3907**                | 1770.3519           |
+| After (phase)      | 0.0006                           | 4.5338                 | **3.0306**             | 3.4438                    | 1945.4901           |
+| After (phase+amp)  | **0.0005**                       | 4.5187                 | 3.0991                 | 3.5510                    | **1965.4276**       |
+
+Mixed: noise and DR slightly improve with phase+amp, but residual peaks (max, p995) get slightly worse, so some structured artifacts remain.
+
 ### VLA selfcal pipeline
 
 Installed a previous CASA version, installed the VLA pipeline script, and ran it over a few samples. I think it mostly does nothing visible, except maybe for 1 case.
@@ -36,13 +135,38 @@ Installed a previous CASA version, installed the VLA pipeline script, and ran it
 |:--:|
 | **Selfcal pipeline test.** Possible improvement for `0205+322`. |
 
-This may have more to do with different gridding than selfcal. The regular and reproduction images are both 256 x 256 and have very similar beams, but the reproduction has smaller pixels and FoV:
+### 0205+322 selfcal check
 
-- regular: cell `2.793"`, FoV `714.925"`, beam `26.567" x 11.270"`;
-- reproduction: cell `1.855"`, FoV `474.788"`, beam `26.318" x 11.240"`;
-- cell/FoV ratio is about `1.506`, while beam ratios are about `1.0`.
+Recap: compare the same selfcal `0205+322` visibilities with the usual imaging setup and the reproduction setup, changing only the imaging grid.
 
-The estimation difference might have to do with uv-lim filtering in the initial pass.
+| Setting        | Regular              | Reproduction         | Change |
+|----------------|----------------------|----------------------|--------|
+| Cell (arcsec)  | 2.793                | 1.855                | smaller pixels |
+| FoV (arcsec)   | 714.925              | 474.788              | smaller FoV |
+| Beam (major)   | 26.558               | 26.318               | same |
+| Beam (minor)   | 11.270               | 11.240               | same |
+
+The imaging and display procedure is:
+
+- A first-pass beam is estimated from array configuration and observing frequency.
+- The cell size is chosen so that the synthesized beam minor axis is sampled by a fixed number of pixels (here, 4 pixels per beam).
+- The field of view is set to span a fixed number of beam widths (here, 64 times the beam minor axis).
+- The image size is computed from this target FoV and cell size.
+- A first-pass dirty image is made, and the actual restoring beam is measured from it.
+- The final imaging grid (cell and FoV) is recomputed using this measured beam.
+- Images are converted from Jy/beam to mJy/beam.
+- Display limits are set using percentiles of the pixel values.
+- Typically, the range is symmetric around zero and clipped at the 99.5th percentile of the absolute pixel values.
+
+| Metric | Regular | Reproduction | Ratio (repro/reg) |
+|--------|--------|--------------|-------------------|
+| σ      | 0.0005 | 0.0005       | 0.9814            |
+| max    | 4.6157 | 4.2369       | 0.9179            |
+| p99    | 3.0735 | 3.2801       | 1.0672            |
+| p995   | 3.5723 | 3.7184       | 1.0409            |
+| DR     | 2010.4010 | 2047.8820 | 1.0186            |
+
+Mixed: slightly better noise, peak residual, and DR, slightly worse residual tails.
 
 ### Diagnostics plots
 
