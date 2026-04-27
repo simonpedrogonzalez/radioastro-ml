@@ -94,3 +94,63 @@ Peak anything that has a P, if im gonna check the configuration
 Int time is usually 3s, Smaller B than A,
 There will be more calibrator data in A.
 
+
+
+Fractional brownian motion could be useful
+with some scatter
+- 
+
+Frequency amp:
+- For frequency dependent stuff sine wayves are the best
+- Amplitude sine waves
+- Phase what they might look like
+- Amplityde spikes as a function of frequency
+
+Strong interference wont show as a gaintable effect
+- amplitude spike on all antennas on time.
+- in a single spectral window.
+- I have to check this actually has some effect
+- two delta functions that gives you spokes
+- make the phases go random(0,180)
+
+Start with one spectral window (another axis to augment the data)
+But from the point of the image it shouldnt be that different
+Exactly scale with the frequency
+So it is perfectly fine to work with just one spectral window.
+
+Phase could be affected without amplitude changes while the other way, amp affects phases usually.
+
+Phases as a function of frequency might not be a huge issue, but could be for low frequency datasets.
+
+Inspecting calibration tables at /uufs/astro.utah.edu/common/home/u6039460/work/sgonzalez
+
+Ask for gain or bandpass tables. Rather than leakage tables
+
+
+The actual amplitude of the corruption we are applying. Sampling is a separate issue.
+
+Do a sefl ca;obration
+
+extended source 399
+213 is prly not a point source
+
+make the same number of pixels, but the image should depend on the 
+
+do everything in units of sinthesized beam.
+
+Flag 0, with CASA. those exact 0s. They should be flagged already but if not no problem.
+If the thing doesnt look coherent then it's problably that.
+
+If the beam is smaller than the cell size and if it takes the whole image, then its fine.
+
+Uv-limit in the calibrator issue that can be simulated.
+077
+
+https://science.nrao.edu/facilities/vla/docs/manuals/oss/performance/resolution
+
+
+Imaging diagnosis:
+1. uv-coverage plots
+2. residual map
+3. amp vs uv-dist to search for outliers
+4. spectrum: all baselines vs frequency, avg and colored by ant
