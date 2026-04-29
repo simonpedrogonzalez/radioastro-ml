@@ -25,6 +25,7 @@ from scripts.image_extracted import (
     PROJECT_LIST,
     TCLEAN_BASE,
     choose_band_and_frequency,
+    clean_residual_qa_metrics,
     choose_final_imaging_setup,
     choose_firstpass_imaging_setup,
     compute_uvlimit_coverage_stats,
@@ -57,10 +58,12 @@ class VariantResult:
     start_from: str
     cal_sequence: str
     clean_image: Path
+    residual_image: Path
     clean_png: Path
     peak_jy_per_beam: float
     rms_jy_per_beam: float
     dynrange: float
+    qa_metrics: dict[str, float]
 
 
 def _sanitize_name(text: str) -> str:
@@ -75,6 +78,79 @@ def _fmt_float(x, fmt: str, fallback: str = "?") -> str:
     if not np.isfinite(value):
         return fallback
     return format(value, fmt)
+
+
+def _format_metric_value(x) -> str:
+    try:
+        value = float(x)
+    except (TypeError, ValueError):
+        return "nan"
+    if not np.isfinite(value):
+        return "nan"
+    if abs(value) >= 1e-4:
+        return f"{value:.4f}"
+    return f"{value:.6f}"
+
+
+def _ratio(after, before) -> float:
+    try:
+        after = float(after)
+        before = float(before)
+    except (TypeError, ValueError):
+        return float("nan")
+    if not np.isfinite(after) or not np.isfinite(before):
+        return float("nan")
+    if before == 0:
+        return float("inf") if after > 0 else 1.0
+    return float(after / before)
+
+
+def _print_variant_metrics(label: str, metrics: dict[str, float]) -> None:
+    print(f"[QA] {label}")
+    print(
+        "sigma = 1.4826*MAD(residual) [Jy/bm] = "
+        f"{_format_metric_value(metrics.get('residual_robust_sigma_jy_per_beam'))}"
+    )
+    print(
+        "max = max(|residual|)/sigma = "
+        f"{_format_metric_value(metrics.get('residual_peak_to_sigma'))}"
+    )
+    print(
+        "p99 = P99(|residual|)/sigma = "
+        f"{_format_metric_value(metrics.get('residual_p99_abs_over_sigma'))}"
+    )
+    print(
+        "p995 = P99.5(|residual|)/sigma = "
+        f"{_format_metric_value(metrics.get('residual_p995_abs_over_sigma'))}"
+    )
+    print(
+        "DR = max(|clean|)/sigma = "
+        f"{_format_metric_value(metrics.get('dynamic_range'))}"
+    )
+
+
+def _print_metric_ratios(label: str, before: dict[str, float], after: dict[str, float]) -> None:
+    print(f"[QA ratios] {label} / before")
+    print(
+        "sigma ratio = after_sigma / before_sigma = "
+        f"{_format_metric_value(_ratio(after.get('residual_robust_sigma_jy_per_beam'), before.get('residual_robust_sigma_jy_per_beam')))}"
+    )
+    print(
+        "max ratio = after_max / before_max = "
+        f"{_format_metric_value(_ratio(after.get('residual_peak_to_sigma'), before.get('residual_peak_to_sigma')))}"
+    )
+    print(
+        "p99 ratio = after_p99 / before_p99 = "
+        f"{_format_metric_value(_ratio(after.get('residual_p99_abs_over_sigma'), before.get('residual_p99_abs_over_sigma')))}"
+    )
+    print(
+        "p995 ratio = after_p995 / before_p995 = "
+        f"{_format_metric_value(_ratio(after.get('residual_p995_abs_over_sigma'), before.get('residual_p995_abs_over_sigma')))}"
+    )
+    print(
+        "DR ratio = after_DR / before_DR = "
+        f"{_format_metric_value(_ratio(after.get('dynamic_range'), before.get('dynamic_range')))}"
+    )
 
 
 def _remove_path(path: Path) -> None:
@@ -328,7 +404,7 @@ def _make_clean_result(
     uvrange: str = "",
     datacolumn: str | None = None,
     savemodel: str = "none",
-) -> tuple[Path, Path, float, float, float]:
+) -> tuple[Path, Path, Path, float, float, float, dict[str, float]]:
     clean_base = outdir / key
     if datacolumn is None:
         datacolumn = _best_datacolumn(ms_path, prefer_corrected=True)
@@ -343,10 +419,12 @@ def _make_clean_result(
         savemodel=savemodel,
     )
     clean_image = clean_base.with_suffix(".image")
+    residual_image = clean_base.with_suffix(".residual")
     clean_png = outdir / f"{key}.png"
     _export_image_png(clean_image, clean_png, title=title)
     peak, rms, dynrange = _load_image_stats(clean_image)
-    return clean_image, clean_png, peak, rms, dynrange
+    qa_metrics = clean_residual_qa_metrics(clean_image, residual_image)
+    return clean_image, residual_image, clean_png, peak, rms, dynrange, qa_metrics
 
 
 def _build_model_column(
@@ -403,7 +481,7 @@ def _make_phase_only_variant(
         minsnr=PHASE_MINSNR,
         uvrange=uvrange,
     )
-    clean_image, clean_png, peak, rms, dynrange = _make_clean_result(
+    clean_image, residual_image, clean_png, peak, rms, dynrange, qa_metrics = _make_clean_result(
         phase_ms,
         outdir,
         key=f"{key}_after",
@@ -419,10 +497,12 @@ def _make_phase_only_variant(
             start_from=start_from,
             cal_sequence="p",
             clean_image=clean_image,
+            residual_image=residual_image,
             clean_png=clean_png,
             peak_jy_per_beam=peak,
             rms_jy_per_beam=rms,
             dynrange=dynrange,
+            qa_metrics=qa_metrics,
         ),
         phase_ms,
     )
@@ -458,7 +538,7 @@ def _make_phase_amp_variant(
         minsnr=AP_MINSNR,
         uvrange=uvrange,
     )
-    clean_image, clean_png, peak, rms, dynrange = _make_clean_result(
+    clean_image, residual_image, clean_png, peak, rms, dynrange, qa_metrics = _make_clean_result(
         ap_ms,
         outdir,
         key=f"{key}_after",
@@ -473,10 +553,12 @@ def _make_phase_amp_variant(
         start_from=start_from,
         cal_sequence="p+ap",
         clean_image=clean_image,
+        residual_image=residual_image,
         clean_png=clean_png,
         peak_jy_per_beam=peak,
         rms_jy_per_beam=rms,
         dynrange=dynrange,
+        qa_metrics=qa_metrics,
     )
 
 
@@ -622,7 +704,7 @@ def run_recalibration(
     # Many extracted MS products in this repo only preserve DATA.
     before_title = f"before ({plot_datacolumn_label})"
     before_key = "before_corrected" if "CORRECTED" in plot_datacolumn_label else "before_data"
-    before_image, before_png, before_peak, before_rms, before_dynrange = _make_clean_result(
+    before_image, before_residual, before_png, before_peak, before_rms, before_dynrange, before_qa_metrics = _make_clean_result(
         probe_ms,
         workspace,
         key=f"{before_key}_clean",
@@ -687,10 +769,12 @@ def run_recalibration(
             "start_from": plot_datacolumn,
             "cal_sequence": "before",
             "clean_image": str(before_image),
+            "residual_image": str(before_residual),
             "clean_png": str(before_png),
             "peak_jy_per_beam": before_peak,
             "rms_jy_per_beam": before_rms,
             "dynrange": before_dynrange,
+            **before_qa_metrics,
         }
     ]
     summary_rows.extend(
@@ -700,10 +784,12 @@ def run_recalibration(
             "start_from": res.start_from,
             "cal_sequence": res.cal_sequence,
             "clean_image": str(res.clean_image),
+            "residual_image": str(res.residual_image),
             "clean_png": str(res.clean_png),
             "peak_jy_per_beam": res.peak_jy_per_beam,
             "rms_jy_per_beam": res.rms_jy_per_beam,
             "dynrange": res.dynrange,
+            **res.qa_metrics,
         }
         for res in results
     )
@@ -741,6 +827,11 @@ def run_recalibration(
         "initial_plot_datacolumn": plot_datacolumn_label,
         "variants": summary_rows,
     }
+
+    _print_variant_metrics(before_title, before_qa_metrics)
+    for res in results:
+        _print_variant_metrics(res.title, res.qa_metrics)
+        _print_metric_ratios(res.title, before_qa_metrics, res.qa_metrics)
 
     print(f"[DONE] workspace={workspace}")
     print(f"[DONE] summary PNG: {summary_png}")

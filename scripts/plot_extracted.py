@@ -23,9 +23,9 @@ from scripts.sample_groups import (
 
 DEFAULT_EXTRACTED_DIR = Path("/Users/u1528314/repos/radioastro-ml/collect/extracted")
 IMAGE_PREFIX = "clean_corrected"
-SELECTED_FOLDERS: list[str] | None = UV_LIM
+SELECTED_FOLDERS: list[str] | None = ["0653+370"]
 CUSTOM_TITLE: str | None = None
-OUTPUT_FIGURE_NAME: str | None = "uv_lim.png"
+OUTPUT_FIGURE_NAME: str | None = "requires_box_48_after.png"
 OUTPUT_MANIFEST_NAME: str | None = None
 SELFCAL_DIRNAME = "selfcal"
 SELFCAL_COMPARE_DIRNAME = "compare_original_selfcal"
@@ -189,6 +189,8 @@ def load_meta_map(summary_csv: Path) -> dict:
             "fov_arcsec": row.get("fov_arcsec"),
             "fov_in_beams_minor": row.get("fov_in_beams_minor"),
             "pixels_per_beam_minor": row.get("pixels_per_beam_minor"),
+            "final_clean_mask_mode": str(row.get("final_clean_mask_mode", "")).strip(),
+            "final_clean_box_mask_nbeams": row.get("final_clean_box_mask_nbeams"),
             "status_csv": str(row.get("status_csv", "")).strip(),
             "ms": str(row.get("ms", "")).strip(),
             "image_output_dir": str(row.get("image_output_dir", "")).strip(),
@@ -376,6 +378,15 @@ def parse_metric(x) -> float:
     return x if pd.notna(x) else float("nan")
 
 
+def format_residual_metric(x, fallback: str = "?") -> str:
+    value = parse_metric(x)
+    if not pd.notna(value):
+        return fallback
+    if abs(value) >= 1e-4:
+        return f"{value:.4f}"
+    return f"{value:.6f}"
+
+
 def first_metric(values) -> float:
     for value in values:
         parsed = parse_metric(value)
@@ -458,6 +469,9 @@ def make_title(i:int, sample: dict) -> str:
     fov_arcsec = fmt_float(sample["fov_arcsec"], ".1f")
     fov_beams = fmt_float(sample["fov_in_beams_minor"], ".1f")
     minutes = fmt_float(sample["minutes"], ".1f", fallback="?")
+    mask_mode = str(sample.get("final_clean_mask_mode", "")).strip() or "none"
+    mask_nbeams = fmt_float(sample.get("final_clean_box_mask_nbeams"), ".1f", fallback="?")
+    mask_label = f"box {mask_nbeams} beams" if mask_mode == "beam_box" else "none"
 
     return (
         f"# {i}\n"
@@ -469,6 +483,7 @@ def make_title(i:int, sample: dict) -> str:
         f"uv={applied_uvrange}  catalog={catalog_uvrange}\n"
         f"in={uv_inside}%  [{uvmin},{uvmax}] kl\n"
         f"cell={cell}\"/pix  ppb={ppb}\n"
+        f"mask={mask_label}\n"
         f"FoV={fov_arcsec}\"  ({fov_beams} beams)\n"
         f"time={minutes} min"
     )
@@ -514,15 +529,18 @@ def make_selfcal_title(sample: dict) -> str:
 
 
 def make_residual_title(sample: dict) -> str:
-    p995 = fmt_float(sample.get("residual_p995_abs_over_sigma"), ".3g")
-    p99 = fmt_float(sample.get("residual_p99_abs_over_sigma"), ".3g")
-    dr = fmt_float(sample.get("dynamic_range"), ".1f")
-    sigma = fmt_float(sample.get("residual_robust_sigma_jy_per_beam"), ".4g")
-    peak = fmt_float(sample.get("residual_peak_to_sigma"), ".3g")
+    p995 = format_residual_metric(sample.get("residual_p995_abs_over_sigma"))
+    p99 = format_residual_metric(sample.get("residual_p99_abs_over_sigma"))
+    dr = format_residual_metric(sample.get("dynamic_range"))
+    sigma = format_residual_metric(sample.get("residual_robust_sigma_jy_per_beam"))
+    peak = format_residual_metric(sample.get("residual_peak_to_sigma"))
     return (
         "residual\n"
-        f"p995={p995}  p99={p99}  DR={dr}\n"
-        f"sigma={sigma} Jy/bm  max={peak}"
+        f"sigma=1.4826*MAD(residual)={sigma} Jy/bm\n"
+        f"max=max(|residual|)/sigma={peak}\n"
+        f"p99=P99(|residual|)/sigma={p99}\n"
+        f"p995=P99.5(|residual|)/sigma={p995}\n"
+        f"DR=max(|clean|)/sigma={dr}"
     )
 
 

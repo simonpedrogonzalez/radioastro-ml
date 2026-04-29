@@ -50,10 +50,10 @@ USE_METADATA_FIRSTPASS = True
 ARBITRARY_FIRSTPASS_BEAM_ARCSEC = 2.0
 USE_ARBITRARY_FINAL_GRID = False
 ARBITRARY_FINAL_BEAM_ARCSEC = 2.0
-USE_MULTITERM_MFS = False
-MULTITERM_NTERMS = 3
+USE_MULTITERM_MFS = True
+MULTITERM_NTERMS = 2
 PRODUCT_PREFIX = "clean_corrected"
-SELECTED_FOLDERS: list[str] | None = UV_LIM
+SELECTED_FOLDERS: list[str] | None = ["0653+370"]
 SELFCAL_DIRNAME = "selfcal"
 APPLY_CATALOG_UVLIMIT_FILTERING = False
 
@@ -84,6 +84,7 @@ FINAL_CLEAN_NITER = 100
 MULTITERM_NITER = 5000
 MULTITERM_NSIGMA = 3.0
 MULTITERM_CYCLENITER = 100
+FINAL_CLEAN_BOX_MASK_NBEAMS: float | None = 48.0
 
 
 # -------------------------------------------------------------------
@@ -478,6 +479,8 @@ def run_tclean(
     uvrange: str = "",
     use_multiterm_mfs: bool = False,
     apply_multiterm_clean_controls: bool = True,
+    usemask: str = "",
+    mask: str = "",
 ) -> None:
     remove_casa_products(imagename)
 
@@ -497,6 +500,10 @@ def run_tclean(
             cfg["niter"] = int(MULTITERM_NITER)
             cfg["nsigma"] = float(MULTITERM_NSIGMA)
             cfg["cycleniter"] = int(MULTITERM_CYCLENITER)
+    if usemask:
+        cfg["usemask"] = usemask
+    if mask:
+        cfg["mask"] = mask
 
     print(
         f"[TCLEAN] vis={ms_path.name} "
@@ -509,7 +516,9 @@ def run_tclean(
         f"nterms={cfg.get('nterms', 1)} "
         f"nsigma={cfg.get('nsigma', 'default')} "
         f"cycleniter={cfg.get('cycleniter', 'default')} "
-        f"mt_clean_controls={apply_multiterm_clean_controls}"
+        f"mt_clean_controls={apply_multiterm_clean_controls} "
+        f"usemask={cfg.get('usemask', 'none')} "
+        f"mask={cfg.get('mask', 'none')}"
     )
     tclean(**cfg)
 
@@ -821,6 +830,50 @@ def choose_final_imaging_setup(
         bmin_arcsec, final_cell, fov_in_beams=FOV_IN_BEAMS
     )
     return final_cell, final_imsize, final_fov_arcsec
+
+
+def format_plot_metric(value: float | int | None, digits: int = 4) -> str:
+    if value is None:
+        return "none"
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if not np.isfinite(value):
+        return "nan"
+    return f"{value:.{digits}f}"
+
+
+def beam_box_mask_string(
+    *,
+    imsize: int,
+    cell_arcsec: float,
+    bmaj_arcsec: float,
+    bmin_arcsec: float,
+    nbeams: float,
+) -> str:
+    if cell_arcsec <= 0:
+        raise ValueError(f"cell_arcsec must be > 0, got {cell_arcsec}")
+    if bmaj_arcsec <= 0 or bmin_arcsec <= 0:
+        raise ValueError(
+            f"beam axes must be > 0, got bmaj={bmaj_arcsec}, bmin={bmin_arcsec}"
+        )
+    if nbeams <= 0:
+        raise ValueError(f"nbeams must be > 0, got {nbeams}")
+
+    width_pix = max(1, int(np.ceil((nbeams * bmaj_arcsec) / cell_arcsec)))
+    height_pix = max(1, int(np.ceil((nbeams * bmin_arcsec) / cell_arcsec)))
+
+    cx = imsize // 2
+    cy = imsize // 2
+    half_width = max(1, int(np.ceil(width_pix / 2.0)))
+    half_height = max(1, int(np.ceil(height_pix / 2.0)))
+
+    x0 = max(0, cx - half_width)
+    y0 = max(0, cy - half_height)
+    x1 = min(imsize - 1, cx + half_width)
+    y1 = min(imsize - 1, cy + half_height)
+    return f"box[[{x0}pix,{y0}pix],[{x1}pix,{y1}pix]]"
 
 
 def image_to_png_if_exists(
@@ -1332,6 +1385,41 @@ def process_one_sample(
         use_multiterm_mfs=USE_MULTITERM_MFS,
         apply_multiterm_clean_controls=False,
     )
+    dirty_image_for_mask = (
+        Path(str(dirty_base) + ".image.tt0")
+        if USE_MULTITERM_MFS
+        else dirty_base.with_suffix(".image")
+    )
+    dirty_bmaj, dirty_bmin, _ = read_restoring_beam_arcsec(dirty_image_for_mask)
+
+    final_clean_usemask = ""
+    final_clean_mask = ""
+    final_clean_mask_nbeams = None
+    if (
+        FINAL_CLEAN_BOX_MASK_NBEAMS is not None
+        and np.isfinite(FINAL_CLEAN_BOX_MASK_NBEAMS)
+        and FINAL_CLEAN_BOX_MASK_NBEAMS > 0
+    ):
+        final_clean_usemask = "user"
+        final_clean_mask_nbeams = float(FINAL_CLEAN_BOX_MASK_NBEAMS)
+        final_clean_mask = beam_box_mask_string(
+            imsize=final_imsize,
+            cell_arcsec=final_cell,
+            bmaj_arcsec=dirty_bmaj,
+            bmin_arcsec=dirty_bmin,
+            nbeams=final_clean_mask_nbeams,
+        )
+        print(
+            f"[MASK] {folder_name} | mode=beam_box | "
+            f"nbeams={format_plot_metric(final_clean_mask_nbeams)} | "
+            f"beam=({format_plot_metric(dirty_bmaj)}\", {format_plot_metric(dirty_bmin)}\") | "
+            f"mask={final_clean_mask}"
+        )
+    mask_plot_label = (
+        f"mask={format_plot_metric(final_clean_mask_nbeams)} beams"
+        if final_clean_mask_nbeams is not None
+        else "mask=none"
+    )
 
     # 5) final clean
     clean_base = output_dir / f"{PRODUCT_PREFIX}_clean"
@@ -1343,6 +1431,8 @@ def process_one_sample(
         niter=FINAL_CLEAN_NITER,
         uvrange=applied_uvrange,
         use_multiterm_mfs=USE_MULTITERM_MFS,
+        usemask=final_clean_usemask,
+        mask=final_clean_mask,
     )
 
     final_clean_image = (
@@ -1362,42 +1452,42 @@ def process_one_sample(
 
     clean_title = (
         f"{folder_name} | {source_label} | {band_info['selected_band'] or '?'} | {gain_array_config or '?'} | "
-        f"beam={final_bmaj:.2f}\"x{final_bmin:.2f}\" | "
+        f"beam={format_plot_metric(final_bmaj)}\"x{format_plot_metric(final_bmin)}\" | "
         f"uv={applied_uvrange or 'all'} | catalog={uv_range or 'none'} | "
-        f"in={uv_inside_pct if np.isfinite(uv_inside_pct) else float('nan'):.1f}%"
+        f"in={format_plot_metric(uv_inside_pct)}% | {mask_plot_label}"
     )
     dirty_title = (
         f"{folder_name} dirty | {source_label} | {band_info['selected_band'] or '?'} | {gain_array_config or '?'} | "
-        f"beam={final_bmaj:.2f}\"x{final_bmin:.2f}\" | "
+        f"beam={format_plot_metric(final_bmaj)}\"x{format_plot_metric(final_bmin)}\" | "
         f"uv={applied_uvrange or 'all'} | catalog={uv_range or 'none'} | "
-        f"in={uv_inside_pct if np.isfinite(uv_inside_pct) else float('nan'):.1f}%"
+        f"in={format_plot_metric(uv_inside_pct)}% | mask=none"
     )
     residual_title = (
-        f"{folder_name} residual | "
-        f"p995={qa_metrics['residual_p995_abs_over_sigma']:.3g} | "
-        f"p99={qa_metrics['residual_p99_abs_over_sigma']:.3g} | "
-        f"DR={qa_metrics['dynamic_range']:.1f} | "
-        f"sigma={qa_metrics['residual_robust_sigma_jy_per_beam']:.4g} Jy/bm | "
-        f"max={qa_metrics['residual_peak_to_sigma']:.3g}"
+        f"{folder_name} residual | {mask_plot_label}\n"
+        f"sigma=1.4826*MAD(residual)={format_plot_metric(qa_metrics['residual_robust_sigma_jy_per_beam'])} Jy/bm\n"
+        f"max=max(|residual|)/sigma={format_plot_metric(qa_metrics['residual_peak_to_sigma'])}\n"
+        f"p99=P99(|residual|)/sigma={format_plot_metric(qa_metrics['residual_p99_abs_over_sigma'])}\n"
+        f"p995=P99.5(|residual|)/sigma={format_plot_metric(qa_metrics['residual_p995_abs_over_sigma'])}\n"
+        f"DR=max(|clean|)/sigma={format_plot_metric(qa_metrics['dynamic_range'])}"
     )
 
     # 6) export pngs
     image_to_png_if_exists(
         Path(str(dirty_base) + ".image.tt0") if USE_MULTITERM_MFS else dirty_base.with_suffix(".image"),
         output_dir / f"{PRODUCT_PREFIX}_dirty.png",
-        title=dirty_title,
+        title=" ",
         draw_beam_ellipse=True,
     )
     image_to_png_if_exists(
         final_clean_image,
         output_dir / f"{PRODUCT_PREFIX}_clean.png",
-        title=clean_title,
+        title=" ",
         draw_beam_ellipse=True,
     )
     image_to_png_if_exists(
         final_residual_image,
         output_dir / f"{PRODUCT_PREFIX}_residual.png",
-        title=residual_title,
+        title=" ",
         symmetric=True,
         cmap="inferno",
     )
@@ -1471,6 +1561,10 @@ def process_one_sample(
         "firstpass_mode": "metadata" if USE_METADATA_FIRSTPASS else "arbitrary",
         "final_grid_mode": "arbitrary" if USE_ARBITRARY_FINAL_GRID else "beam_based",
         "clean_mode": "mtmfs" if USE_MULTITERM_MFS else "standard",
+        "final_clean_mask_mode": "beam_box" if final_clean_mask_nbeams is not None else "none",
+        "final_clean_box_mask_nbeams": final_clean_mask_nbeams if final_clean_mask_nbeams is not None else np.nan,
+        "final_clean_usemask": final_clean_usemask,
+        "final_clean_mask": final_clean_mask,
         "product_prefix": PRODUCT_PREFIX,
         "catalog_uv_receiver": None if uv_limit_info is None else uv_limit_info["receiver"],
         "catalog_uvmin_kl": np.nan if uv_limit_info is None else uv_limit_info["uvmin_kl"],
