@@ -37,6 +37,16 @@ def _sanitize_name(text: str) -> str:
     return "".join(ch if (ch.isalnum() or ch in "._+-") else "_" for ch in text)
 
 
+def _normalize_extracted_ms_path(ms_path: str | Path) -> Path:
+    path = Path(str(ms_path).strip()).expanduser()
+    parts = list(path.parts)
+    for idx, part in enumerate(parts[:-1]):
+        if part == "collect" and parts[idx + 1].startswith("extracted"):
+            parts[idx + 1] = "extracted"
+            return Path(*parts)
+    return path
+
+
 def _infer_folder_name(ms_path: Path) -> str:
     name = ms_path.stem
     for suffix in ("_pipeline_input", "_source_copy", "_selfcal"):
@@ -78,8 +88,11 @@ def _row_for_ms(ms_path: Path):
         return row
 
     if "extracted_ms" in projects_df.columns:
-        extracted = projects_df["extracted_ms"].astype("string").fillna("").str.strip()
-        match = projects_df.loc[extracted == str(ms_path)]
+        normalized_ms = str(_normalize_extracted_ms_path(ms_path))
+        extracted = projects_df["extracted_ms"].astype("string").fillna("").map(
+            lambda value: str(_normalize_extracted_ms_path(value)) if str(value).strip() else ""
+        )
+        match = projects_df.loc[extracted == normalized_ms]
         if not match.empty:
             return match.iloc[0]
 

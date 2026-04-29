@@ -13,7 +13,7 @@ from scripts.sample_groups import UV_LIM
 # CASA <1>: from scripts import selfcal_extracted
 # CASA <2>: selfcal_extracted.main()
 
-DEFAULT_EXTRACTED_DIR = Path("/Users/u1528314/repos/radioastro-ml/collect/extracted2")
+DEFAULT_EXTRACTED_DIR = Path("/Users/u1528314/repos/radioastro-ml/collect/extracted")
 SELECTED_FOLDERS: list[str] | None = None
 OVERWRITE = True
 COMPUTE_IMPROVEMENT_METRICS = True
@@ -61,11 +61,6 @@ def resolve_extracted_dir(
     selected_folders: list[str] | None,
     default_dir: Path = DEFAULT_EXTRACTED_DIR,
 ) -> Path:
-    candidate_dirs = [
-        Path("/Users/u1528314/repos/radioastro-ml/collect/extracted"),
-        Path("/Users/u1528314/repos/radioastro-ml/collect/extracted2"),
-        Path("/Users/u1528314/repos/radioastro-ml/collect/extracted3"),
-    ]
     if not selected_folders:
         return default_dir
 
@@ -73,20 +68,11 @@ def resolve_extracted_dir(
     if not wanted:
         return default_dir
 
-    scored_dirs: list[tuple[int, int, Path]] = []
-    for idx, candidate_dir in enumerate(candidate_dirs):
-        hits = sum((candidate_dir / folder).exists() for folder in wanted)
-        scored_dirs.append((hits, -idx, candidate_dir))
+    missing = [folder for folder in wanted if not (default_dir / folder).exists()]
+    if missing:
+        print(f"[WARN] requested folders not found under {default_dir}: {missing}")
 
-    best_hits, _, best_dir = max(scored_dirs)
-    if best_hits == 0:
-        print(
-            f"[WARN] none of the selected folders were found in extracted/extracted2/extracted3; "
-            f"using default {default_dir}"
-        )
-        return default_dir
-
-    return best_dir
+    return default_dir
 
 
 def sample_top_for_ms(ms_path: Path) -> Path:

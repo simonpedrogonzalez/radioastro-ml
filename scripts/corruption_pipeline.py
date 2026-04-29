@@ -36,6 +36,16 @@ def load_projects(csv_path: str | Path) -> pd.DataFrame:
     return pd.read_csv(csv_path)
 
 
+def normalize_extracted_ms_path(ms_path: str | Path) -> Path:
+    path = Path(str(ms_path).strip()).expanduser()
+    parts = list(path.parts)
+    for idx, part in enumerate(parts[:-1]):
+        if part == "collect" and parts[idx + 1].startswith("extracted"):
+            parts[idx + 1] = "extracted"
+            return Path(*parts)
+    return path
+
+
 def put_corrected_into_data(ms_path: str | Path) -> None:
     tb = table()
     tb.open(str(ms_path), nomodify=False)
@@ -46,7 +56,7 @@ def put_corrected_into_data(ms_path: str | Path) -> None:
 def process_row(row: pd.Series) -> None:
     name = str(row["name"]).strip()
     folder = str(row["folder"]).strip()
-    ms_src = Path(str(row["extracted_ms"]).strip())
+    ms_src = normalize_extracted_ms_path(row["extracted_ms"])
     field = str(row["gain_calibrator_name"]).strip()
     spw = str(row.get("spw_selected", "0")).strip() or "0"
 

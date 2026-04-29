@@ -13,8 +13,6 @@ CALIBRATOR_BANDS_CSV = COLLECT_DIR / "vla_calibrators_bands_v2.csv"
 OUTPUT_PATH = REPO_ROOT / "uv_lim_issue.txt"
 EXTRACTED_GROUPS: list[tuple[str, Path]] = [
     ("UV_LIM", COLLECT_DIR / "extracted"),
-    ("UV_LIM_2", COLLECT_DIR / "extracted2"),
-    ("UV_LIM_3", COLLECT_DIR / "extracted3"),
 ]
 _BAND_RANGES_GHZ = {
     "L": (1.0, 2.0),
@@ -335,4 +333,3 @@ def main() -> None:
             )
 
     print(f"[FINISH] wrote {OUTPUT_PATH} | total_issues={total_issues}")
-

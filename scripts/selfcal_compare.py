@@ -88,30 +88,18 @@ def resolve_extracted_dir(
     selected_folders: list[str] | None,
     default_dir: Path = DEFAULT_EXTRACTED_DIR,
 ) -> Path:
-    candidate_dirs = [
-        Path("/Users/u1528314/repos/radioastro-ml/collect/extracted"),
-        Path("/Users/u1528314/repos/radioastro-ml/collect/extracted2"),
-        Path("/Users/u1528314/repos/radioastro-ml/collect/extracted3"),
-    ]
     if not selected_folders:
         return default_dir
 
     wanted = [str(x).strip() for x in selected_folders if str(x).strip()]
-    scored: list[tuple[int, int, Path]] = []
-    for idx, candidate in enumerate(candidate_dirs):
-        hits = sum((candidate / folder).exists() for folder in wanted)
-        scored.append((hits, -idx, candidate))
-
-    best_hits, _, best_dir = max(scored)
-    if best_hits == 0:
-        print(f"[WARN] no selected folders found; using {default_dir}")
+    if not wanted:
         return default_dir
-    if best_dir != default_dir:
-        print(
-            f"[WARN] selected folders were not found under {default_dir}; "
-            f"using {best_dir} instead"
-        )
-    return best_dir
+
+    missing = [folder for folder in wanted if not (default_dir / folder).exists()]
+    if missing:
+        print(f"[WARN] requested folders not found under {default_dir}: {missing}")
+
+    return default_dir
 
 
 def is_inside_ignored_subdir(path: Path, sample_dir: Path) -> bool:

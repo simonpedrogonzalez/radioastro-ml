@@ -70,6 +70,16 @@ def _sanitize_name(text: str) -> str:
     return "".join(ch if (ch.isalnum() or ch in "._+-") else "_" for ch in text)
 
 
+def _normalize_extracted_ms_path(ms_path: str | Path) -> Path:
+    path = Path(str(ms_path).strip()).expanduser()
+    parts = list(path.parts)
+    for idx, part in enumerate(parts[:-1]):
+        if part == "collect" and parts[idx + 1].startswith("extracted"):
+            parts[idx + 1] = "extracted"
+            return Path(*parts)
+    return path
+
+
 def _fmt_float(x, fmt: str, fallback: str = "?") -> str:
     try:
         value = float(x)
@@ -317,8 +327,11 @@ def _row_for_ms(df: pd.DataFrame, ms_path: Path) -> Optional[pd.Series]:
         return row
 
     if "extracted_ms" in df.columns:
-        extracted = df["extracted_ms"].astype("string").fillna("").str.strip()
-        match = df.loc[extracted == str(ms_path)]
+        normalized_ms = str(_normalize_extracted_ms_path(ms_path))
+        extracted = df["extracted_ms"].astype("string").fillna("").map(
+            lambda value: str(_normalize_extracted_ms_path(value)) if str(value).strip() else ""
+        )
+        match = df.loc[extracted == normalized_ms]
         if not match.empty:
             return match.iloc[0]
 
