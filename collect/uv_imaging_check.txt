@@ -1,0 +1,51 @@
+0025-260
+  band=L receiver=L uvmin_kl=- uvmax_kl=30.0 cfg=(X,S,P,P)
+0108+015
+  band=L receiver=L uvmin_kl=- uvmax_kl=9.0 cfg=(X,X,S,P)
+0121+043
+  band=L receiver=L uvmin_kl=25.0 uvmax_kl=- cfg=(P,S,X,X)
+0141+138
+  band=L receiver=L uvmin_kl=- uvmax_kl=15.0 cfg=(X,X,S,P)
+0205+322
+  band=L receiver=L uvmin_kl=6.0 uvmax_kl=- cfg=(P,P,P,X)
+0259+077
+  band=L receiver=L uvmin_kl=10.0 uvmax_kl=- cfg=(P,P,X,X)
+0312-148
+  band=L receiver=L uvmin_kl=- uvmax_kl=4.0 cfg=(X,X,X,P)
+0409-179
+  band=L receiver=L uvmin_kl=- uvmax_kl=50.0 cfg=(S,P,P,P)
+0508+845
+  band=L receiver=L uvmin_kl=6.0 uvmax_kl=- cfg=(S,S,S,X)
+0521+166
+  band=L receiver=L uvmin_kl=- uvmax_kl=45.0 cfg=(X,S,P,P)
+0653+370
+  band=L receiver=L uvmin_kl=6.0 uvmax_kl=- cfg=(S,S,S,X)
+0744-064
+  band=L receiver=L uvmin_kl=- uvmax_kl=90.0 cfg=(S,P,P,P)
+0846-261
+  band=C receiver=C uvmin_kl=- uvmax_kl=100.0 cfg=(S,S,S,S)
+0949+662
+  band=L receiver=L uvmin_kl=- uvmax_kl=15.0 cfg=(X,X,S,P)
+1008+075
+  band=L receiver=L uvmin_kl=- uvmax_kl=15.0 cfg=(X,X,S,P)
+1018-317
+  band=C receiver=C uvmin_kl=- uvmax_kl=60.0 cfg=(X,S,P,P)
+  band=L receiver=L uvmin_kl=- uvmax_kl=60.0 cfg=(X,S,P,P)
+1057-245
+  band=L receiver=L uvmin_kl=- uvmax_kl=120.0 cfg=(S,P,P,S)
+1520+202
+  band=L receiver=L uvmin_kl=- uvmax_kl=30.0 cfg=(X,S,P,P)
+1714-252
+  band=L receiver=L uvmin_kl=2.0 uvmax_kl=- cfg=(,P,P,S)
+1824+107
+  band=L receiver=L uvmin_kl=6.0 uvmax_kl=- cfg=(P,P,S,X)
+1956-076
+  band=L receiver=L uvmin_kl=- uvmax_kl=5.0 cfg=(X,X,X,P)
+2047-026
+  band=L receiver=L uvmin_kl=- uvmax_kl=20.0 cfg=(X,S,P,P)
+2341-351
+  band=L receiver=L uvmin_kl=- uvmax_kl=30.0 cfg=(X,S,P,P)
+2350+646
+  band=L receiver=L uvmin_kl=- uvmax_kl=15.0 cfg=(X,S,P,P)
+
+Found 24 extracted folders with catalog uv limits in v2.
