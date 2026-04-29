@@ -211,4 +211,5 @@ runs/*
 collect/data/*
 collect/extracted/*
 collect/extracted2/*
+collect/extracted3/*
 collect/downloads/*
