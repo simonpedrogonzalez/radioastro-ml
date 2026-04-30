@@ -11,6 +11,7 @@ import pandas as pd
 from casatasks import tclean, flagdata, imhead
 from casatools import image, table
 from casaplotms import plotms
+from scripts.experiment_outputs import setup_experiment_output_layout, write_json
 from scripts.img_utils import casa_image_to_png
 from scripts.sample_groups import (
     BAD_ANT,
@@ -41,6 +42,7 @@ from scripts.vla_config import (
 PROJECT_LIST = Path("/Users/u1528314/repos/radioastro-ml/collect/small_subset/small_selection.csv")
 DEFAULT_EXTRACTED_DIR = Path("/Users/u1528314/repos/radioastro-ml/collect/extracted")
 CALIBRATOR_BANDS_CSV = Path("/Users/u1528314/repos/radioastro-ml/collect/vla_calibrators_bands_v2.csv")
+EXPERIMENT_NAME = "image_extracted"
 
 # -------------------------------------------------------------------
 # Imaging policy
@@ -56,6 +58,7 @@ PRODUCT_PREFIX = "clean_corrected"
 SELECTED_FOLDERS: list[str] | None = ["0653+370"]
 SELFCAL_DIRNAME = "selfcal"
 APPLY_CATALOG_UVLIMIT_FILTERING = False
+INCLUDE_SELFCAL_QA_METRICS = True
 
 # beam-normalized final image policy
 PIXELS_PER_BEAM = 4.0
@@ -662,6 +665,8 @@ def first_finite_metric(row: dict, keys: list[str]) -> float:
 
 
 def load_selfcal_qa_metrics(sample_top: Path, original_metrics: dict) -> dict:
+    if not INCLUDE_SELFCAL_QA_METRICS:
+        return {}
     metrics_csv = sample_top / SELFCAL_DIRNAME / "selfcal_improvement_metrics.csv"
     row = read_one_row_csv(metrics_csv)
     if not row:
@@ -1458,21 +1463,30 @@ def process_one_sample(
     )
 
     # 6) export pngs
+    dirty_png = output_dir / f"{PRODUCT_PREFIX}_dirty.png"
+    clean_png = output_dir / f"{PRODUCT_PREFIX}_clean.png"
+    residual_png = output_dir / f"{PRODUCT_PREFIX}_residual.png"
+    uv_png = output_dir / f"{PRODUCT_PREFIX}_uv.png"
+    amp_uvdist_png = output_dir / f"{PRODUCT_PREFIX}_amp_vs_uvdist.png"
+    amp_uvdist_norm_png = output_dir / f"{PRODUCT_PREFIX}_amp_vs_uvdist_norm.png"
+    spectrum_by_ant_png = output_dir / f"{PRODUCT_PREFIX}_spectrum_by_ant.png"
+    spectrum_png = output_dir / f"{PRODUCT_PREFIX}_spectrum.png"
+
     image_to_png_if_exists(
         Path(str(dirty_base) + ".image.tt0") if USE_MULTITERM_MFS else dirty_base.with_suffix(".image"),
-        output_dir / f"{PRODUCT_PREFIX}_dirty.png",
+        dirty_png,
         title=" ",
         draw_beam_ellipse=True,
     )
     image_to_png_if_exists(
         final_clean_image,
-        output_dir / f"{PRODUCT_PREFIX}_clean.png",
+        clean_png,
         title=" ",
         draw_beam_ellipse=True,
     )
     image_to_png_if_exists(
         final_residual_image,
-        output_dir / f"{PRODUCT_PREFIX}_residual.png",
+        residual_png,
         title=" ",
         symmetric=True,
         cmap="inferno",
@@ -1481,7 +1495,7 @@ def process_one_sample(
         "uv coverage",
         export_uv_png,
         ms_for_imaging,
-        output_dir / f"{PRODUCT_PREFIX}_uv.png",
+        uv_png,
         spw="",
         uvrange=applied_uvrange,
     )
@@ -1489,7 +1503,7 @@ def process_one_sample(
         "amp vs uv-dist",
         export_amp_vs_uvdist_png,
         ms_for_imaging,
-        output_dir / f"{PRODUCT_PREFIX}_amp_vs_uvdist.png",
+        amp_uvdist_png,
         spw="",
         uvrange=applied_uvrange,
     )
@@ -1497,7 +1511,7 @@ def process_one_sample(
         "amp / median(A)",
         export_normalized_amp_vs_uvdist_png,
         ms_for_imaging,
-        output_dir / f"{PRODUCT_PREFIX}_amp_vs_uvdist_norm.png",
+        amp_uvdist_norm_png,
         spw="",
         uvrange=applied_uvrange,
     )
@@ -1505,7 +1519,7 @@ def process_one_sample(
         "spectrum by antenna",
         export_spectrum_png,
         ms_for_imaging,
-        output_dir / f"{PRODUCT_PREFIX}_spectrum_by_ant.png",
+        spectrum_by_ant_png,
         spw="",
         uvrange=applied_uvrange,
         avgbaseline=False,
@@ -1514,7 +1528,7 @@ def process_one_sample(
         "spectrum",
         export_spectrum_png,
         ms_for_imaging,
-        output_dir / f"{PRODUCT_PREFIX}_spectrum.png",
+        spectrum_png,
         spw="",
         uvrange=applied_uvrange,
         avgbaseline=True,
@@ -1569,6 +1583,16 @@ def process_one_sample(
         "fov_arcsec": final_fov_arcsec,
         "fov_in_beams_minor": final_fov_arcsec / bmin if bmin > 0 else np.nan,
         "pixels_per_beam_minor": bmin / final_cell if final_cell > 0 else np.nan,
+        "artifacts": {
+            "dirty_png": str(dirty_png),
+            "clean_png": str(clean_png),
+            "residual_png": str(residual_png),
+            "uv_png": str(uv_png),
+            "amp_vs_uvdist_png": str(amp_uvdist_png),
+            "amp_vs_uvdist_norm_png": str(amp_uvdist_norm_png),
+            "spectrum_by_ant_png": str(spectrum_by_ant_png),
+            "spectrum_png": str(spectrum_png),
+        },
         **qa_metrics,
         **selfcal_qa_metrics,
     }
@@ -1588,29 +1612,168 @@ def process_one_sample(
     return result
 
 
-def sort_summary_by_residual_p995_abs_over_sigma(rows: list[dict]) -> pd.DataFrame:
-    df = pd.DataFrame(rows)
-    if "residual_p995_abs_over_sigma" not in df.columns:
-        return df
+def sort_rows_by_residual_p995_abs_over_sigma(rows: list[dict]) -> list[dict]:
+    def sort_key(row: dict) -> tuple[float, str]:
+        value = row.get("residual_p995_abs_over_sigma")
+        try:
+            sort_value = float(value)
+            if not np.isfinite(sort_value):
+                sort_value = float("inf")
+        except (TypeError, ValueError):
+            sort_value = float("inf")
+        return sort_value, str(row.get("folder", ""))
 
-    sort_key = pd.to_numeric(df["residual_p995_abs_over_sigma"], errors="coerce")
-    df = df.assign(_residual_p995_abs_over_sigma_sort=sort_key)
-    df = df.sort_values(
-        ["_residual_p995_abs_over_sigma_sort", "folder"],
-        ascending=[True, True],
-        na_position="last",
-    )
-    return df.drop(columns=["_residual_p995_abs_over_sigma_sort"])
+    return sorted(rows, key=sort_key)
+
+
+def image_extracted_experiment_config() -> dict:
+    return {
+        "selected_folders": SELECTED_FOLDERS,
+        "modify_ms_in_place": MODIFY_MS_IN_PLACE,
+        "use_metadata_firstpass": USE_METADATA_FIRSTPASS,
+        "arbitrary_firstpass_beam_arcsec": ARBITRARY_FIRSTPASS_BEAM_ARCSEC,
+        "use_arbitrary_final_grid": USE_ARBITRARY_FINAL_GRID,
+        "arbitrary_final_beam_arcsec": ARBITRARY_FINAL_BEAM_ARCSEC,
+        "use_multiterm_mfs": USE_MULTITERM_MFS,
+        "multiterm_nterms": MULTITERM_NTERMS,
+        "product_prefix": PRODUCT_PREFIX,
+        "apply_catalog_uvlimit_filtering": APPLY_CATALOG_UVLIMIT_FILTERING,
+        "pixels_per_beam": PIXELS_PER_BEAM,
+        "fov_in_beams": FOV_IN_BEAMS,
+        "min_imsize": MIN_IMSIZE,
+        "max_imsize": MAX_IMSIZE,
+        "min_cell_arcsec": MIN_CELL_ARCSEC,
+        "max_cell_arcsec": MAX_CELL_ARCSEC,
+        "tclean_base": dict(TCLEAN_BASE),
+        "firstpass_niter": FIRSTPASS_NITER,
+        "final_clean_niter": FINAL_CLEAN_NITER,
+        "multiterm_niter": MULTITERM_NITER,
+        "multiterm_nsigma": MULTITERM_NSIGMA,
+        "multiterm_cycleniter": MULTITERM_CYCLENITER,
+        "final_clean_box_mask_nbeams": FINAL_CLEAN_BOX_MASK_NBEAMS,
+    }
+
+
+def build_report_sample(row: dict) -> dict:
+    return {
+        "target_id": row.get("folder", ""),
+        "target_name": row.get("name", row.get("folder", "")),
+        "source_status": row.get("status_csv", ""),
+        "minutes": row.get("minutes"),
+        "ms": row.get("ms", ""),
+        "original_ms": row.get("original_ms", ""),
+        "image_output_dir": row.get("image_output_dir", ""),
+        "artifacts": row.get("artifacts", {}),
+        "error": row.get("error"),
+        "configuration": {
+            "gain_array_config": row.get("gain_array_config"),
+            "band_code_csv": row.get("band_code_csv"),
+            "band_detected_from_freq": row.get("band_detected_from_freq"),
+            "band_used_for_firstpass": row.get("band_used_for_firstpass"),
+            "band_matches_frequency": row.get("band_matches_frequency"),
+            "spw_used_for_band_check": row.get("spw_used_for_band_check"),
+            "spw_center_ghz_ms": row.get("spw_center_ghz_ms"),
+            "spw_center_ghz_csv": row.get("spw_center_ghz_csv"),
+            "firstpass_mode": row.get("firstpass_mode"),
+            "firstpass_cell_arcsec": row.get("firstpass_cell_arcsec"),
+            "firstpass_imsize": row.get("firstpass_imsize"),
+            "final_grid_mode": row.get("final_grid_mode"),
+            "clean_mode": row.get("clean_mode"),
+            "final_clean_mask_mode": row.get("final_clean_mask_mode"),
+            "final_clean_box_mask_nbeams": row.get("final_clean_box_mask_nbeams"),
+            "final_clean_usemask": row.get("final_clean_usemask"),
+            "final_clean_mask": row.get("final_clean_mask"),
+            "product_prefix": row.get("product_prefix"),
+        },
+        "beam": {
+            "estimate_arcsec": row.get("firstpass_beam_estimate_arcsec"),
+            "major_arcsec": row.get("beam_major_arcsec"),
+            "minor_arcsec": row.get("beam_minor_arcsec"),
+            "pa_deg": row.get("beam_pa_deg"),
+            "firstpass": {
+                "major_arcsec": row.get("firstpass_beam_major_arcsec"),
+                "minor_arcsec": row.get("firstpass_beam_minor_arcsec"),
+                "pa_deg": row.get("firstpass_beam_pa_deg"),
+            },
+            "final": {
+                "major_arcsec": row.get("final_beam_major_arcsec"),
+                "minor_arcsec": row.get("final_beam_minor_arcsec"),
+                "pa_deg": row.get("final_beam_pa_deg"),
+            },
+        },
+        "uv": {
+            "catalog_receiver": row.get("catalog_uv_receiver"),
+            "catalog_uvmin_kl": row.get("catalog_uvmin_kl"),
+            "catalog_uvmax_kl": row.get("catalog_uvmax_kl"),
+            "catalog_uvrange": row.get("catalog_uvrange"),
+            "applied_uvrange": row.get("applied_uvrange"),
+            "uvlimit_filtering_enabled": row.get("uvlimit_filtering_enabled"),
+            "observed_uvmin_kl": row.get("uv_observed_min_kl"),
+            "observed_uvmax_kl": row.get("uv_observed_max_kl"),
+            "fraction_inside_limits": row.get("uv_fraction_inside_limits"),
+            "fraction_below_uvmin": row.get("uv_fraction_below_uvmin"),
+            "fraction_above_uvmax": row.get("uv_fraction_above_uvmax"),
+            "n_rows_total": row.get("uv_n_rows_total"),
+        },
+        "imaging": {
+            "cell_arcsec": row.get("cell_arcsec"),
+            "imsize_pixels": row.get("imsize"),
+            "fov_arcsec": row.get("fov_arcsec"),
+            "fov_in_beams_minor": row.get("fov_in_beams_minor"),
+            "pixels_per_beam_minor": row.get("pixels_per_beam_minor"),
+        },
+        "metrics": {
+            "residual_robust_sigma_jy_per_beam": row.get("residual_robust_sigma_jy_per_beam"),
+            "residual_p99_abs_over_sigma": row.get("residual_p99_abs_over_sigma"),
+            "residual_p995_abs_over_sigma": row.get("residual_p995_abs_over_sigma"),
+            "residual_peak_to_sigma": row.get("residual_peak_to_sigma"),
+            "dynamic_range": row.get("dynamic_range"),
+            "selfcal_residual_robust_sigma_jy_per_beam": row.get("selfcal_residual_robust_sigma_jy_per_beam"),
+            "selfcal_residual_p99_abs_over_sigma": row.get("selfcal_residual_p99_abs_over_sigma"),
+            "selfcal_residual_p995_abs_over_sigma": row.get("selfcal_residual_p995_abs_over_sigma"),
+            "selfcal_residual_peak_to_sigma": row.get("selfcal_residual_peak_to_sigma"),
+            "selfcal_dynamic_range": row.get("selfcal_dynamic_range"),
+            "residual_robust_sigma_ratio_selfcal_over_original": row.get("residual_robust_sigma_ratio_selfcal_over_original"),
+            "residual_p99_abs_over_sigma_ratio_selfcal_over_original": row.get("residual_p99_abs_over_sigma_ratio_selfcal_over_original"),
+            "residual_p995_abs_over_sigma_ratio_selfcal_over_original": row.get("residual_p995_abs_over_sigma_ratio_selfcal_over_original"),
+            "residual_peak_to_sigma_ratio_selfcal_over_original": row.get("residual_peak_to_sigma_ratio_selfcal_over_original"),
+            "dynamic_range_ratio_selfcal_over_original": row.get("dynamic_range_ratio_selfcal_over_original"),
+        },
+    }
+
+
+def build_experiment_report(rows: list[dict], extracted_dir: Path, output_layout) -> dict:
+    sorted_rows = sort_rows_by_residual_p995_abs_over_sigma(rows)
+    return {
+        "experiment_name": output_layout.experiment_name,
+        "timestamp": output_layout.timestamp,
+        "paths": {
+            "extracted_dir": str(extracted_dir),
+            "project_list": str(PROJECT_LIST),
+            "calibrator_bands_csv": str(CALIBRATOR_BANDS_CSV),
+            "output_dir": str(output_layout.root_dir),
+            "report_json": str(output_layout.artifact_path("report", ".json")),
+        },
+        "configuration": image_extracted_experiment_config(),
+        "summary": {
+            "target_count": len(sorted_rows),
+            "success_count": sum(1 for row in sorted_rows if not row.get("error")),
+            "error_count": sum(1 for row in sorted_rows if row.get("error")),
+        },
+        "targets": [build_report_sample(row) for row in sorted_rows],
+    }
 
 
 def main():
     extracted_dir = resolve_extracted_dir(SELECTED_FOLDERS)
+    output_layout = setup_experiment_output_layout(extracted_dir, EXPERIMENT_NAME)
     df = load_projects(PROJECT_LIST)
     calib_df = load_calibrator_uv_limits(CALIBRATOR_BANDS_CSV)
     ms_paths = find_extracted_ms_paths(extracted_dir)
     ms_paths = filter_ms_paths(ms_paths, SELECTED_FOLDERS)
 
     print(f"[INFO] using extracted dir: {extracted_dir}")
+    print(f"[INFO] experiment output dir: {output_layout.root_dir}")
     print(f"[INFO] found {len(ms_paths)} extracted MS files")
     print(f"[INFO] APPLY_CATALOG_UVLIMIT_FILTERING={APPLY_CATALOG_UVLIMIT_FILTERING}")
 
@@ -1643,13 +1806,15 @@ def main():
                     "ms": str(ms_path),
                     "original_ms": str(original_ms_path),
                     "image_output_dir": str(image_output_dir_for_sample(sample_top)),
+                    "artifacts": {},
                     "error": f"{type(e).__name__}: {e}",
                 }
             )
 
-    summary_csv = extracted_dir / "beam_imaging_summary.csv"
-    sort_summary_by_residual_p995_abs_over_sigma(rows).to_csv(summary_csv, index=False)
-    print(f"[OK] wrote summary to {summary_csv}")
+    report = build_experiment_report(rows, extracted_dir, output_layout)
+    report_json = output_layout.artifact_path("report", ".json")
+    write_json(report_json, report)
+    print(f"[OK] wrote imaging report to {report_json}")
 
 
 # if __name__ == "__main__":

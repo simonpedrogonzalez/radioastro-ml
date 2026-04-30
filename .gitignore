@@ -208,6 +208,7 @@ __marimo__/
 raw/*
 data/*
 runs/*
+experiments/*
 collect/data/*
 collect/extracted/*
 collect/extracted2/

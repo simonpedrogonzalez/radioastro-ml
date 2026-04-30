@@ -14,9 +14,6 @@ DEFAULT_REGULAR_IMAGE = Path(
 DEFAULT_REPRODUCTION_IMAGE = Path(
     "/Users/u1528314/repos/radioastro-ml/runs/vla_pipe_test/reproduce_before_data_clean.image"
 )
-DEFAULT_SUMMARY_CSV = Path(
-    "/Users/u1528314/repos/radioastro-ml/collect/extracted/beam_imaging_summary.csv"
-)
 
 
 def beam_value_to_arcsec(value) -> float:

@@ -1,9 +1,16 @@
 from pathlib import Path
 from math import ceil
+import json
 
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.image as mpimg
+from scripts.experiment_outputs import (
+    artifact_label_and_suffix,
+    find_latest_experiment_artifact,
+    setup_experiment_output_layout,
+    write_json,
+)
 
 from scripts.sample_groups import (
     BAD_ANT,
@@ -22,11 +29,15 @@ from scripts.sample_groups import (
 
 
 DEFAULT_EXTRACTED_DIR = Path("/Users/u1528314/repos/radioastro-ml/collect/extracted")
+EXPERIMENT_NAME = "plot_extracted"
+INPUT_REPORT_EXPERIMENT_NAME = "image_extracted"
+INPUT_REPORT_JSON: Path | None = None
 IMAGE_PREFIX = "clean_corrected"
 SELECTED_FOLDERS: list[str] | None = ["0653+370"]
 CUSTOM_TITLE: str | None = None
 OUTPUT_FIGURE_NAME: str | None = "requires_box_48_after.png"
 OUTPUT_MANIFEST_NAME: str | None = None
+INCLUDE_SELFCAL = True
 SELFCAL_DIRNAME = "selfcal"
 SELFCAL_COMPARE_DIRNAME = "compare_original_selfcal"
 SELFCAL_METRICS_CSV_NAME = "selfcal_improvement_metrics.csv"
@@ -129,6 +140,12 @@ PANEL_SPECS = [
 ]
 
 
+def active_panel_specs() -> list[tuple[str, str, list[str], bool]]:
+    if INCLUDE_SELFCAL:
+        return PANEL_SPECS
+    return [spec for spec in PANEL_SPECS if spec[0] != "selfcal"]
+
+
 def resolve_extracted_dir(
     selected_folders: list[str] | None,
     default_dir: Path = DEFAULT_EXTRACTED_DIR,
@@ -147,54 +164,73 @@ def resolve_extracted_dir(
     return default_dir
 
 
-def load_meta_map(summary_csv: Path) -> dict:
-    df = pd.read_csv(summary_csv)
+PANEL_ARTIFACT_KEYS = {
+    "clean": "clean_png",
+    "dirty": "dirty_png",
+    "residual": "residual_png",
+    "uv": "uv_png",
+    "amp_uvdist": "amp_vs_uvdist_png",
+    "amp_uvdist_norm": "amp_vs_uvdist_norm_png",
+    "spectrum_by_ant": "spectrum_by_ant_png",
+    "spectrum": "spectrum_png",
+}
+
+
+def load_meta_map(report_json: Path) -> dict:
+    with report_json.open("r", encoding="utf-8") as handle:
+        payload = json.load(handle)
 
     meta_map = {}
-    for _, row in df.iterrows():
-        folder = str(row.get("folder", "")).strip()
+    for sample in payload.get("targets", []):
+        folder = str(sample.get("target_id", "")).strip()
         if not folder:
             continue
 
+        beam = sample.get("beam", {}) or {}
+        config = sample.get("configuration", {}) or {}
+        uv = sample.get("uv", {}) or {}
+        imaging = sample.get("imaging", {}) or {}
+        metrics = sample.get("metrics", {}) or {}
         meta_map[folder] = {
-            "name": str(row.get("name", folder)).strip() or folder,
-            "minutes": row.get("minutes"),
-            "beam_major_arcsec": row.get("beam_major_arcsec"),
-            "beam_minor_arcsec": row.get("beam_minor_arcsec"),
-            "beam_pa_deg": row.get("beam_pa_deg"),
-            "band_used_for_firstpass": str(row.get("band_used_for_firstpass", "")).strip(),
-            "gain_array_config": str(row.get("gain_array_config", "")).strip(),
-            "clean_mode": str(row.get("clean_mode", "")).strip(),
-            "catalog_uvrange": str(row.get("catalog_uvrange", "")).strip(),
-            "catalog_uvmin_kl": row.get("catalog_uvmin_kl"),
-            "catalog_uvmax_kl": row.get("catalog_uvmax_kl"),
-            "applied_uvrange": str(row.get("applied_uvrange", "")).strip(),
-            "uv_fraction_inside_limits": row.get("uv_fraction_inside_limits"),
-            "cell_arcsec": row.get("cell_arcsec"),
-            "imsize": row.get("imsize"),
-            "fov_arcsec": row.get("fov_arcsec"),
-            "fov_in_beams_minor": row.get("fov_in_beams_minor"),
-            "pixels_per_beam_minor": row.get("pixels_per_beam_minor"),
-            "final_clean_mask_mode": str(row.get("final_clean_mask_mode", "")).strip(),
-            "final_clean_box_mask_nbeams": row.get("final_clean_box_mask_nbeams"),
-            "status_csv": str(row.get("status_csv", "")).strip(),
-            "ms": str(row.get("ms", "")).strip(),
-            "image_output_dir": str(row.get("image_output_dir", "")).strip(),
-            "residual_robust_sigma_jy_per_beam": row.get("residual_robust_sigma_jy_per_beam"),
-            "residual_p99_abs_over_sigma": row.get("residual_p99_abs_over_sigma"),
-            "residual_p995_abs_over_sigma": row.get("residual_p995_abs_over_sigma"),
-            "residual_peak_to_sigma": row.get("residual_peak_to_sigma"),
-            "dynamic_range": row.get("dynamic_range"),
-            "selfcal_residual_robust_sigma_jy_per_beam": row.get("selfcal_residual_robust_sigma_jy_per_beam"),
-            "selfcal_residual_p99_abs_over_sigma": row.get("selfcal_residual_p99_abs_over_sigma"),
-            "selfcal_residual_p995_abs_over_sigma": row.get("selfcal_residual_p995_abs_over_sigma"),
-            "selfcal_residual_peak_to_sigma": row.get("selfcal_residual_peak_to_sigma"),
-            "selfcal_dynamic_range": row.get("selfcal_dynamic_range"),
-            "residual_robust_sigma_ratio_selfcal_over_original": row.get("residual_robust_sigma_ratio_selfcal_over_original"),
-            "residual_p99_abs_over_sigma_ratio_selfcal_over_original": row.get("residual_p99_abs_over_sigma_ratio_selfcal_over_original"),
-            "residual_p995_abs_over_sigma_ratio_selfcal_over_original": row.get("residual_p995_abs_over_sigma_ratio_selfcal_over_original"),
-            "residual_peak_to_sigma_ratio_selfcal_over_original": row.get("residual_peak_to_sigma_ratio_selfcal_over_original"),
-            "dynamic_range_ratio_selfcal_over_original": row.get("dynamic_range_ratio_selfcal_over_original"),
+            "name": str(sample.get("target_name", folder)).strip() or folder,
+            "minutes": sample.get("minutes"),
+            "beam_major_arcsec": beam.get("major_arcsec"),
+            "beam_minor_arcsec": beam.get("minor_arcsec"),
+            "beam_pa_deg": beam.get("pa_deg"),
+            "band_used_for_firstpass": str(config.get("band_used_for_firstpass", "")).strip(),
+            "gain_array_config": str(config.get("gain_array_config", "")).strip(),
+            "clean_mode": str(config.get("clean_mode", "")).strip(),
+            "catalog_uvrange": str(uv.get("catalog_uvrange", "")).strip(),
+            "catalog_uvmin_kl": uv.get("catalog_uvmin_kl"),
+            "catalog_uvmax_kl": uv.get("catalog_uvmax_kl"),
+            "applied_uvrange": str(uv.get("applied_uvrange", "")).strip(),
+            "uv_fraction_inside_limits": uv.get("fraction_inside_limits"),
+            "cell_arcsec": imaging.get("cell_arcsec"),
+            "imsize": imaging.get("imsize_pixels"),
+            "fov_arcsec": imaging.get("fov_arcsec"),
+            "fov_in_beams_minor": imaging.get("fov_in_beams_minor"),
+            "pixels_per_beam_minor": imaging.get("pixels_per_beam_minor"),
+            "final_clean_mask_mode": str(config.get("final_clean_mask_mode", "")).strip(),
+            "final_clean_box_mask_nbeams": config.get("final_clean_box_mask_nbeams"),
+            "status_csv": str(sample.get("source_status", "")).strip(),
+            "ms": str(sample.get("ms", "")).strip(),
+            "image_output_dir": str(sample.get("image_output_dir", "")).strip(),
+            "residual_robust_sigma_jy_per_beam": metrics.get("residual_robust_sigma_jy_per_beam"),
+            "residual_p99_abs_over_sigma": metrics.get("residual_p99_abs_over_sigma"),
+            "residual_p995_abs_over_sigma": metrics.get("residual_p995_abs_over_sigma"),
+            "residual_peak_to_sigma": metrics.get("residual_peak_to_sigma"),
+            "dynamic_range": metrics.get("dynamic_range"),
+            "selfcal_residual_robust_sigma_jy_per_beam": metrics.get("selfcal_residual_robust_sigma_jy_per_beam"),
+            "selfcal_residual_p99_abs_over_sigma": metrics.get("selfcal_residual_p99_abs_over_sigma"),
+            "selfcal_residual_p995_abs_over_sigma": metrics.get("selfcal_residual_p995_abs_over_sigma"),
+            "selfcal_residual_peak_to_sigma": metrics.get("selfcal_residual_peak_to_sigma"),
+            "selfcal_dynamic_range": metrics.get("selfcal_dynamic_range"),
+            "residual_robust_sigma_ratio_selfcal_over_original": metrics.get("residual_robust_sigma_ratio_selfcal_over_original"),
+            "residual_p99_abs_over_sigma_ratio_selfcal_over_original": metrics.get("residual_p99_abs_over_sigma_ratio_selfcal_over_original"),
+            "residual_p995_abs_over_sigma_ratio_selfcal_over_original": metrics.get("residual_p995_abs_over_sigma_ratio_selfcal_over_original"),
+            "residual_peak_to_sigma_ratio_selfcal_over_original": metrics.get("residual_peak_to_sigma_ratio_selfcal_over_original"),
+            "dynamic_range_ratio_selfcal_over_original": metrics.get("dynamic_range_ratio_selfcal_over_original"),
+            "artifacts": sample.get("artifacts", {}) or {},
         }
 
     return meta_map
@@ -226,6 +262,8 @@ def find_selfcal_panel(sample_dir: Path, patterns: list[str]) -> Path | None:
 
 
 def load_selfcal_metrics_map(extracted_dir: Path) -> dict:
+    if not INCLUDE_SELFCAL:
+        return {}
     metrics_map: dict[str, dict] = {}
 
     global_summary = extracted_dir / GLOBAL_SELFCAL_SUMMARY_CSV_NAME
@@ -264,15 +302,24 @@ def find_valid_samples(extracted_dir: Path, meta_map: dict, selfcal_metrics_map:
 
         folder = sample_dir.name
         image_dir = image_dir_for_sample(sample_dir)
+        meta = meta_map.get(folder, {})
+        artifact_map = meta.get("artifacts", {}) if isinstance(meta, dict) else {}
 
         panel_paths: dict[str, Path] = {}
         missing_required = False
-        for key, _, patterns, required in PANEL_SPECS:
-            match = (
-                find_selfcal_panel(sample_dir, patterns)
-                if key == "selfcal"
-                else find_first_matching(image_dir, patterns)
-            )
+        for key, _, patterns, required in active_panel_specs():
+            match = None
+            if key == "selfcal":
+                match = find_selfcal_panel(sample_dir, patterns)
+            else:
+                artifact_key = PANEL_ARTIFACT_KEYS.get(key)
+                artifact_path = None if artifact_key is None else artifact_map.get(artifact_key)
+                if artifact_path:
+                    candidate = Path(artifact_path)
+                    if candidate.exists():
+                        match = candidate
+                if match is None:
+                    match = find_first_matching(image_dir, patterns)
             if match is not None:
                 panel_paths[key] = match
             elif required:
@@ -282,7 +329,6 @@ def find_valid_samples(extracted_dir: Path, meta_map: dict, selfcal_metrics_map:
         if missing_required:
             continue
 
-        meta = meta_map.get(folder, {})
         samples.append(
             {
                 "folder": folder,
@@ -297,6 +343,7 @@ def find_valid_samples(extracted_dir: Path, meta_map: dict, selfcal_metrics_map:
                 "catalog_uvrange": meta.get("catalog_uvrange", ""),
                 "catalog_uvmin_kl": meta.get("catalog_uvmin_kl"),
                 "catalog_uvmax_kl": meta.get("catalog_uvmax_kl"),
+                "applied_uvrange": meta.get("applied_uvrange", ""),
                 "uv_fraction_inside_limits": meta.get("uv_fraction_inside_limits"),
                 "cell_arcsec": meta.get("cell_arcsec"),
                 "imsize": meta.get("imsize"),
@@ -542,7 +589,7 @@ def make_contact_sheet(
 
     active_panels = [
         (key, label)
-        for key, label, _, _ in PANEL_SPECS
+        for key, label, _, _ in active_panel_specs()
     ]
 
     n = len(samples)
@@ -608,46 +655,118 @@ def make_contact_sheet(
     print(f"[OK] saved figure to: {out_path}")
 
 
-def write_manifest(samples: list[dict], out_path: Path) -> None:
-    rows = []
-    for sample in samples:
-        base = {
-            "folder": sample["folder"],
-            "source": "original",
-            "ms": sample.get("ms", ""),
-            "image_dir": sample.get("image_dir", ""),
-        }
-        for panel_key, panel_path in sample["panels"].items():
-            row = dict(base)
-            row["panel"] = panel_key
-            row["png"] = str(panel_path)
-            rows.append(row)
-
-    if not rows:
-        return
-
-    pd.DataFrame(rows).to_csv(out_path, index=False)
-    print(f"[OK] wrote plot manifest to: {out_path}")
+def build_plot_report(
+    samples: list[dict],
+    *,
+    extracted_dir: Path,
+    output_layout,
+    source_report_json: Path,
+    output_figure: Path,
+) -> dict:
+    return {
+        "experiment_name": output_layout.experiment_name,
+        "timestamp": output_layout.timestamp,
+        "paths": {
+            "extracted_dir": str(extracted_dir),
+            "source_report_json": str(source_report_json),
+            "output_dir": str(output_layout.root_dir),
+            "report_json": str(output_layout.artifact_path("report", ".json")),
+            "figure_png": str(output_figure),
+        },
+        "configuration": {
+            "selected_folders": SELECTED_FOLDERS,
+            "custom_title": CUSTOM_TITLE,
+            "panel_specs": [
+                {"key": key, "label": label, "required": required}
+                for key, label, _, required in active_panel_specs()
+            ],
+        },
+        "summary": {
+            "sample_count": len(samples),
+        },
+        "samples": [
+            {
+                "target_id": sample["folder"],
+                "target_name": sample.get("name", sample["folder"]),
+                "titles": (
+                    {
+                        "clean": make_title(index, sample),
+                        "selfcal": make_selfcal_title(sample),
+                        "residual": make_residual_title(sample),
+                    }
+                    if INCLUDE_SELFCAL
+                    else {
+                        "clean": make_title(index, sample),
+                        "residual": make_residual_title(sample),
+                    }
+                ),
+                "panels": {key: str(path) for key, path in sample.get("panels", {}).items()},
+                "ms": sample.get("ms", ""),
+                "image_dir": sample.get("image_dir", ""),
+                "minutes": sample.get("minutes"),
+                "beam_major_arcsec": sample.get("beam_major_arcsec"),
+                "beam_minor_arcsec": sample.get("beam_minor_arcsec"),
+                "beam_pa_deg": sample.get("beam_pa_deg"),
+                "cell_arcsec": sample.get("cell_arcsec"),
+                "fov_in_beams_minor": sample.get("fov_in_beams_minor"),
+                "metrics": {
+                    "residual_robust_sigma_jy_per_beam": sample.get("residual_robust_sigma_jy_per_beam"),
+                    "residual_p99_abs_over_sigma": sample.get("residual_p99_abs_over_sigma"),
+                    "residual_p995_abs_over_sigma": sample.get("residual_p995_abs_over_sigma"),
+                    "residual_peak_to_sigma": sample.get("residual_peak_to_sigma"),
+                    "dynamic_range": sample.get("dynamic_range"),
+                },
+                "selfcal_metrics": sample.get("selfcal_metrics", {}) if INCLUDE_SELFCAL else {},
+            }
+            for index, sample in enumerate(samples)
+        ],
+    }
 
 
 def main():
     extracted_dir = resolve_extracted_dir(SELECTED_FOLDERS)
-    summary_name = "beam_imaging_summary.csv"
-    figure_name = OUTPUT_FIGURE_NAME or "uv_lim.png"
-    manifest_name = OUTPUT_MANIFEST_NAME or "plot_manifest.csv"
-    summary_csv = extracted_dir / summary_name
-    out_fig = extracted_dir / figure_name
-    manifest_csv = extracted_dir / manifest_name
+    output_layout = setup_experiment_output_layout(extracted_dir, EXPERIMENT_NAME)
+    source_report_json = (
+        Path(INPUT_REPORT_JSON).expanduser()
+        if INPUT_REPORT_JSON is not None
+        else find_latest_experiment_artifact(
+            extracted_dir,
+            INPUT_REPORT_EXPERIMENT_NAME,
+            label="report",
+            suffix=".json",
+        )
+    )
+    figure_label, figure_suffix = artifact_label_and_suffix(
+        OUTPUT_FIGURE_NAME,
+        default_label="contact_sheet",
+        default_suffix=".png",
+    )
+    report_label, _ = artifact_label_and_suffix(
+        OUTPUT_MANIFEST_NAME,
+        default_label="report",
+        default_suffix=".json",
+    )
+    out_fig = output_layout.artifact_path(figure_label, figure_suffix)
+    report_json = output_layout.artifact_path(report_label, ".json")
 
     print(f"[INFO] using extracted dir: {extracted_dir}")
-    print(f"[INFO] summary: {summary_csv}")
+    print(f"[INFO] experiment output dir: {output_layout.root_dir}")
+    print(f"[INFO] source report: {source_report_json}")
     print(f"[INFO] output figure: {out_fig}")
-    meta_map = load_meta_map(summary_csv)
+    meta_map = load_meta_map(source_report_json)
     selfcal_metrics_map = load_selfcal_metrics_map(extracted_dir)
     samples = find_valid_samples(extracted_dir, meta_map, selfcal_metrics_map)
     samples = filter_samples(samples, SELECTED_FOLDERS)
     samples = sort_samples_by_residual_p995_abs_over_sigma(samples)
     print(f"[INFO] valid samples found: {len(samples)}")
     figure_title = CUSTOM_TITLE
-    write_manifest(samples, manifest_csv)
     make_contact_sheet(samples, out_fig, samples_per_row=1, figure_title=figure_title)
+    report = build_plot_report(
+        samples,
+        extracted_dir=extracted_dir,
+        output_layout=output_layout,
+        source_report_json=source_report_json,
+        output_figure=out_fig,
+    )
+    write_json(report_json, report)
+    print(f"[OK] wrote plot report to: {report_json}")

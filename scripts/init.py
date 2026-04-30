@@ -33,13 +33,36 @@ compare_image_geometry]:
     importlib.reload(lib)
 
 
+def run_good_ones_baseline_experiment() -> None:
+    selected_folders = list(image_extracted.GOOD_ONES)
+
+    image_extracted.EXPERIMENT_NAME = "good_ones"
+    image_extracted.SELECTED_FOLDERS = selected_folders
+    image_extracted.USE_MULTITERM_MFS = False
+    image_extracted.APPLY_CATALOG_UVLIMIT_FILTERING = False
+    image_extracted.FINAL_CLEAN_BOX_MASK_NBEAMS = None
+    image_extracted.INCLUDE_SELFCAL_QA_METRICS = False
+
+    plot_extracted.EXPERIMENT_NAME = "good_ones"
+    plot_extracted.INPUT_REPORT_EXPERIMENT_NAME = "good_ones"
+    plot_extracted.INPUT_REPORT_JSON = None
+    plot_extracted.SELECTED_FOLDERS = selected_folders
+    plot_extracted.INCLUDE_SELFCAL = False
+    plot_extracted.OUTPUT_FIGURE_NAME = "contact_sheet.png"
+    plot_extracted.OUTPUT_MANIFEST_NAME = "report.json"
+    plot_extracted.CUSTOM_TITLE = "good_ones"
+
+    image_extracted.main()
+    plot_extracted.main()
+
+
 # check_uv_lim_issues.main()
 
 # corruption_gaindrift.new_corruption()
 # extraction_pipeline.run()
 
 # uvlim_recal.main("/Users/u1528314/repos/radioastro-ml/collect/extracted/0205+322/0205+322/0205+322.ms")
-reproduction_selfcal_compare.main()
+run_good_ones_baseline_experiment()
 # uvlim_recal.main("/Users/u1528314/repos/radioastro-ml/runs/vla_pipe_test/0205+322_pipeline_input.ms", initial_plot_only=True)
 # uvlim_recal.main("/Users/u1528314/repos/radioastro-ml/collect/extracted/0205+322/selfcal/0205+322_selfcal.ms", initial_plot_only=True)
 # single_image.main(
