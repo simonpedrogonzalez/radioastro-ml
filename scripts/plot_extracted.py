@@ -22,9 +22,7 @@ from scripts.sample_groups import (
     NEEDS_BIGGER_IMAGE,
     NEEDS_MULTITERM,
     RESOLVED,
-    GOOD_ONES_2,
     UV_LIM,
-    NEED_SELFCAL_2
 )
 
 

@@ -24,8 +24,6 @@ from scripts.sample_groups import (
     NEEDS_MULTITERM,
     RESOLVED,
     UV_LIM,
-    GOOD_ONES_2,
-    NEED_SELFCAL_2,
 )
 from scripts.vla_config import (
     band_for_frequency_ghz,

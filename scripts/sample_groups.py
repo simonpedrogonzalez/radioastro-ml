@@ -16,12 +16,21 @@ GOOD_ONES: list[str] = [
     "1924+334",  # Good ones
     "2257-364",  # Good ones
     "2341-351",  # Good ones
+    "0954+177",  # merged from the numbered follow-up review
+    "1156+314",  # merged from the numbered follow-up review
+    "1309+119",  # merged from the numbered follow-up review
+    "0323+055",  # merged from the numbered follow-up review
+    "1056+701",  # merged from the numbered follow-up review
 ]
 
 NEEDS_BIGGER_IMAGE: list[str] = [
     "1018-317",  # bigger image
     "1354-021",  # source outside field (to the left)
     "2212+018",  # bigger image might help
+]
+
+NEEDS_BOX: list[str] = [
+    "0653+370",
 ]
 
 BAD_DATA: list[str] = [
@@ -36,6 +45,13 @@ NEEDS_MULTITERM: list[str] = [
     "0653+370",  # frequency structure within source (multiterm nterms>=2 needed in mtmfs deconvolver)
     "2023+544",  # souble source / needs self cal + (freq-dependent cal problem (+- holes effect)mtmf)
     "2137+510",  # souble source / needs self cal + (freq-dependent cal problem (+- holes effect) mtmf)
+    "1510-057",  # merged from the numbered follow-up review
+    "1513-102",  # merged from the numbered follow-up review
+    "1432-180",  # merged from the numbered follow-up review
+    "0329+279",  # merged from the numbered follow-up review
+    "0005+383",  # merged from the numbered follow-up review
+    "0119+321",  # merged from the numbered follow-up review
+    "1224+035",  # merged from the numbered follow-up review
 ]
 
 BAD_ANT: list[str] = [
@@ -70,16 +86,7 @@ BEAM_SIZE_ISSUE: list[str] = [
     "1719+177",  # beam size too large + limited uv / bad ant
 ]
 
-
-GOOD_ONES_2 = [
-    "0954+177",  # 21
-    "1156+314",  # 33
-    "1309+119",  # 39
-    "0323+055",  # 6
-    "1056+701",  # 28
-]
-
-NEED_SELFCAL_2 = [
+NEED_SELFCAL: list[str] = [
     "1313+675",  # 40
     "1327+221",  # 41
     "1411+522",  # 46
@@ -87,43 +94,26 @@ NEED_SELFCAL_2 = [
     "1505+034",  # 54
 ]
 
-NEEDS_MULTITERM_2 = [
-    "1510-057",  # 55
-    "1513-102",  # 56
-    "1432-180",  # 50
-    "0329+279",  # 7
-    "0005+383",  # 0
-    "0119+321",  # 3
-    "1224+035",  # 35
-]
-
 UV_LIM = [
-"0205+322",
-"0259+077",
-"0312-148",
-"1824+107",
+    "0205+322",
+    "0259+077",
+    "0312-148",
+    "1824+107",
+    "0042+233",  # merged from the numbered follow-up review
+    "0405-131",  # merged from the numbered follow-up review
+    "0954+177",  # merged from the numbered follow-up review
+    "0956+252",  # merged from the numbered follow-up review
+    "1024-008",  # merged from the numbered follow-up review
+    "1159+292",  # merged from the numbered follow-up review
+    "1327+221",  # merged from the numbered follow-up review
+    "1411+522",  # merged from the numbered follow-up review
+    "1416+347",  # merged from the numbered follow-up review
+    "1927+612",  # merged from the numbered follow-up review
+    "2007+404",  # merged from the numbered follow-up review
+    "2316+040",  # merged from the numbered follow-up review
+    "2330+110",  # merged from the numbered follow-up review
+    "2333+390",  # merged from the numbered follow-up review
+    "0116-116",  # merged from the numbered follow-up review
+    "0416-209",  # merged from the numbered follow-up review
+    "0818+423",  # merged from the numbered follow-up review
 ]
-
-UV_LIM_2 = [
-"0042+233",
-"0405-131",
-"0954+177",
-"0956+252",
-"1024-008",
-"1159+292",
-"1327+221",
-"1411+522",
-"1416+347",
-"1927+612",
-"2007+404",
-"2316+040",
-"2330+110",
-"2333+390",
-]
-
-UV_LIM_3 = [
-"0116-116",
-"0416-209",
-"0818+423",
-]
-
