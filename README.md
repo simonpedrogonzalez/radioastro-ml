@@ -1,6 +1,178 @@
 # radioastro-ml
 ML for Radoastronomy calibration debugging
 
+# Week 16: May 4
+
+
+### "Programmatic" data fetcher
+
+Added the NRAO/VLA archive data fetcher to its own repo here:
+
+- [nrao-archive-fetcher](https://github.com/simonpedrogonzalez/nrao-archive-fetcher)
+
+
+### Amp vs uv-dist "anomaly" QA
+
+Added a visibility bad-data QA pass (work in progress):
+
+1. reads the visibilities used for imaging
+2. computes "local robust anomaly scores"
+3. aggregates outliers by antenna / baseline / time / channel / SPW and combinations
+
+Example:
+
+| ![](images/badant/bad_uv_dist_vs_amp_contact_sheet_20260504T113900.png) |
+|:--:|
+| **Example:** visibility-QA contact sheet for the `BAD_UV_DIST_VS_AMP` batch. |
+
+What it does:
+
+1. Get log-amplitude from complex visibilities:
+
+$$
+A = |V|,\qquad \log A = \log_{10}(|V|)
+$$
+
+Log-amplitude is used instead of raw amplitude because problems are multiplicative, not additive.
+
+8. Bin log-amplitudes by:
+   - SPW
+   - correlation hand / axis
+   - uv-distance bin
+   - channel bin
+
+Current defaults:
+
+- `uvdist_nbins = 24`
+- `channel_bin_size = 8`
+- `time_nbins = 64`
+- `min_bin_count = 50`
+- `mad_floor = 1e-6`
+- `strong_z = 8.0`
+- `moderate_z = 5.0`
+- `min_bad_samples = 20`
+- `min_group_bad_fraction = 0.05`
+- `min_enrichment = 5.0`
+- `min_coverage = 0.25`
+- `max_data_loss_for_recommendation = 0.25`
+
+For each bin:
+
+$$
+m = \mathrm{median}(\log A)
+$$
+
+$$
+\sigma_{\mathrm{robust}} = 1.4826 \cdot \mathrm{median}(|\log A - m|)
+$$
+
+$$
+z = \frac{\log A - m}{\sigma_{\mathrm{robust}}}
+$$
+
+The "anomaly score" is `|z|`.
+
+Thresholds:
+
+$$
+\mathrm{strong\_bad} \iff |z| \ge 8
+$$
+
+$$
+\mathrm{moderate\_bad} \iff |z| \ge 5
+$$
+
+
+$$
+p99|z| = Q_{0.99}(|z|)
+$$
+
+### Candidate groups
+
+The strong-outliers counts are aggregated by:
+
+- antenna
+- baseline
+- time bin
+- channel bin
+- SPW
+- antenna × time bin
+- baseline × time bin
+- antenna × channel bin
+- baseline × channel bin
+- SPW × channel bin
+
+
+
+$$
+N = \text{total number of samples after filtering / flagging}
+$$
+
+For each group:
+
+$$
+n_{\mathrm{total}} = \text{number of samples in group}
+$$
+
+How many analyzed samples fall inside that group.
+
+$$
+n_{\mathrm{bad}} = \text{number of strong outliers in group}
+$$
+
+How many of those group samples are strong outliers.
+
+$$
+\mathrm{bad\_fraction} = \frac{n_{\mathrm{bad}}}{n_{\mathrm{total}}}
+$$
+
+Local anomaly rate inside the group.
+
+$$
+\mathrm{global\_bad\_fraction} = \frac{n_{\mathrm{strong\_bad}}}{N}
+$$
+
+Anomaly rate across the whole dataset. If high, the group is "enriched" / "contaminated" with outliers.
+
+Here `n_strong_bad` means the total number of strong outliers in the whole analyzed dataset.
+
+$$
+\mathrm{enrichment} = \frac{\mathrm{bad\_fraction}}{\max(\mathrm{global\_bad\_fraction}, \epsilon)}
+$$
+
+How much worse the group is than the dataset average. If high, it means the group has many outliers compared to the other groups.
+
+$$
+\mathrm{coverage} = \frac{n_{\mathrm{bad}}}{n_{\mathrm{strong\_bad}}}
+$$
+
+Fraction of strong outliers in the dataset are explained by this group.
+
+$$
+\mathrm{data\_loss} = \frac{n_{\mathrm{total}}}{N}
+$$
+
+How much of the analyzed data would be removed if the whole group were flagged.
+
+A candidate qualifies as "bad data" if:
+
+- `n_bad >= 20`: avoid very tiny errors.
+- `coverage >= 0.25`: the candidate explains at least 25% of the strong outliers on the whole visibilities.
+- `enrichment >= 5`: the group should be 5 times worse (5 times the outlier rate) than the background.
+- `bad_fraction >= 0.05`: at least 5% of the samples in the group should be strong outliers.
+- `data_loss <= 0.25`: do not remove too much data.
+
+The order in which groups are made an analyzed is:
+
+1. baseline
+2. antenna
+3. time range
+4. channel range
+5. antenna-time
+6. baseline-time
+7. antenna-channel
+8. baseline-channel
+
 # Week 15: Apr 27
 
 ### Metrics
@@ -77,6 +249,7 @@ The box was applied only in the final clean with CASA `tclean(usemask="user", ma
 Checked the data in the parsed calibrator lists and added them  to a separate repo here:
 
 - [vla-calibrator-catalog](https://github.com/simonpedrogonzalez/vla-calibrator-catalog)
+
 
 # Week 14-15: Apr 20
 
