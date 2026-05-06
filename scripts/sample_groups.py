@@ -74,6 +74,15 @@ BAD_BASELINE: list[str] = [
     "1044+809",  # uv coverage issue
 ]
 
+BAD_UV_DIST_VS_AMP: list[str] = [
+    "0205+322",
+    "0025-260",
+    "2341-351",
+    "1224+213",
+    "2212+018",
+    "0112+227",
+]
+
 EXTRA_SOURCE: list[str] = [
     "1246-075",  # uv issue + other → bad baseline? extra source in field? resolved?
     "1949-199",  # double source / needs self cal

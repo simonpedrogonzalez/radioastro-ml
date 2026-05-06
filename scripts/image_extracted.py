@@ -13,10 +13,12 @@ from casatools import image, table
 from casaplotms import plotms
 from scripts.experiment_outputs import setup_experiment_output_layout, write_json
 from scripts.img_utils import casa_image_to_png
+from scripts.visibility_anomaly_qa import analyze_visibility_anomalies
 from scripts.sample_groups import (
     BAD_ANT,
     BAD_BASELINE,
     BAD_DATA,
+    BAD_UV_DIST_VS_AMP,
     BEAM_SIZE_ISSUE,
     EXTRA_SOURCE,
     GOOD_ONES,
@@ -1323,6 +1325,14 @@ def process_one_sample(
     # 1) flag zeros
     flag_zero_visibilities(ms_for_imaging)
 
+    visibility_qa = analyze_visibility_anomalies(
+        ms_for_imaging,
+        output_dir,
+        spw="",
+        uvrange=applied_uvrange,
+        datacolumn_preference="corrected",
+    )
+
     # 2) first-pass dirty image to estimate beam
     firstpass_base = output_dir / "beam_firstpass_dirty"
     print(
@@ -1590,7 +1600,9 @@ def process_one_sample(
             "amp_vs_uvdist_norm_png": str(amp_uvdist_norm_png),
             "spectrum_by_ant_png": str(spectrum_by_ant_png),
             "spectrum_png": str(spectrum_png),
+            "visibility_anomaly_confirmation_png": visibility_qa["artifacts"].get("visibility_anomaly_confirmation_png"),
         },
+        "visibility_anomaly_qa": visibility_qa,
         **qa_metrics,
         **selfcal_qa_metrics,
     }
@@ -1720,6 +1732,7 @@ def build_report_sample(row: dict) -> dict:
             "fov_in_beams_minor": row.get("fov_in_beams_minor"),
             "pixels_per_beam_minor": row.get("pixels_per_beam_minor"),
         },
+        "visibility_anomaly_qa": row.get("visibility_anomaly_qa", {}),
         "metrics": {
             "residual_robust_sigma_jy_per_beam": row.get("residual_robust_sigma_jy_per_beam"),
             "residual_p99_abs_over_sigma": row.get("residual_p99_abs_over_sigma"),
@@ -1762,9 +1775,26 @@ def build_experiment_report(rows: list[dict], extracted_dir: Path, output_layout
     }
 
 
+def write_incremental_experiment_report(
+    rows: list[dict],
+    extracted_dir: Path,
+    output_layout,
+    report_json: Path,
+    *,
+    label: str,
+) -> None:
+    report = build_experiment_report(rows, extracted_dir, output_layout)
+    write_json(report_json, report)
+    print(
+        f"[CHECKPOINT] {label} | wrote imaging report with "
+        f"{len(rows)} processed target(s) to {report_json}"
+    )
+
+
 def main():
     extracted_dir = resolve_extracted_dir(SELECTED_FOLDERS)
     output_layout = setup_experiment_output_layout(extracted_dir, EXPERIMENT_NAME)
+    report_json = output_layout.artifact_path("report", ".json")
     df = load_projects(PROJECT_LIST)
     calib_df = load_calibrator_uv_limits(CALIBRATOR_BANDS_CSV)
     ms_paths = find_extracted_ms_paths(extracted_dir)
@@ -1795,6 +1825,13 @@ def main():
                 out["status_csv"] = ""
 
             rows.append(out)
+            write_incremental_experiment_report(
+                rows,
+                extracted_dir,
+                output_layout,
+                report_json,
+                label=f"{folder} success",
+            )
 
         except Exception as e:
             print(f"[ERROR] {ms_path}: {type(e).__name__}: {e}")
@@ -1808,9 +1845,15 @@ def main():
                     "error": f"{type(e).__name__}: {e}",
                 }
             )
+            write_incremental_experiment_report(
+                rows,
+                extracted_dir,
+                output_layout,
+                report_json,
+                label=f"{folder} error",
+            )
 
     report = build_experiment_report(rows, extracted_dir, output_layout)
-    report_json = output_layout.artifact_path("report", ".json")
     write_json(report_json, report)
     print(f"[OK] wrote imaging report to {report_json}")
 

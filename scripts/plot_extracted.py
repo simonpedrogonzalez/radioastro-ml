@@ -16,6 +16,7 @@ from scripts.sample_groups import (
     BAD_ANT,
     BAD_BASELINE,
     BAD_DATA,
+    BAD_UV_DIST_VS_AMP,
     BEAM_SIZE_ISSUE,
     EXTRA_SOURCE,
     GOOD_ONES,
@@ -135,6 +136,15 @@ PANEL_SPECS = [
         ],
         False,
     ),
+    (
+        "visibility_anomaly",
+        "visibility anomaly QA",
+        [
+            f"{IMAGE_PREFIX}_visibility_anomaly_confirmation.png",
+            "*visibility_anomaly_confirmation*.png",
+        ],
+        False,
+    ),
 ]
 
 
@@ -171,6 +181,7 @@ PANEL_ARTIFACT_KEYS = {
     "amp_uvdist_norm": "amp_vs_uvdist_norm_png",
     "spectrum_by_ant": "spectrum_by_ant_png",
     "spectrum": "spectrum_png",
+    "visibility_anomaly": "visibility_anomaly_confirmation_png",
 }
 
 
@@ -228,6 +239,7 @@ def load_meta_map(report_json: Path) -> dict:
             "residual_p995_abs_over_sigma_ratio_selfcal_over_original": metrics.get("residual_p995_abs_over_sigma_ratio_selfcal_over_original"),
             "residual_peak_to_sigma_ratio_selfcal_over_original": metrics.get("residual_peak_to_sigma_ratio_selfcal_over_original"),
             "dynamic_range_ratio_selfcal_over_original": metrics.get("dynamic_range_ratio_selfcal_over_original"),
+            "visibility_anomaly_qa": sample.get("visibility_anomaly_qa", {}) or {},
             "artifacts": sample.get("artifacts", {}) or {},
         }
 
@@ -309,6 +321,10 @@ def find_valid_samples(extracted_dir: Path, meta_map: dict, selfcal_metrics_map:
             match = None
             if key == "selfcal":
                 match = find_selfcal_panel(sample_dir, patterns)
+            elif key == "visibility_anomaly" and not should_show_visibility_anomaly_panel(
+                {"visibility_anomaly_qa": meta.get("visibility_anomaly_qa", {}) or {}}
+            ):
+                match = None
             else:
                 artifact_key = PANEL_ARTIFACT_KEYS.get(key)
                 artifact_path = None if artifact_key is None else artifact_map.get(artifact_key)
@@ -366,6 +382,7 @@ def find_valid_samples(extracted_dir: Path, meta_map: dict, selfcal_metrics_map:
                 "residual_p995_abs_over_sigma_ratio_selfcal_over_original": meta.get("residual_p995_abs_over_sigma_ratio_selfcal_over_original"),
                 "residual_peak_to_sigma_ratio_selfcal_over_original": meta.get("residual_peak_to_sigma_ratio_selfcal_over_original"),
                 "dynamic_range_ratio_selfcal_over_original": meta.get("dynamic_range_ratio_selfcal_over_original"),
+                "visibility_anomaly_qa": meta.get("visibility_anomaly_qa", {}) or {},
                 "selfcal_metrics": selfcal_metrics_map.get(folder, {}),
                 "panels": panel_paths,
             }
@@ -416,6 +433,22 @@ def format_residual_metric(x, fallback: str = "?") -> str:
     if abs(value) >= 1e-4:
         return f"{value:.4f}"
     return f"{value:.6f}"
+
+
+def format_metric(x, fallback: str = "?") -> str:
+    value = parse_metric(x)
+    if not pd.notna(value):
+        return fallback
+    if abs(value) >= 100:
+        return f"{value:.1f}"
+    if abs(value) >= 1:
+        return f"{value:.3f}"
+    return f"{value:.4f}"
+
+
+def should_show_visibility_anomaly_panel(sample: dict) -> bool:
+    qa = sample.get("visibility_anomaly_qa", {}) or {}
+    return str(qa.get("status", "")).strip().lower() != "ok"
 
 
 def first_metric(values) -> float:
@@ -575,6 +608,39 @@ def make_residual_title(sample: dict) -> str:
     )
 
 
+def make_visibility_anomaly_title(sample: dict) -> str:
+    qa = sample.get("visibility_anomaly_qa", {}) or {}
+    summary = qa.get("summary", {}) or {}
+    metrics = qa.get("metrics", {}) or {}
+    top_candidates = qa.get("top_candidates", []) or []
+    culprit_type = summary.get("culprit_type") or "none"
+    culprit_id = summary.get("culprit_id") or ""
+    culprit_token = f"{culprit_type} {culprit_id}".strip()
+    best = None
+    for candidate in top_candidates:
+        candidate_type = str(candidate.get("type", "")).strip()
+        candidate_id = str(candidate.get("id", "")).strip()
+        if f"{candidate_type} {candidate_id}".strip() == culprit_token:
+            best = candidate
+            break
+    if best is None and top_candidates:
+        best = top_candidates[0]
+    group_bad_fraction = format_metric(best.get("bad_fraction")) if best else "?"
+    coverage = format_metric(best.get("coverage")) if best else "?"
+    global_bad_fraction = format_metric(metrics.get("strong_bad_fraction"))
+    p99_abs_z = format_metric(metrics.get("p99_abs_z"))
+
+    return (
+        "visibility anomaly QA\n"
+        f"status={qa.get('status', '?')}\n"
+        f"culprit={culprit_type} {culprit_id}".rstrip() + "\n"
+        f"group bad_frac=n_bad(group)/n_total(group)={group_bad_fraction}\n"
+        f"global bad=n_strong_bad/n_used={global_bad_fraction}  cov={coverage}\n"
+        f"p99|z|=P99(abs(local robust z))={p99_abs_z}\n"
+        f"{summary.get('conclusion', 'No visibility anomaly analysis available')}"
+    )
+
+
 def make_contact_sheet(
     samples,
     out_path: Path,
@@ -620,11 +686,17 @@ def make_contact_sheet(
                 ax.imshow(img, aspect="auto")
             elif panel_key == "selfcal":
                 pass
+            elif panel_key == "visibility_anomaly" and not should_show_visibility_anomaly_panel(sample):
+                pass
             else:
                 ax.text(
                     0.5,
                     0.5,
-                    f"{panel_label}\nnot found",
+                    (
+                        "visibility anomaly QA\nnot available"
+                        if panel_key == "visibility_anomaly"
+                        else f"{panel_label}\nnot found"
+                    ),
                     ha="center",
                     va="center",
                     fontsize=11,
@@ -638,6 +710,8 @@ def make_contact_sheet(
                 ax.set_title(make_title(i, sample), fontsize=9)
             elif panel_key == "residual":
                 ax.set_title(make_residual_title(sample), fontsize=9)
+            elif panel_key == "visibility_anomaly":
+                ax.set_title(make_visibility_anomaly_title(sample), fontsize=9)
             else:
                 ax.set_title(panel_label, fontsize=10)
 
@@ -691,11 +765,13 @@ def build_plot_report(
                         "clean": make_title(index, sample),
                         "selfcal": make_selfcal_title(sample),
                         "residual": make_residual_title(sample),
+                        "visibility_anomaly": make_visibility_anomaly_title(sample),
                     }
                     if INCLUDE_SELFCAL
                     else {
                         "clean": make_title(index, sample),
                         "residual": make_residual_title(sample),
+                        "visibility_anomaly": make_visibility_anomaly_title(sample),
                     }
                 ),
                 "panels": {key: str(path) for key, path in sample.get("panels", {}).items()},
@@ -714,6 +790,7 @@ def build_plot_report(
                     "residual_peak_to_sigma": sample.get("residual_peak_to_sigma"),
                     "dynamic_range": sample.get("dynamic_range"),
                 },
+                "visibility_anomaly_qa": sample.get("visibility_anomaly_qa", {}),
                 "selfcal_metrics": sample.get("selfcal_metrics", {}) if INCLUDE_SELFCAL else {},
             }
             for index, sample in enumerate(samples)
