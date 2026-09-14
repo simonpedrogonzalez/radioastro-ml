@@ -16,11 +16,11 @@ GOOD_ONES: list[str] = [
     "1924+334",  # Good ones
     "2257-364",  # Good ones
     "2341-351",  # Good ones
-    "0954+177",  # merged from the numbered follow-up review
+    # "0954+177",  # merged from the numbered follow-up review
     "1156+314",  # merged from the numbered follow-up review
-    "1309+119",  # merged from the numbered follow-up review
-    "0323+055",  # merged from the numbered follow-up review
-    "1056+701",  # merged from the numbered follow-up review
+    # "1309+119",  # merged from the numbered follow-up review
+    # "0323+055",  # merged from the numbered follow-up review
+    # "1056+701",  # merged from the numbered follow-up review
 ]
 
 NEEDS_BIGGER_IMAGE: list[str] = [

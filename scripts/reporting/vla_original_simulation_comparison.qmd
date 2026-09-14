@@ -1,0 +1,373 @@
+---
+format:
+  html:
+    toc: false
+    embed-resources: false
+page-layout: full
+jupyter: python3
+---
+
+<style>
+body { font-size: 0.78rem; }
+main.content { margin: 0 auto; max-width: 1800px; width: 97vw; }
+h1 { font-size: 1.55rem; margin-bottom: 0.45rem; }
+.report-description { color: #555; margin: 0 0 0.65rem; }
+.report-summary { background: #f5f6f7; border-radius: 5px; padding: 0.55rem 0.75rem; margin-bottom: 0.7rem; }
+.failure-list { color: #7a2e2e; font-size: 0.68rem; margin: 0.25rem 0 0; }
+.distribution-section { border-bottom: 1px solid #aaa; margin: 0.5rem 0 0.8rem; padding-bottom: 0.8rem; }
+.distribution-section h2 { font-size: 1rem; margin: 0.35rem 0; }
+.histogram-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.6rem; }
+.histogram-panel { min-width: 0; }
+.histogram-panel svg { display: block; height: auto; width: 100%; }
+.histogram-note { color: #555; font-size: 0.64rem; margin-top: 0.15rem; }
+.sample-pair { border-bottom: 1px solid #aaa; padding: 0.75rem 0 0.9rem; }
+.comparison-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.6rem; }
+.info-row { font-size: 0.68rem; line-height: 1.2; margin-bottom: 0.3rem; }
+.simulation-info { margin-top: 0.55rem; }
+.sample-id { font-size: 0.9rem; font-weight: 700; }
+.ms-path { color: #555; font-size: 0.64rem; overflow-wrap: anywhere; }
+.compact-line { margin: 0.06rem 0; overflow-wrap: anywhere; }
+.image-row figure { margin: 0; }
+.image-row img { cursor: zoom-in; display: block; height: auto; width: 100%; }
+.image-row figcaption { color: #555; font-size: 0.66rem; margin-top: 0.12rem; text-align: center; }
+@media (max-width: 900px) { .histogram-grid { grid-template-columns: 1fr; } }
+</style>
+
+```{python}
+#| echo: false
+#| output: asis
+
+import html
+import json
+import math
+from pathlib import Path
+
+
+HERE = Path.cwd()
+manifest = json.loads((HERE / "report.json").read_text(encoding="utf-8"))
+samples = manifest.get("samples", [])
+failures = manifest.get("failures", [])
+
+
+def load_json(relative_path):
+    try:
+        return json.loads((HERE / relative_path).read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return {}
+
+
+def show(value, unit=""):
+    if value is None or value == "":
+        return "—"
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            return "—"
+        text = f"{value:.5g}"
+    elif isinstance(value, list):
+        text = " × ".join(show(item) for item in value)
+    else:
+        text = str(value)
+    return html.escape(f"{text} {unit}".strip())
+
+
+def line(contents):
+    return f'<div class="compact-line">{contents}</div>'
+
+
+def image_row(result_dir, prefix):
+    figures = []
+    for filename, caption in (
+        ("dirty.png", "Dirty"),
+        ("clean.png", "Clean"),
+        ("residual.png", "Residual"),
+    ):
+        source = html.escape(f"{result_dir.rstrip('/')}/{filename}", quote=True)
+        alt = html.escape(f"{prefix} {caption}", quote=True)
+        figures.append(
+            f'<figure><a href="{source}" target="_blank" title="Open full-size {caption}">'
+            f'<img src="{source}" alt="{alt}"></a><figcaption>{caption}</figcaption></figure>'
+        )
+    return '<div class="comparison-row image-row">' + "".join(figures) + "</div>"
+
+
+def finite_metric(qa, name):
+    metrics = qa.get("metrics", {}) or {}
+    residual = metrics.get("residual", {}) or {}
+    value = metrics.get(name)
+    if value is None:
+        value = residual.get(name)
+    if (
+        value is None
+        and name == "dynamic_range_scaled_mad"
+        and int(qa.get("schema_version", 1)) < 2
+    ):
+        value = metrics.get("dynamic_range")
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return None
+    return value if math.isfinite(value) else None
+
+
+def metric_region_text(qa):
+    if int(qa.get("schema_version", 1)) < 2:
+        return "full image (schema 1)"
+    region = ((qa.get("metrics", {}) or {}).get("region", {}) or {})
+    minimum = region.get("min_radius_beams")
+    maximum = region.get("max_radius_beams")
+    lower = "centre" if minimum is None else f"{show(minimum)} beams"
+    upper = "image edge" if maximum is None else f"{show(maximum)} beams"
+    return f"{lower} to {upper}"
+
+
+def metric_population_signature(qa):
+    schema = int(qa.get("schema_version", 1))
+    if schema < 2:
+        return (schema, None, None)
+    region = ((qa.get("metrics", {}) or {}).get("region", {}) or {})
+    return (
+        schema,
+        region.get("min_radius_beams"),
+        region.get("max_radius_beams"),
+    )
+
+
+def histogram_svg(original_values, simulation_values, title, x_label, *, log_x=False):
+    original = [float(value) for value in original_values if value is not None]
+    simulation = [float(value) for value in simulation_values if value is not None]
+    if log_x:
+        original = [math.log10(value) for value in original if value > 0]
+        simulation = [math.log10(value) for value in simulation if value > 0]
+    values = original + simulation
+    if not values:
+        return f'<div class="histogram-panel"><div>{html.escape(title)}: no data</div></div>'
+
+    low, high = min(values), max(values)
+    if math.isclose(low, high):
+        padding = max(abs(low) * 0.05, 0.5)
+        low, high = low - padding, high + padding
+    bins = min(14, max(6, int(math.ceil(math.sqrt(len(values))))))
+    width = (high - low) / bins
+
+    def counts(series):
+        result = [0] * bins
+        for value in series:
+            index = min(bins - 1, max(0, int((value - low) / width)))
+            result[index] += 1
+        return result
+
+    original_counts = counts(original)
+    simulation_counts = counts(simulation)
+    maximum = max(original_counts + simulation_counts + [1])
+    svg_width, svg_height = 620, 255
+    left, right, top, bottom = 64, 16, 42, 48
+    plot_width = svg_width - left - right
+    plot_height = svg_height - top - bottom
+    bin_width = plot_width / bins
+    elements = [
+        f'<svg viewBox="0 0 {svg_width} {svg_height}" role="img" aria-label="{html.escape(title, quote=True)}">',
+        f'<text x="{left}" y="18" font-size="14">{html.escape(title)}</text>',
+        '<rect x="390" y="9" width="11" height="11" fill="#2878b5" opacity="0.72"></rect>',
+        '<text x="406" y="18" font-size="11">Original</text>',
+        '<rect x="480" y="9" width="11" height="11" fill="#e97821" opacity="0.72"></rect>',
+        '<text x="496" y="18" font-size="11">Simulation</text>',
+        f'<rect x="{left}" y="{top}" width="{plot_width}" height="{plot_height}" fill="none" stroke="#777" stroke-width="0.8"></rect>',
+    ]
+    for index, (original_count, simulation_count) in enumerate(
+        zip(original_counts, simulation_counts)
+    ):
+        x = left + index * bin_width
+        half = max(1.0, bin_width / 2 - 1)
+        for offset, count, color in (
+            (1, original_count, "#2878b5"),
+            (bin_width / 2, simulation_count, "#e97821"),
+        ):
+            height = plot_height * count / maximum
+            elements.append(
+                f'<rect x="{x + offset:.2f}" y="{top + plot_height - height:.2f}" '
+                f'width="{half:.2f}" height="{height:.2f}" fill="{color}" opacity="0.72">'
+                f'<title>{"Original" if color == "#2878b5" else "Simulation"}: {count}</title></rect>'
+            )
+    for index in range(5):
+        fraction = index / 4
+        value = low + fraction * (high - low)
+        display_value = 10**value if log_x else value
+        x = left + fraction * plot_width
+        elements.append(
+            f'<line x1="{x:.2f}" y1="{top + plot_height}" x2="{x:.2f}" y2="{top + plot_height + 4}" stroke="#555"></line>'
+        )
+        elements.append(
+            f'<text x="{x:.2f}" y="{top + plot_height + 17}" text-anchor="middle" font-size="10">{display_value:.3g}</text>'
+        )
+        y_value = round(fraction * maximum)
+        y = top + plot_height - fraction * plot_height
+        elements.append(
+            f'<text x="{left - 7}" y="{y + 3:.2f}" text-anchor="end" font-size="10">{y_value}</text>'
+        )
+    label = x_label + (" (log-spaced bins)" if log_x else "")
+    elements.extend(
+        [
+            f'<text x="{left + plot_width / 2:.2f}" y="{svg_height - 8}" text-anchor="middle" font-size="11">{html.escape(label)}</text>',
+            f'<text x="14" y="{top + plot_height / 2:.2f}" text-anchor="middle" font-size="11" transform="rotate(-90 14 {top + plot_height / 2:.2f})">Count</text>',
+            "</svg>",
+        ]
+    )
+    return (
+        '<div class="histogram-panel">'
+        + "".join(elements)
+        + f'<div class="histogram-note">Original n={len(original)}; simulation n={len(simulation)}</div></div>'
+    )
+
+
+print(f"<h1>{html.escape(str(manifest.get('title', 'VLA comparison report')))}</h1>")
+print(f'<p class="report-description">{html.escape(str(manifest.get("description", "")))}</p>')
+print('<div class="report-summary">')
+print(f"Completed pairs: {len(samples)} / {show(manifest.get('total_samples'))}<br>")
+print(f"Failed samples: {len(failures)}")
+if failures:
+    details = "; ".join(
+        f"{item.get('id', '—')} ({item.get('stage', 'unknown stage')}: {item.get('error', '—')})"
+        for item in failures
+    )
+    print(f'<div class="failure-list">{html.escape(details)}</div>')
+print("</div>")
+
+population_qa = [
+    (
+        load_json(Path(sample["original_result_dir"]) / "qa.json"),
+        load_json(Path(sample["simulation_result_dir"]) / "qa.json"),
+    )
+    for sample in samples
+]
+population_schema_versions = {
+    int(qa.get("schema_version", 1))
+    for pair in population_qa
+    for qa in pair
+    if qa
+}
+population_metric_regions = {
+    metric_population_signature(qa)
+    for pair in population_qa
+    for qa in pair
+    if qa
+}
+declared_region_policy = (
+    (manifest.get("configuration", {}) or {}).get("metric_region_policy") or {}
+)
+paired_metric_regions_match = all(
+    metric_population_signature(original) == metric_population_signature(simulation)
+    for original, simulation in population_qa
+    if original and simulation
+)
+population_metrics_comparable = (
+    len(population_schema_versions) <= 1
+    and (
+        len(population_metric_regions) <= 1
+        or (bool(declared_region_policy) and paired_metric_regions_match)
+    )
+)
+histogram_specs = (
+    ("dynamic_range_scaled_mad", "Measured robust image dynamic range", "global clean peak / selected residual scaled MAD", True),
+    ("scaled_mad_jy_per_beam", "Residual scaled MAD", "Jy/beam", True),
+    ("peak_over_scaled_mad", "Residual peak / scaled MAD", "ratio", False),
+    ("p99_over_scaled_mad", "Residual p99 / scaled MAD", "ratio", False),
+    ("rms_over_scaled_mad", "Residual RMS / scaled MAD", "ratio", False),
+)
+print('<section class="distribution-section">')
+print("<h2>Original and simulation metric distributions</h2>")
+if not population_metrics_comparable:
+    print('<p class="failure-list">Population histograms are suppressed because the QA files use different metric schemas or beam-region bounds.</p>')
+print('<div class="histogram-grid">')
+for metric, title, x_label, log_x in histogram_specs:
+    print(
+        histogram_svg(
+            [] if not population_metrics_comparable else [finite_metric(original, metric) for original, _ in population_qa],
+            [] if not population_metrics_comparable else [finite_metric(simulation, metric) for _, simulation in population_qa],
+            title,
+            x_label,
+            log_x=log_x,
+        )
+    )
+print("</div></section>")
+
+for sample in samples:
+    original_qa = load_json(Path(sample["original_result_dir"]) / "qa.json")
+    simulation_qa = load_json(Path(sample["simulation_result_dir"]) / "qa.json")
+    simulation = load_json(sample["simulation_metadata"])
+    parameters = original_qa.get("effective_imaging_parameters", {})
+    resolved = original_qa.get("resolved_config", {}) or {}
+    resolved_grid = resolved.get("grid", {}) or {}
+    image_grid = resolved_grid.get("image_grid", {}) or {}
+    geometry = parameters.get("measured_geometry", {}) or {}
+    beam = geometry.get("beam", resolved_grid.get("beam", {})) or {}
+    noise = simulation.get("noise", {}) or {}
+    resolved_noise = noise.get("resolved_parameters", {}) or {}
+    components = simulation.get("components", []) or []
+    component = components[0] if components else {}
+    flux = (component.get("flux") or [None])[0]
+    mask_nbeams = parameters.get("mask_nbeams")
+    mask = (
+        f"central circle ({show(mask_nbeams)} beams)"
+        if mask_nbeams is not None
+        else show(parameters.get("mask"))
+    )
+
+    parameter_lines = [
+        line(f"deconvolver={show(parameters.get('deconvolver'))}, nterms={show(parameters.get('nterms'))}"),
+        line(f"specmode={show(parameters.get('specmode'))}, gridder={show(parameters.get('gridder'))}, stokes={show(parameters.get('stokes'))}"),
+        line(f"weighting={show(parameters.get('weighting'))}, robust={show(parameters.get('robust'))}"),
+        line(f"imsize={show(geometry.get('imsize', image_grid.get('imsize', parameters.get('imsize'))))} px, cell={show(geometry.get('cell_arcsec', image_grid.get('cell_arcsec', parameters.get('cell'))))} arcsec"),
+        line(f"mask={mask}, mask_nbeams={show(mask_nbeams)}"),
+        line(f"niter={show(parameters.get('niter'))}, nsigma={show(parameters.get('nsigma'))}, threshold={show(parameters.get('threshold'))}, cycleniter={show(parameters.get('cycleniter'))}"),
+        line(f"beam={show(beam.get('major_arcsec'))} × {show(beam.get('minor_arcsec'))} arcsec, PA={show(beam.get('position_angle_deg'))} deg"),
+    ]
+
+    def metric_lines(qa):
+        metrics = qa.get("metrics", {}) or {}
+        residual = metrics.get("residual", metrics) or {}
+        region = metrics.get("region", {}) or {}
+        robust_dr = metrics.get("dynamic_range_scaled_mad", metrics.get("dynamic_range"))
+        values = [
+            line(f"metric region={metric_region_text(qa)}; area={show(residual.get('area_synthesized_beams'))} synthesized beams"),
+            line(f"residual RMS={show(residual.get('rms_jy_per_beam'), 'Jy/beam')}"),
+            line(f"scaled MAD={show(residual.get('scaled_mad_jy_per_beam'), 'Jy/beam')}"),
+            line(f"residual |peak|={show(residual.get('residual_abs_peak_jy_per_beam'), 'Jy/beam')}"),
+            line(f"residual min/max={show(residual.get('residual_min_jy_per_beam'))} / {show(residual.get('residual_max_jy_per_beam'), 'Jy/beam')}"),
+            line(f"peak/scaled MAD={show(residual.get('peak_over_scaled_mad'))}"),
+            line(f"p99/scaled MAD={show(residual.get('p99_over_scaled_mad'))}"),
+            line(f"p99.5/scaled MAD={show(residual.get('p99_5_over_scaled_mad'))}"),
+            line(f"measured DR (clean peak/residual RMS)={show(metrics.get('dynamic_range_rms'))}"),
+            line(f"measured robust DR (clean peak/scaled MAD)={show(robust_dr)}"),
+        ]
+        if qa.get("warnings"):
+            values.append(line("warnings=" + html.escape("; ".join(map(str, qa["warnings"])))))
+        return values
+
+    simulation_lines = [
+        line("source=phase-centre point (constant spectrum, unpolarized)"),
+        line(f"target S/N from original dynamic range={show(sample.get('target_dynamic_range', sample.get('source_snr')))}"),
+        line(f"achieved simulation robust DR={show(finite_metric(simulation_qa, 'dynamic_range_scaled_mad'))}"),
+        line(f"source flux={show(flux, 'Jy')}"),
+        line(f"predicted thermal image RMS={show(sample.get('predicted_image_rms_jy_per_beam'), 'Jy/beam')}"),
+        line(f"noise model={show(noise.get('noise_model'))}"),
+        line(f"band={show(resolved_noise.get('band'))}, sampler={show(resolved_noise.get('sampler'))} (declared)"),
+        line(f"SEFD={show(resolved_noise.get('sefd_jy'), 'Jy')}, eta_c={show(resolved_noise.get('eta_c'))}"),
+        line(f"simplenoise={show(noise.get('simplenoise_jy'), 'Jy')}, seed={show(noise.get('seed'))}"),
+    ]
+
+    sample_id = html.escape(str(sample.get("id", "—")))
+    print('<div class="sample-pair">')
+    print('<div class="comparison-row info-row original-info">')
+    print(f'<div><div class="sample-id">{sample_id}</div><div class="ms-path">{html.escape(str(sample.get("original_ms", "—")))}</div></div>')
+    print("<div>" + "".join(parameter_lines) + "</div>")
+    print("<div>" + "".join(metric_lines(original_qa)) + "</div>")
+    print("</div>")
+    print(image_row(str(sample["original_result_dir"]), sample_id))
+    print('<div class="comparison-row info-row simulation-info">')
+    print(f'<div><div class="sample-id">{sample_id} simulation</div>' + "".join(simulation_lines) + "</div>")
+    print("<div></div>")
+    print("<div>" + "".join(metric_lines(simulation_qa)) + "</div>")
+    print("</div>")
+    print(image_row(str(sample["simulation_result_dir"]), f"{sample_id} simulation"))
+    print("</div>")
+```

@@ -1,3 +1,9 @@
+"""VLA reference data and helpers for receiver-band and initial-beam planning.
+
+The module stores synthesized-beam and largest-angular-scale tables and can
+estimate a synthesized beam from an array configuration and frequency.
+"""
+
 from __future__ import annotations
 
 import math

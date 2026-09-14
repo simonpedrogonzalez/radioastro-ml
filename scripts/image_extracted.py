@@ -470,6 +470,7 @@ def run_tclean(
     apply_multiterm_clean_controls: bool = True,
     usemask: str = "",
     mask: str = "",
+    threshold: float | str | None = None,
 ) -> None:
     remove_casa_products(imagename)
 
@@ -493,6 +494,8 @@ def run_tclean(
         cfg["usemask"] = usemask
     if mask:
         cfg["mask"] = mask
+    if threshold is not None:
+        cfg["threshold"] = threshold
 
     print(
         f"[TCLEAN] vis={ms_path.name} "
@@ -505,6 +508,7 @@ def run_tclean(
         f"nterms={cfg.get('nterms', 1)} "
         f"nsigma={cfg.get('nsigma', 'default')} "
         f"cycleniter={cfg.get('cycleniter', 'default')} "
+        f"threshold={cfg.get('threshold', 'default')} "
         f"mt_clean_controls={apply_multiterm_clean_controls} "
         f"usemask={cfg.get('usemask', 'none')} "
         f"mask={cfg.get('mask', 'none')}"

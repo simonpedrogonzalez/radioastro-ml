@@ -1,12 +1,17 @@
 from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any
+
 import numpy as np
-from casatools import table, simulator
-from .corrfn import CorrFn, fBM
+from casatools import simulator, table
+
 from .corrtab_utils import make_template_gain_corrtab, GTab, GTabQuery, GCOLS
-import matplotlib.pyplot as plt
-from .time_utils import mjd_seconds_to_iso
 from .plot_utils import corrfun_plot_add, corrfun_plot_finish, corrfun_plot_start
-import inspect
+
+if TYPE_CHECKING:
+    from .corrfn import CorrFn
+else:
+    CorrFn = Any
 
 class Corruption:
     def build_corrtable(self, ms: str, corrtab: str, *, seed: int = 0):

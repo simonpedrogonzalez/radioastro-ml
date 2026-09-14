@@ -1,0 +1,292 @@
+---
+format:
+  html:
+    toc: false
+    embed-resources: false
+page-layout: full
+jupyter: python3
+---
+
+<style>
+body { font-size: 0.82rem; }
+main.content { margin: 0 auto; max-width: 1900px; width: 98vw; }
+h1 { font-size: 1.55rem; margin-bottom: 0.4rem; }
+h2 { font-size: 1.12rem; margin-top: 1rem; }
+.summary { background: #f4f5f6; border-radius: 5px; margin-bottom: 0.8rem; padding: 0.65rem 0.8rem; }
+.matrix-wrap { overflow-x: auto; }
+.comparison-matrix {
+  display: grid;
+  gap: 0.55rem;
+  grid-template-columns: minmax(235px, 0.72fr) repeat(3, minmax(275px, 1fr));
+  min-width: 1100px;
+}
+.matrix-header {
+  align-items: center;
+  background: #e7eaed;
+  border-radius: 4px;
+  display: flex;
+  font-size: 0.78rem;
+  font-weight: 700;
+  justify-content: center;
+  min-height: 2rem;
+  padding: 0.25rem;
+  text-align: center;
+}
+.row-label {
+  background: #f4f5f6;
+  border-left: 4px solid #697582;
+  border-radius: 4px;
+  padding: 0.55rem;
+}
+.row-label h3 { font-size: 0.9rem; margin: 0 0 0.35rem; }
+.details { font-size: 0.7rem; line-height: 1.35; overflow-wrap: anywhere; }
+.image-cell { align-self: start; }
+.image-cell figure, .diagnostics figure, .clean-comparison figure { margin: 0; }
+.image-cell img, .diagnostics img, .clean-comparison img {
+  display: block;
+  height: auto;
+  width: 100%;
+}
+.missing {
+  align-items: center;
+  background: #f7eded;
+  color: #842b2b;
+  display: flex;
+  justify-content: center;
+  min-height: 180px;
+  padding: 1rem;
+  text-align: center;
+}
+figcaption { color: #555; font-size: 0.68rem; margin-top: 0.12rem; text-align: center; }
+.diagnostics { display: grid; gap: 0.8rem; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.clean-comparison {
+  display: grid;
+  gap: 0.8rem;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+.clean-cell { min-width: 0; }
+.failure { color: #842b2b; }
+@media (max-width: 900px) {
+  .diagnostics, .clean-comparison { grid-template-columns: 1fr; }
+}
+</style>
+
+```{python}
+#| echo: false
+#| output: asis
+
+import html
+import json
+import math
+from pathlib import Path
+
+
+HERE = Path.cwd()
+manifest = json.loads((HERE / "report.json").read_text(encoding="utf-8"))
+
+
+def load_json(path):
+    if not path:
+        return {}
+    try:
+        return json.loads((HERE / path).read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return {}
+
+
+def show(value, unit=""):
+    if value is None or value == "":
+        return "—"
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            return "—"
+        value = f"{value:.6g}"
+    return html.escape(f"{value} {unit}".strip())
+
+
+def metrics_text(qa):
+    metrics = qa.get("metrics", {}) or {}
+    residual = metrics.get("residual", {}) or {}
+    region = metrics.get("region", {}) or {}
+    return "<br>".join(
+        (
+            f"clean peak: {show(metrics.get('clean_peak_jy_per_beam'), 'Jy/beam')}",
+            f"residual RMS: {show(residual.get('rms_jy_per_beam'), 'Jy/beam')}",
+            f"scaled MAD: {show(residual.get('scaled_mad_jy_per_beam'), 'Jy/beam')}",
+            f"robust DR: {show(metrics.get('dynamic_range_scaled_mad'))}",
+            f"metric radius: {show(region.get('min_radius_beams'))} to "
+            f"{show(region.get('max_radius_beams'))} beams",
+        )
+    )
+
+
+def image_cell(result_dir, filename, case_label, column_label, missing_reason=None):
+    if not result_dir:
+        reason = html.escape(missing_reason or "Result was not produced")
+        return f'<div class="image-cell missing">{reason}</div>'
+    source = html.escape(f"{str(result_dir).rstrip('/')}/{filename}", quote=True)
+    alt = html.escape(f"0012-399 {case_label} {column_label}", quote=True)
+    return (
+        '<div class="image-cell"><figure>'
+        f'<a href="{source}" target="_blank"><img src="{source}" alt="{alt}"></a>'
+        f'<figcaption>0012-399 — {html.escape(column_label)}</figcaption>'
+        '</figure></div>'
+    )
+
+
+def comparison_row(case_label, details, result_dir, missing_reason=None):
+    cells = [
+        '<div class="row-label">'
+        f'<h3>{html.escape(case_label)}</h3>'
+        f'<div class="details">{details}</div></div>'
+    ]
+    for filename, column_label in (
+        ("dirty.png", "Dirty"),
+        ("clean.png", "Clean"),
+        ("residual.png", "Residual"),
+    ):
+        cells.append(
+            image_cell(
+                result_dir,
+                filename,
+                case_label,
+                column_label,
+                missing_reason=missing_reason,
+            )
+        )
+    print("".join(cells))
+
+
+def clean_comparison_cell(result_dir, case_label, missing_reason=None):
+    if not result_dir:
+        reason = html.escape(missing_reason or "Result was not produced")
+        return f'<div class="clean-cell missing">{reason}</div>'
+    source = html.escape(f"{str(result_dir).rstrip('/')}/clean.png", quote=True)
+    label = html.escape(case_label)
+    return (
+        '<div class="clean-cell"><figure>'
+        f'<a href="{source}" target="_blank">'
+        f'<img src="{source}" alt="0012-399 {label} CLEAN image"></a>'
+        f'<figcaption><strong>{label}</strong><br>0012-399 CLEAN image</figcaption>'
+        '</figure></div>'
+    )
+
+
+title = html.escape(str(manifest.get("title", "Amplitude versus phase corruption")))
+description = html.escape(str(manifest.get("description", "")))
+source = manifest.get("source", {}) or {}
+configuration = manifest.get("configuration", {}) or {}
+variants = manifest.get("variants", []) or []
+variant_by_name = {item.get("name"): item for item in variants}
+failures = manifest.get("failures", []) or []
+failure_by_name = {item.get("name"): item for item in failures}
+
+print(f"<h1>{title}</h1>")
+print(f"<p>{description}</p>")
+print('<div class="summary">')
+print(f"Dataset: <strong>0012-399</strong><br>")
+print(f"Source thermal experiment: {show(source.get('thermal_experiment'))}<br>")
+print(f"Source simulated MS: {show(source.get('simulation_ms'))}<br>")
+print(
+    f"Same selected antenna for both errors: {show(configuration.get('antenna_name'))} "
+    f"(ID {show(configuration.get('antenna_id'))})<br>"
+)
+print(
+    f"Significant diagnostic errors: amplitude gain="
+    f"{show(configuration.get('amplitude_gain'))} (+50%); phase="
+    f"{show(configuration.get('phase_error_degrees'), 'deg')}<br>"
+)
+print(
+    f"Imaging: {show(configuration.get('imaging_configuration'))}, "
+    f"imsize={show(configuration.get('imsize'))}; "
+    f"weights={show(configuration.get('weight_policy'))}<br>"
+)
+print(f"Completed corrupted variants: {len(variants)} / 2; failures: {len(failures)}")
+if failures:
+    detail = "; ".join(
+        f"{item.get('name', 'unknown')}: {item.get('error', 'unknown error')}"
+        for item in failures
+    )
+    print(f'<div class="failure">{html.escape(detail)}</div>')
+print("</div>")
+
+print("<h2>0012-399 image comparison</h2>")
+print(
+    "<p>Exactly three rows show the same dataset; columns are the dirty, CLEAN, "
+    "and residual images.</p>"
+)
+print('<div class="matrix-wrap"><div class="comparison-matrix">')
+for heading in ("Dataset / case", "Dirty", "CLEAN", "Residual"):
+    print(f'<div class="matrix-header">{heading}</div>')
+
+baseline_dir = source.get("baseline_result_dir")
+baseline_qa = load_json(Path(baseline_dir) / "qa.json") if baseline_dir else {}
+comparison_row(
+    "0012-399 — clean simulation with thermal noise",
+    metrics_text(baseline_qa),
+    baseline_dir,
+)
+
+for name, case_label in (
+    ("constant_amplitude", "0012-399 — one-antenna constant amplitude-only error"),
+    ("constant_phase", "0012-399 — one-antenna constant phase-only error"),
+):
+    variant = variant_by_name.get(name, {})
+    failure = failure_by_name.get(name, {})
+    qa = load_json(variant.get("qa_json"))
+    details = (
+        f"antenna: {show(variant.get('antenna_name', configuration.get('antenna_name')))} "
+        f"(ID {show(variant.get('antenna_id', configuration.get('antenna_id')))})<br>"
+        f"amplitude gain: {show(variant.get('amplitude_gain'))}<br>"
+        f"phase: {show(variant.get('phase_error_degrees'), 'deg')}<br>"
+        f"{metrics_text(qa)}"
+    )
+    comparison_row(
+        case_label,
+        details,
+        variant.get("result_dir"),
+        missing_reason=failure.get("error", "Variant has not completed"),
+    )
+print("</div></div>")
+
+diagnostic_variants = [
+    variant_by_name[name]
+    for name in ("constant_amplitude", "constant_phase")
+    if name in variant_by_name and variant_by_name[name].get("corruption_plot")
+]
+if diagnostic_variants:
+    print("<h2>Applied gain diagnostics</h2>")
+    print('<div class="diagnostics">')
+    for variant in diagnostic_variants:
+        plot = html.escape(str(variant["corruption_plot"]), quote=True)
+        label = html.escape(str(variant.get("label", variant.get("name", "corruption"))))
+        print(
+            '<figure>'
+            f'<a href="{plot}" target="_blank"><img src="{plot}" alt="{label}"></a>'
+            f'<figcaption>{label}: gain function and gain-table samples</figcaption>'
+            '</figure>'
+        )
+    print("</div>")
+
+print("<h2>Final CLEAN-only comparison</h2>")
+print(
+    "<p>The three CLEAN images for 0012-399 are repeated side by side for direct "
+    "comparison.</p>"
+)
+print('<div class="clean-comparison">')
+print(clean_comparison_cell(baseline_dir, "Thermal simulation"))
+for name, case_label in (
+    ("constant_amplitude", "Amplitude error: one antenna, gain 1.50 (+50%)"),
+    ("constant_phase", "Phase error: one antenna, +45 degrees"),
+):
+    variant = variant_by_name.get(name, {})
+    failure = failure_by_name.get(name, {})
+    print(
+        clean_comparison_cell(
+            variant.get("result_dir"),
+            case_label,
+            missing_reason=failure.get("error", "Variant has not completed"),
+        )
+    )
+print("</div>")
+```

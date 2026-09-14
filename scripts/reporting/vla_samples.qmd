@@ -1,0 +1,168 @@
+---
+format:
+  html:
+    toc: false
+    embed-resources: false
+page-layout: full
+jupyter: python3
+---
+
+<style>
+body { font-size: 0.82rem; }
+main.content { margin: 0 auto; max-width: 1800px; width: 97vw; }
+h1 { font-size: 1.7rem; }
+.report-description { color: #555; margin-bottom: 1.5rem; }
+.report-summary { background: #f5f6f7; border-radius: 6px; padding: 0.8rem 1rem; margin-bottom: 1rem; }
+.sample { border-bottom: 2px solid #bbb; padding: 1.2rem 0 1.5rem; }
+.sample-info, .sample-images { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.7rem; }
+.sample-info { font-size: 0.72rem; line-height: 1.25; margin-bottom: 0.45rem; }
+.sample-id { font-size: 1rem; font-weight: 700; }
+.ms-path { overflow-wrap: anywhere; color: #555; font-size: 0.7rem; }
+.compact-line { margin: 0.08rem 0; overflow-wrap: anywhere; }
+.sample-images figure { margin: 0; }
+.sample-images img { cursor: zoom-in; display: block; height: auto; width: 100%; }
+.sample-images figcaption { color: #555; font-size: 0.72rem; margin-top: 0.2rem; text-align: center; }
+</style>
+
+```{python}
+#| echo: false
+#| output: asis
+
+import html
+import json
+import math
+from pathlib import Path
+
+import matplotlib.pyplot as plt
+import numpy as np
+
+
+HERE = Path.cwd()
+manifest = json.loads((HERE / "report.json").read_text(encoding="utf-8"))
+samples = manifest.get("samples", [])
+
+
+def load_qa(sample):
+    path = HERE / sample["result_dir"] / "qa.json"
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def show(value, unit=""):
+    if value is None or value == "":
+        return "—"
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            return "—"
+        text = f"{value:.4g}"
+    elif isinstance(value, list):
+        text = " × ".join(show(item) for item in value)
+    else:
+        text = str(value)
+    return html.escape(f"{text} {unit}".strip())
+
+
+def summary_line(label, contents):
+    return f'<div class="compact-line"><strong>{html.escape(label)}</strong>: {contents}</div>'
+
+
+def info_line(contents):
+    return f'<div class="compact-line">{contents}</div>'
+
+
+qa_reports = [load_qa(sample) for sample in samples]
+
+
+def pipeline_rms(qa):
+    background = qa.get("pipeline_background", {}) or {}
+    return background.get("rms_jy_per_beam", qa.get("vla_background_rms_jy_per_beam"))
+
+
+rms_values = [
+    float(pipeline_rms(qa))
+    for qa in qa_reports
+    if pipeline_rms(qa) is not None
+    and math.isfinite(float(pipeline_rms(qa)))
+]
+
+print(f"<h1>{html.escape(str(manifest.get('title', 'VLA sample imaging report')))}</h1>")
+print(f'<p class="report-description">{html.escape(str(manifest.get("description", "")))}</p>')
+print('<div class="report-summary">')
+print(f"<strong>Processed samples:</strong> {len(samples)} / {show(manifest.get('total_samples'))}")
+print('<div class="section-label" style="margin-top:0.5rem">Background RMS</div>')
+if rms_values:
+    print(summary_line("Mean", show(float(np.mean(rms_values)), "Jy/beam")))
+    print(summary_line("Median", show(float(np.median(rms_values)), "Jy/beam")))
+    print(summary_line("Std", show(float(np.std(rms_values)), "Jy/beam")))
+else:
+    print(summary_line("Mean", "—") + summary_line("Median", "—") + summary_line("Std", "—"))
+print("</div>")
+
+if rms_values:
+    fig, ax = plt.subplots(figsize=(5, 2.5))
+    ax.hist(rms_values)
+    ax.set_xlabel("VLA background RMS [Jy/beam]")
+    ax.set_ylabel("Samples")
+    plt.setp(ax.get_xticklabels(), rotation=45, ha="right")
+    fig.tight_layout()
+    plt.show()
+else:
+    print('<p class="explanation">Background RMS histogram unavailable.</p>')
+
+for sample, qa in zip(samples, qa_reports):
+    parameters = qa.get("effective_imaging_parameters", {})
+    metrics = qa.get("metrics", {})
+    residual_metrics = metrics.get("residual", metrics) or {}
+    geometry = parameters.get("measured_geometry", {})
+    beam = geometry.get("beam", {})
+    result_dir = str(sample["result_dir"]).rstrip("/")
+    mask_nbeams = parameters.get("mask_nbeams")
+    mask_text = (
+        f"central circle | diameter={show(mask_nbeams)} synthesized beams"
+        if mask_nbeams is not None
+        else show(parameters.get("mask"))
+    )
+
+    parameter_lines = [
+        info_line(f"deconvolver={show(parameters.get('deconvolver'))} | nterms={show(parameters.get('nterms'))}"),
+        info_line(f"specmode={show(parameters.get('specmode'))} | gridder={show(parameters.get('gridder'))} | stokes={show(parameters.get('stokes'))}"),
+        info_line(f"weighting={show(parameters.get('weighting'))} | robust={show(parameters.get('robust'))}"),
+        info_line(f"imsize={show(geometry.get('imsize', parameters.get('imsize')))} px | cell={show(geometry.get('cell_arcsec', parameters.get('cell')))} arcsec"),
+        info_line(f"mask={mask_text}"),
+        info_line(f"niter={show(parameters.get('niter'))} | nsigma={show(parameters.get('nsigma'))} | threshold={show(parameters.get('threshold'))} | cycleniter={show(parameters.get('cycleniter'))}"),
+        info_line(f"beam={show(beam.get('major_arcsec'))} × {show(beam.get('minor_arcsec'))} arcsec | PA={show(beam.get('position_angle_deg'))} deg"),
+    ]
+    metric_lines = [
+        info_line(f"residual RMS = {show(residual_metrics.get('rms_jy_per_beam'), 'Jy/beam')}"),
+        info_line(f"sigma = 1.4826 × median(|residual − median(residual)|) = {show(residual_metrics.get('scaled_mad_jy_per_beam'), 'Jy/beam')}"),
+        info_line(f"residual absolute peak = max(|residual|) = {show(residual_metrics.get('residual_abs_peak_jy_per_beam'), 'Jy/beam')}"),
+        info_line(f"residual minimum = min(residual) = {show(residual_metrics.get('residual_min_jy_per_beam'), 'Jy/beam')}"),
+        info_line(f"residual maximum = max(residual) = {show(residual_metrics.get('residual_max_jy_per_beam'), 'Jy/beam')}"),
+        info_line(f"peak / sigma = max(|residual|) / sigma = {show(residual_metrics.get('peak_over_scaled_mad'))}"),
+        info_line(f"p99 / sigma = P99(|residual|) / sigma = {show(residual_metrics.get('p99_over_scaled_mad'))}"),
+        info_line(f"p99.5 / sigma = P99.5(|residual|) / sigma = {show(residual_metrics.get('p99_5_over_scaled_mad'))}"),
+        info_line(f"DR (RMS) = global max(clean image) / selected residual RMS = {show(metrics.get('dynamic_range_rms'))}"),
+        info_line(f"robust DR = global max(clean image) / selected sigma = {show(metrics.get('dynamic_range_scaled_mad', metrics.get('dynamic_range')))}"),
+        info_line(f"VLA Pipeline background RMS = non-PB-corr noise-annulus RMS = {show(pipeline_rms(qa), 'Jy/beam')}"),
+    ]
+    if qa.get("warnings"):
+        metric_lines.append(info_line("warnings = " + "<br>".join(html.escape(str(item)) for item in qa["warnings"])))
+
+    print('<div class="sample">')
+    print('<div class="sample-info">')
+    print('<div>')
+    print(f'<div class="sample-id">{html.escape(str(sample.get("id", "—")))}</div>')
+    print(f'<div class="ms-path">{html.escape(str(sample.get("ms_path", "—")))}</div>')
+    print('</div>')
+    print('<div>' + "".join(parameter_lines) + '</div>')
+    print('<div>' + "".join(metric_lines) + '</div>')
+    print('</div>')
+    print('<div class="sample-images">')
+    for filename, caption in (("dirty.png", "Dirty"), ("clean.png", "Clean"), ("residual.png", "Residual")):
+        source = html.escape(f"{result_dir}/{filename}", quote=True)
+        print(f'<figure><a href="{source}" target="_blank" title="Open full-size {caption}"><img src="{source}" alt="{caption}"></a><figcaption>{caption}</figcaption></figure>')
+    print('</div>')
+    print('</div>')
+```

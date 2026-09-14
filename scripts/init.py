@@ -24,13 +24,15 @@ from scripts import reproduction
 from scripts import reproduction_selfcal_compare
 from scripts import compare_image_geometry
 from scripts import sample_groups
+from scripts import simulations
+
 
 for lib in [corruption_gaindrift, extraction_pipeline,
 plot_extracted, asdm_utils, image_extracted, image_extracted_in_depth,
 image_extracted_selfcal, image_diagnosis, check_uv_lim_issues,
 uvlim_recal, vla_pipe, selfcal_extracted, selfcal_compare, single_image, reproduction,
 reproduction_selfcal_compare,
-compare_image_geometry, sample_groups]:
+compare_image_geometry, sample_groups, simulations]:
     importlib.reload(lib)
 
 
@@ -110,7 +112,8 @@ def run_bad_uv_dist_vs_amp_experiment() -> None:
 # extraction_pipeline.run()
 
 # uvlim_recal.main("/Users/u1528314/repos/radioastro-ml/collect/extracted/0205+322/0205+322/0205+322.ms")
-run_bad_uv_dist_vs_amp_experiment()
+# run_bad_uv_dist_vs_amp_experiment()
+simulations.main()
 # uvlim_recal.main("/Users/u1528314/repos/radioastro-ml/runs/vla_pipe_test/0205+322_pipeline_input.ms", initial_plot_only=True)
 # uvlim_recal.main("/Users/u1528314/repos/radioastro-ml/collect/extracted/0205+322/selfcal/0205+322_selfcal.ms", initial_plot_only=True)
 # single_image.main(

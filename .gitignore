@@ -220,3 +220,8 @@ pub332.pdf
 collect/.DS_Store
 
 .DS_Store
+
+collect/experiments
+
+# CASA table locks are runtime state, not regression-fixture data.
+tests/fixtures/**/table.lock
