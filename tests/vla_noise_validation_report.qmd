@@ -1,0 +1,86 @@
+---
+title: "VLA thermal-noise validation: 0012-399"
+format:
+  html:
+    embed-resources: true
+    toc: true
+---
+
+Run: `__RUN_TIMESTAMP__`
+
+This experiment adds VLA thermal noise to 0012-399 and makes a natural-weight
+dirty image. The input flags are preserved.
+
+## Declared scenario
+
+| Quantity | Value |
+|---|---:|
+| Input MS | `__SOURCE_MS__` |
+| Representative frequency | __REPRESENTATIVE_FREQUENCY_GHZ__ GHz |
+| Band / sampler | C / 8-bit |
+| Antennas / cross baselines | __NANTENNAS__ / __NBASELINES__ |
+| Integrations / exposure | __NINTEGRATIONS__ / __EXPOSURE_S__ s |
+| Nominal on-source time | __ON_SOURCE_S__ s |
+| Channels / Stokes-I products | __NCHANNELS__ / 2 (RR, LL) |
+| Nominal bandwidth | __NOMINAL_BANDWIDTH_MHZ__ MHz |
+| Flag-adjusted equivalent bandwidth | __USABLE_BANDWIDTH_MHZ__ MHz |
+| Imaging | Stokes I, natural, no taper, niter=0 |
+| ECT-equivalent SEFD (correlation efficiency) | __SEFD_JY__ Jy (0.93) |
+| Random seed | 20260907 |
+| Reference | [NRAO VLA 2026A OSS sensitivity](__OSS_SOURCE__) |
+
+The package default is 310 Jy at 6 GHz. This test uses 236.7 Jy (derived from
+the calculator result at 7.291 GHz). The 8-bit, Zenith, and Winter settings are
+test inputs (they were not recovered from the MS).
+
+## Results
+
+| Quantity | Value |
+|---|---:|
+| `simplenoise` (visibility sigma) | __SIMPLENOISE_JY__ Jy |
+| Predicted image RMS (flags included) | __FLAGGED_RMS_JY__ Jy/beam |
+| Central PB-region RMS | __CENTRAL_RMS_JY__ Jy/beam |
+| Central PB-region scaled MAD | __CENTRAL_MAD_JY__ Jy/beam |
+
+Status: **__STATUS__**
+
+__FAILURES__
+
+## Noise image
+
+![Non-PB-corrected natural-weight dirty image](dirty.png)
+
+## External VLA Exposure Calculator check
+
+Open <https://obs.vla.nrao.edu/ect> and fill the rows in order. Press Tab after
+the frequency and bandwidth (this enables the other controls).
+
+| Step | Calculator row | Enter or select |
+|---:|---|---|
+| 1 | Representative Frequency | `7291 MHz` (press Tab) |
+| 2 | Frequency Bandwidth | `69.5725 MHz` (press Tab) |
+| 3 | Purpose of Calculation | `Noise Simulation Check` |
+| 4 | Array Configuration | `B` |
+| 5 | Number of Antennas | `27` |
+| 6 | Polarization Setup | `Dual` |
+| 7 | Type of Image Weighting | `Natural` |
+| 8 | Receiver Band | Output (`C`) |
+| 9 | Approximate Beam Size | Output (about `1.318 arcsec`) |
+| 10 | Number of Frequencies | `1` |
+| 11 | Session Includes Pointing | `False` |
+| 12 | Digital Samplers | `8 bit` |
+| 13 | Elevation | `Zenith (90 degrees)` |
+| 14 | Average Weather | `Winter` |
+| 15 | Calculation Type | `Noise/Tb` |
+| 16 | Number of Sources | `1` |
+| 17 | Time on Source | `1175s` (or `19m35s`) |
+| 18 | Total On-Source Time | Output (`19m35s`) |
+| 19 | Total Time | Output (about `37m22s`) |
+| 20 | Line Velocity Width | Output (about `__ECT_EXPECTED_LINE_WIDTH_KMS__ km/s`) |
+| 21 | RMS Noise | Output (about **`__ECT_EXPECTED_RMS_MICROJY__ µJy/beam`**) |
+| 22 | RMS Brightness | Output (about `__ECT_EXPECTED_TB_K__ K`) |
+| 23 | Confusion Level | Output (ignore for this test) |
+| 24 | Overhead Explanation | Output (not used) |
+
+Compare RMS Noise with the central PB-region RMS above (not with the real-data
+Pipeline RMS). Small rounding differences are normal.

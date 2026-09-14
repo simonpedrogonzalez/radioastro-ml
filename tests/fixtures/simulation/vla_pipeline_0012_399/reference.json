@@ -1,0 +1,17 @@
+{
+  "casa_version": "6.6.6.18",
+  "clean_mask_rule": "central_clean_0.mask < 0.1",
+  "pb_max_for_this_image": 0.9947110414505005,
+  "pb_min_for_this_image": 0.9934094548225403,
+  "pipeline_rms_jy_per_beam_exact": 0.00024389197254258183,
+  "pipeline_version": "2025.1.0.36",
+  "qa_json_rms_jy_per_beam_rounded": 0.00024,
+  "source_paths": {
+    "clean_mask": "collect/experiments/compute_background_RMS_20260903T133414/0012-399/vla_pipeline/pipeline/central_clean_0.mask",
+    "image": "collect/experiments/compute_background_RMS_20260903T133414/0012-399/vla_pipeline/pipeline/oussid.s5_0.J0012-3954_sci.C_band.cont.regcal.I.iter1.image.tt0",
+    "pb": "collect/experiments/compute_background_RMS_20260903T133414/0012-399/vla_pipeline/pipeline/oussid.s5_0.J0012-3954_sci.C_band.cont.regcal.I.iter1.pb.tt0",
+    "qa_json": "collect/experiments/compute_background_RMS_20260903T133414/0012-399/vla_pipeline/qa.json",
+    "stage5_log": "collect/experiments/compute_background_RMS_20260903T133414/0012-399/vla_pipeline/pipeline/pipeline-20260903T193606/html/stage5/casapy.log"
+  },
+  "statistic": "CASA image.statistics RMS after Chauvenet rejection, maxiter=5"
+}

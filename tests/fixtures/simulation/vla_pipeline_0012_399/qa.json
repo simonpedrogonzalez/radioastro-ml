@@ -1,0 +1,883 @@
+{
+  "effective_imaging_parameters": {
+    "antenna": [
+      "0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26&"
+    ],
+    "band_catalog_csv": "/Users/u1528314/Documents/radioastro-ml/collect/vla_calibrators_bands_v2.csv",
+    "calcpsf": false,
+    "calcres": false,
+    "calibrator_meta_csv": "/Users/u1528314/Documents/radioastro-ml/collect/small_subset/small_selection.csv",
+    "cell": [
+      "0.15arcsec"
+    ],
+    "csv_meta": {
+      "array_configuration": "B",
+      "catalog_band_codes": [
+        "C"
+      ],
+      "catalog_frequency_ghz": 7.291,
+      "visibility_id": "0012-399"
+    },
+    "cyclefactor": 3.0,
+    "data_column_validation": {
+      "available_columns": [
+        "UVW",
+        "FLAG",
+        "FLAG_CATEGORY",
+        "WEIGHT",
+        "SIGMA",
+        "ANTENNA1",
+        "ANTENNA2",
+        "ARRAY_ID",
+        "DATA_DESC_ID",
+        "EXPOSURE",
+        "FEED1",
+        "FEED2",
+        "FIELD_ID",
+        "FLAG_ROW",
+        "INTERVAL",
+        "OBSERVATION_ID",
+        "PROCESSOR_ID",
+        "SCAN_NUMBER",
+        "STATE_ID",
+        "TIME",
+        "TIME_CENTROID",
+        "DATA"
+      ],
+      "finite_unflagged_samples": 11477372,
+      "nonzero_finite_unflagged_samples": 11477372,
+      "requested_name": "data",
+      "rows_examined": 82485,
+      "table_column": "DATA",
+      "unflagged_samples": 11477372
+    },
+    "datacolumn": "data",
+    "deconvolver": "mtmfs",
+    "extracted_ms_root": "/Users/u1528314/Documents/radioastro-ml/collect/extracted",
+    "fastnoise": true,
+    "field": "J0012-3954",
+    "fullsummary": true,
+    "gridder": "standard",
+    "imagename": "oussid.s5_0.J0012-3954_sci.C_band.cont.regcal.I.iter1",
+    "imsize": [
+      256,
+      256
+    ],
+    "intent": "OBSERVE_TARGET#ON_SOURCE",
+    "interactive": false,
+    "mask": "central_clean_0.mask",
+    "mask_nbeams": 6.0,
+    "mask_probe_beam": {
+      "major_arcsec": 3.1142542362213135,
+      "minor_arcsec": 0.7572280764579773,
+      "position_angle_deg": 13.694905281066895
+    },
+    "mask_region": "circle[[128pix,128pix],9.34276270866arcsec]",
+    "measured_geometry": {
+      "beam": {
+        "major_arcsec": 3.0923187732696533,
+        "minor_arcsec": 0.7482750415802002,
+        "position_angle_deg": 13.70182991027832
+      },
+      "cell_arcsec": [
+        0.15,
+        0.15
+      ],
+      "field_of_view_arcsec": [
+        38.4,
+        38.4
+      ],
+      "imsize": [
+        256,
+        256
+      ]
+    },
+    "mosweight": false,
+    "ms_band_meta": {
+      "catalog_band_matches": true,
+      "frequency_reference_spw": 0,
+      "representative_frequency_ghz": 7.291,
+      "selected_band": "C"
+    },
+    "nchan": -1,
+    "niter": 10000,
+    "nmajor": 300,
+    "npixels": 0,
+    "nsigma": 5.0,
+    "nterms": 1,
+    "outframe": "LSRK",
+    "parallel": false,
+    "pbcor": true,
+    "pblimit": -0.1,
+    "perchanweightdensity": false,
+    "phasecenter": "ICRS 00:12:59.9074 -039.54.25.819",
+    "pipeline_commands_log": "/Users/u1528314/Documents/radioastro-ml/collect/experiments/compute_background_RMS_20260903T133414/0012-399/vla_pipeline/pipeline/pipeline-20260903T193606/html/casa_commands.log",
+    "pipeline_dirty_tclean_parameters": {
+      "antenna": [
+        "0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26&"
+      ],
+      "cell": [
+        "0.15arcsec"
+      ],
+      "cyclefactor": 3.0,
+      "datacolumn": "data",
+      "deconvolver": "mtmfs",
+      "fastnoise": true,
+      "field": "J0012-3954",
+      "fullsummary": true,
+      "gridder": "standard",
+      "imagename": "oussid.s5_0.J0012-3954_sci.C_band.cont.regcal.I.iter0",
+      "imsize": [
+        256,
+        256
+      ],
+      "intent": "OBSERVE_TARGET#ON_SOURCE",
+      "interactive": false,
+      "mosweight": false,
+      "nchan": -1,
+      "niter": 0,
+      "npixels": 0,
+      "nsigma": 5.0,
+      "nterms": 1,
+      "outframe": "LSRK",
+      "parallel": false,
+      "pbcor": false,
+      "pblimit": -0.1,
+      "perchanweightdensity": false,
+      "phasecenter": "ICRS 00:12:59.9074 -039.54.25.819",
+      "restoration": false,
+      "restoringbeam": "common",
+      "robust": 0.5,
+      "savemodel": "none",
+      "scan": [
+        "3,5,7,9,11,13,15,17,19,21,23,25,27,29,31,33,35"
+      ],
+      "specmode": "mfs",
+      "spw": [
+        "0"
+      ],
+      "stokes": "I",
+      "threshold": "0.0mJy",
+      "usepointing": false,
+      "uvrange": ">0.0klambda",
+      "vis": [
+        "0012-399_pipeline_input.ms"
+      ],
+      "weighting": "briggs"
+    },
+    "pipeline_final_tclean_parameters": {
+      "antenna": [
+        "0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26&"
+      ],
+      "calcpsf": false,
+      "calcres": false,
+      "cell": [
+        "0.15arcsec"
+      ],
+      "cyclefactor": 3.0,
+      "datacolumn": "data",
+      "deconvolver": "mtmfs",
+      "fastnoise": true,
+      "field": "J0012-3954",
+      "fullsummary": true,
+      "gridder": "standard",
+      "imagename": "oussid.s5_0.J0012-3954_sci.C_band.cont.regcal.I.iter1",
+      "imsize": [
+        256,
+        256
+      ],
+      "intent": "OBSERVE_TARGET#ON_SOURCE",
+      "interactive": false,
+      "mask": "central_clean_0.mask",
+      "mosweight": false,
+      "nchan": -1,
+      "niter": 10000,
+      "nmajor": 300,
+      "npixels": 0,
+      "nsigma": 5.0,
+      "nterms": 1,
+      "outframe": "LSRK",
+      "parallel": false,
+      "pbcor": true,
+      "pblimit": -0.1,
+      "perchanweightdensity": false,
+      "phasecenter": "ICRS 00:12:59.9074 -039.54.25.819",
+      "restart": true,
+      "restoration": true,
+      "restoringbeam": "common",
+      "robust": 0.5,
+      "savemodel": "none",
+      "scan": [
+        "3,5,7,9,11,13,15,17,19,21,23,25,27,29,31,33,35"
+      ],
+      "specmode": "mfs",
+      "spw": [
+        "0"
+      ],
+      "stokes": "I",
+      "threshold": "4.51e-05Jy",
+      "usemask": "user",
+      "usepointing": false,
+      "uvrange": ">0.0klambda",
+      "vis": [
+        "0012-399_pipeline_input.ms"
+      ],
+      "weighting": "briggs"
+    },
+    "pipeline_input_ms": "/Users/u1528314/Documents/radioastro-ml/collect/experiments/compute_background_RMS_20260903T133414/0012-399/vla_pipeline/pipeline/0012-399_pipeline_input.ms",
+    "pipeline_masking": "manual",
+    "pipeline_source_datacolumn": "data",
+    "pipeline_weblog": "/Users/u1528314/Documents/radioastro-ml/collect/experiments/compute_background_RMS_20260903T133414/0012-399/vla_pipeline/pipeline/pipeline-20260903T193606",
+    "requested_imsize": [
+      256,
+      256
+    ],
+    "restart": true,
+    "restoration": true,
+    "restoringbeam": "common",
+    "robust": 0.5,
+    "savemodel": "none",
+    "scan": [
+      "3,5,7,9,11,13,15,17,19,21,23,25,27,29,31,33,35"
+    ],
+    "specmode": "mfs",
+    "spw": [
+      "0"
+    ],
+    "stokes": "I",
+    "threshold": "4.51e-05Jy",
+    "usemask": "user",
+    "usepointing": false,
+    "uvrange": ">0.0klambda",
+    "vis": [
+      "0012-399_pipeline_input.ms"
+    ],
+    "vla_background_rms_jy_per_beam": 0.00024,
+    "vla_background_rms_source": "pipeline_weblog",
+    "weighting": "briggs"
+  },
+  "engine": "vla_pipeline",
+  "input_value": "/Users/u1528314/Documents/radioastro-ml/collect/extracted/0012-399/0012-399/0012-399.ms",
+  "metric_units": {
+    "dynamic_range": "dimensionless",
+    "p99_5_over_scaled_mad": "dimensionless",
+    "p99_over_scaled_mad": "dimensionless",
+    "peak_over_scaled_mad": "dimensionless",
+    "residual_abs_peak_jy_per_beam": "Jy/beam",
+    "residual_max_jy_per_beam": "Jy/beam",
+    "residual_min_jy_per_beam": "Jy/beam",
+    "scaled_mad_jy_per_beam": "Jy/beam"
+  },
+  "metric_validity": {
+    "dynamic_range": true,
+    "p99_5_over_scaled_mad": true,
+    "p99_over_scaled_mad": true,
+    "peak_over_scaled_mad": true,
+    "residual_abs_peak_jy_per_beam": true,
+    "residual_max_jy_per_beam": true,
+    "residual_min_jy_per_beam": true,
+    "scaled_mad_jy_per_beam": true
+  },
+  "metrics": {
+    "dynamic_range": 3214.9953099181994,
+    "p99_5_over_scaled_mad": 4.619504237141444,
+    "p99_over_scaled_mad": 4.005445966098762,
+    "peak_over_scaled_mad": 7.71498717696535,
+    "residual_abs_peak_jy_per_beam": 0.0016249977052211761,
+    "residual_max_jy_per_beam": 0.0016249977052211761,
+    "residual_min_jy_per_beam": -0.0015785831492394209,
+    "scaled_mad_jy_per_beam": 0.0002106286981361336
+  },
+  "ms_path": "/Users/u1528314/Documents/radioastro-ml/collect/extracted/0012-399/0012-399/0012-399.ms",
+  "products": {
+    "clean_image": "/Users/u1528314/Documents/radioastro-ml/collect/experiments/compute_background_RMS_20260903T133414/0012-399/vla_pipeline/pipeline/oussid.s5_0.J0012-3954_sci.C_band.cont.regcal.I.iter1.image.tt0",
+    "clean_png": "/Users/u1528314/Documents/radioastro-ml/collect/experiments/compute_background_RMS_20260903T133414/0012-399/vla_pipeline/clean.png",
+    "dirty_image": "/Users/u1528314/Documents/radioastro-ml/collect/experiments/compute_background_RMS_20260903T133414/0012-399/vla_pipeline/pipeline/oussid.s5_0.J0012-3954_sci.C_band.cont.regcal.I.iter0.residual.tt0",
+    "dirty_png": "/Users/u1528314/Documents/radioastro-ml/collect/experiments/compute_background_RMS_20260903T133414/0012-399/vla_pipeline/dirty.png",
+    "mask_image": "/Users/u1528314/Documents/radioastro-ml/collect/experiments/compute_background_RMS_20260903T133414/0012-399/vla_pipeline/pipeline/oussid.s5_0.J0012-3954_sci.C_band.cont.regcal.I.iter1.mask",
+    "model_image": "/Users/u1528314/Documents/radioastro-ml/collect/experiments/compute_background_RMS_20260903T133414/0012-399/vla_pipeline/pipeline/oussid.s5_0.J0012-3954_sci.C_band.cont.regcal.I.iter1.model.tt0",
+    "psf_image": "/Users/u1528314/Documents/radioastro-ml/collect/experiments/compute_background_RMS_20260903T133414/0012-399/vla_pipeline/pipeline/oussid.s5_0.J0012-3954_sci.C_band.cont.regcal.I.iter1.psf.tt0",
+    "qa_json": "/Users/u1528314/Documents/radioastro-ml/collect/experiments/compute_background_RMS_20260903T133414/0012-399/vla_pipeline/qa.json",
+    "qa_text": "/Users/u1528314/Documents/radioastro-ml/collect/experiments/compute_background_RMS_20260903T133414/0012-399/vla_pipeline/qa.txt",
+    "residual_image": "/Users/u1528314/Documents/radioastro-ml/collect/experiments/compute_background_RMS_20260903T133414/0012-399/vla_pipeline/pipeline/oussid.s5_0.J0012-3954_sci.C_band.cont.regcal.I.iter1.residual.tt0",
+    "residual_png": "/Users/u1528314/Documents/radioastro-ml/collect/experiments/compute_background_RMS_20260903T133414/0012-399/vla_pipeline/residual.png"
+  },
+  "resolved_config": null,
+  "schema_version": 1,
+  "tclean_summary": {
+    "final_cycle_threshold_jy_per_beam": 0.0002766562975011766,
+    "final_model_flux_jy": 0.6769564151763916,
+    "final_peak_residual_jy_per_beam": 0.0010500751668587327,
+    "iterdone": 82,
+    "major_cycle_iteration_counts": [],
+    "minor_cycle_history": {
+      "0": {
+        "0": {
+          "0": {
+            "cycleStartIters": [
+              0.0,
+              13.0,
+              26.0,
+              40.0,
+              54.0,
+              80.0
+            ],
+            "cycleThresh": [
+              0.1744122952222824,
+              0.044333092868328094,
+              0.011268822476267815,
+              0.002614916767925024,
+              0.0006288192234933376,
+              0.0002766562975011766
+            ],
+            "iterDone": [
+              13.0,
+              13.0,
+              14.0,
+              14.0,
+              26.0,
+              2.0
+            ],
+            "masksum": [
+              12329.0,
+              12329.0,
+              12329.0,
+              12329.0,
+              12329.0,
+              12329.0
+            ],
+            "modelFlux": [
+              0.5051237344741821,
+              0.6335189938545227,
+              0.6673625707626343,
+              0.675338089466095,
+              0.6769583225250244,
+              0.6769564151763916
+            ],
+            "mpiServer": [
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "peakRes": [
+              0.17215532064437866,
+              0.04375933110713959,
+              0.010154355317354202,
+              0.002441846299916506,
+              0.0010743137681856751,
+              0.0010500751668587327
+            ],
+            "peakResNM": [
+              0.17215532064437866,
+              0.04375933110713959,
+              0.010154355317354202,
+              0.002441846299916506,
+              0.0016282516298815608,
+              0.0016250008484348655
+            ],
+            "startIterDone": [
+              0.0,
+              13.0,
+              26.0,
+              40.0,
+              54.0,
+              80.0
+            ],
+            "startModelFlux": [
+              0.0,
+              0.5051237344741821,
+              0.6335189938545227,
+              0.6673625707626343,
+              0.675338089466095,
+              0.6769583225250244
+            ],
+            "startPeakRes": [
+              0.6772790551185608,
+              0.17215459048748016,
+              0.043759170919656754,
+              0.010154263116419315,
+              0.002441835356876254,
+              0.0010743137681856751
+            ],
+            "startPeakResNM": [
+              0.6772790551185608,
+              0.17215459048748016,
+              0.043759170919656754,
+              0.010154263116419315,
+              0.002441835356876254,
+              0.0016282552387565374
+            ],
+            "stopCode": [
+              2.0,
+              2.0,
+              2.0,
+              2.0,
+              5.0,
+              6.0
+            ]
+          }
+        }
+      }
+    },
+    "nmajordone": 6,
+    "raw": {
+      "cleanmask": "/Users/u1528314/Documents/radioastro-ml/collect/experiments/compute_background_RMS_20260903T133414/0012-399/vla_pipeline/pipeline/central_clean_0.mask",
+      "image": "oussid.s5_0.J0012-3954_sci.C_band.cont.regcal.I.iter1.image.pbcor",
+      "imaging_params": {
+        "antenna": [
+          "0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26&"
+        ],
+        "calcpsf": false,
+        "calcres": false,
+        "cell": [
+          "0.15arcsec"
+        ],
+        "cfcache": "",
+        "cyclefactor": 3.0,
+        "datacolumn": "data",
+        "deconvolver": "mtmfs",
+        "fastnoise": true,
+        "field": "J0012-3954",
+        "fullsummary": true,
+        "gridder": "standard",
+        "imagename": "oussid.s5_0.J0012-3954_sci.C_band.cont.regcal.I.iter1",
+        "imsize": [
+          256,
+          256
+        ],
+        "intent": "OBSERVE_TARGET#ON_SOURCE",
+        "interactive": false,
+        "mask": "/Users/u1528314/Documents/radioastro-ml/collect/experiments/compute_background_RMS_20260903T133414/0012-399/vla_pipeline/pipeline/central_clean_0.mask",
+        "mosweight": false,
+        "nchan": -1,
+        "niter": 10000,
+        "nmajor": 300,
+        "npixels": 0,
+        "nsigma": 5.0,
+        "nterms": 1,
+        "outframe": "LSRK",
+        "parallel": false,
+        "pbcor": true,
+        "pblimit": -0.1,
+        "perchanweightdensity": false,
+        "phasecenter": "ICRS 00:12:59.9074 -039.54.25.819",
+        "pointingoffsetsigdev": null,
+        "psfcutoff": null,
+        "psfphasecenter": null,
+        "restart": true,
+        "restoration": true,
+        "restoringbeam": "common",
+        "robust": 0.5,
+        "rotatepastep": null,
+        "savemodel": "none",
+        "scan": [
+          "3,5,7,9,11,13,15,17,19,21,23,25,27,29,31,33,35"
+        ],
+        "smallscalebias": null,
+        "specmode": "mfs",
+        "spw": [
+          "0"
+        ],
+        "start": "",
+        "startmodel": "",
+        "stokes": "I",
+        "threshold": "4.51e-05Jy",
+        "usemask": "user",
+        "usepointing": false,
+        "uvrange": ">0.0klambda",
+        "vis": [
+          "0012-399_pipeline_input.ms"
+        ],
+        "wbawp": null,
+        "weighting": "briggs",
+        "width": "",
+        "wprojplanes": null
+      },
+      "iterdone": 82,
+      "model": "oussid.s5_0.J0012-3954_sci.C_band.cont.regcal.I.iter1.model",
+      "nmajordone": 6,
+      "pipeline_iterations": {
+        "0": {
+          "imaging_params": {
+            "antenna": [
+              "0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26&"
+            ],
+            "cell": [
+              "0.15arcsec"
+            ],
+            "cfcache": "",
+            "cyclefactor": 3.0,
+            "datacolumn": "data",
+            "deconvolver": "mtmfs",
+            "fastnoise": true,
+            "field": "J0012-3954",
+            "fullsummary": true,
+            "gridder": "standard",
+            "imagename": "oussid.s5_0.J0012-3954_sci.C_band.cont.regcal.I.iter0",
+            "imsize": [
+              256,
+              256
+            ],
+            "intent": "OBSERVE_TARGET#ON_SOURCE",
+            "interactive": false,
+            "mosweight": false,
+            "nchan": -1,
+            "niter": 0,
+            "npixels": 0,
+            "nsigma": 5.0,
+            "nterms": 1,
+            "outframe": "LSRK",
+            "parallel": false,
+            "pbcor": false,
+            "pblimit": -0.1,
+            "perchanweightdensity": false,
+            "phasecenter": "ICRS 00:12:59.9074 -039.54.25.819",
+            "pointingoffsetsigdev": null,
+            "psfcutoff": null,
+            "psfphasecenter": null,
+            "restoration": false,
+            "restoringbeam": "common",
+            "robust": 0.5,
+            "rotatepastep": null,
+            "savemodel": "none",
+            "scan": [
+              "3,5,7,9,11,13,15,17,19,21,23,25,27,29,31,33,35"
+            ],
+            "smallscalebias": null,
+            "specmode": "mfs",
+            "spw": [
+              "0"
+            ],
+            "start": "",
+            "startmodel": "",
+            "stokes": "I",
+            "threshold": "0.0mJy",
+            "usepointing": false,
+            "uvrange": ">0.0klambda",
+            "vis": [
+              "0012-399_pipeline_input.ms"
+            ],
+            "wbawp": null,
+            "weighting": "briggs",
+            "width": "",
+            "wprojplanes": null
+          },
+          "residual": "oussid.s5_0.J0012-3954_sci.C_band.cont.regcal.I.iter0.residual"
+        },
+        "1": {
+          "cleanmask": "/Users/u1528314/Documents/radioastro-ml/collect/experiments/compute_background_RMS_20260903T133414/0012-399/vla_pipeline/pipeline/central_clean_0.mask",
+          "image": "oussid.s5_0.J0012-3954_sci.C_band.cont.regcal.I.iter1.image.pbcor",
+          "imaging_params": {
+            "antenna": [
+              "0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26&"
+            ],
+            "calcpsf": false,
+            "calcres": false,
+            "cell": [
+              "0.15arcsec"
+            ],
+            "cfcache": "",
+            "cyclefactor": 3.0,
+            "datacolumn": "data",
+            "deconvolver": "mtmfs",
+            "fastnoise": true,
+            "field": "J0012-3954",
+            "fullsummary": true,
+            "gridder": "standard",
+            "imagename": "oussid.s5_0.J0012-3954_sci.C_band.cont.regcal.I.iter1",
+            "imsize": [
+              256,
+              256
+            ],
+            "intent": "OBSERVE_TARGET#ON_SOURCE",
+            "interactive": false,
+            "mask": "/Users/u1528314/Documents/radioastro-ml/collect/experiments/compute_background_RMS_20260903T133414/0012-399/vla_pipeline/pipeline/central_clean_0.mask",
+            "mosweight": false,
+            "nchan": -1,
+            "niter": 10000,
+            "nmajor": 300,
+            "npixels": 0,
+            "nsigma": 5.0,
+            "nterms": 1,
+            "outframe": "LSRK",
+            "parallel": false,
+            "pbcor": true,
+            "pblimit": -0.1,
+            "perchanweightdensity": false,
+            "phasecenter": "ICRS 00:12:59.9074 -039.54.25.819",
+            "pointingoffsetsigdev": null,
+            "psfcutoff": null,
+            "psfphasecenter": null,
+            "restart": true,
+            "restoration": true,
+            "restoringbeam": "common",
+            "robust": 0.5,
+            "rotatepastep": null,
+            "savemodel": "none",
+            "scan": [
+              "3,5,7,9,11,13,15,17,19,21,23,25,27,29,31,33,35"
+            ],
+            "smallscalebias": null,
+            "specmode": "mfs",
+            "spw": [
+              "0"
+            ],
+            "start": "",
+            "startmodel": "",
+            "stokes": "I",
+            "threshold": "4.51e-05Jy",
+            "usemask": "user",
+            "usepointing": false,
+            "uvrange": ">0.0klambda",
+            "vis": [
+              "0012-399_pipeline_input.ms"
+            ],
+            "wbawp": null,
+            "weighting": "briggs",
+            "width": "",
+            "wprojplanes": null
+          },
+          "model": "oussid.s5_0.J0012-3954_sci.C_band.cont.regcal.I.iter1.model",
+          "nmajordone": 6,
+          "residual": "oussid.s5_0.J0012-3954_sci.C_band.cont.regcal.I.iter1.residual",
+          "summaryminor": {
+            "0": {
+              "0": {
+                "0": {
+                  "cycleStartIters": [
+                    0.0,
+                    13.0,
+                    26.0,
+                    40.0,
+                    54.0,
+                    80.0
+                  ],
+                  "cycleThresh": [
+                    0.1744122952222824,
+                    0.044333092868328094,
+                    0.011268822476267815,
+                    0.002614916767925024,
+                    0.0006288192234933376,
+                    0.0002766562975011766
+                  ],
+                  "iterDone": [
+                    13.0,
+                    13.0,
+                    14.0,
+                    14.0,
+                    26.0,
+                    2.0
+                  ],
+                  "masksum": [
+                    12329.0,
+                    12329.0,
+                    12329.0,
+                    12329.0,
+                    12329.0,
+                    12329.0
+                  ],
+                  "modelFlux": [
+                    0.5051237344741821,
+                    0.6335189938545227,
+                    0.6673625707626343,
+                    0.675338089466095,
+                    0.6769583225250244,
+                    0.6769564151763916
+                  ],
+                  "mpiServer": [
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0
+                  ],
+                  "peakRes": [
+                    0.17215532064437866,
+                    0.04375933110713959,
+                    0.010154355317354202,
+                    0.002441846299916506,
+                    0.0010743137681856751,
+                    0.0010500751668587327
+                  ],
+                  "peakResNM": [
+                    0.17215532064437866,
+                    0.04375933110713959,
+                    0.010154355317354202,
+                    0.002441846299916506,
+                    0.0016282516298815608,
+                    0.0016250008484348655
+                  ],
+                  "startIterDone": [
+                    0.0,
+                    13.0,
+                    26.0,
+                    40.0,
+                    54.0,
+                    80.0
+                  ],
+                  "startModelFlux": [
+                    0.0,
+                    0.5051237344741821,
+                    0.6335189938545227,
+                    0.6673625707626343,
+                    0.675338089466095,
+                    0.6769583225250244
+                  ],
+                  "startPeakRes": [
+                    0.6772790551185608,
+                    0.17215459048748016,
+                    0.043759170919656754,
+                    0.010154263116419315,
+                    0.002441835356876254,
+                    0.0010743137681856751
+                  ],
+                  "startPeakResNM": [
+                    0.6772790551185608,
+                    0.17215459048748016,
+                    0.043759170919656754,
+                    0.010154263116419315,
+                    0.002441835356876254,
+                    0.0016282552387565374
+                  ],
+                  "stopCode": [
+                    2.0,
+                    2.0,
+                    2.0,
+                    2.0,
+                    5.0,
+                    6.0
+                  ]
+                }
+              }
+            }
+          }
+        }
+      },
+      "residual": "oussid.s5_0.J0012-3954_sci.C_band.cont.regcal.I.iter1.residual",
+      "stopDescription": "any combination of n-sigma and other valid exit criterion",
+      "stopcode": 8,
+      "summaryminor": {
+        "0": {
+          "0": {
+            "0": {
+              "cycleStartIters": [
+                0.0,
+                13.0,
+                26.0,
+                40.0,
+                54.0,
+                80.0
+              ],
+              "cycleThresh": [
+                0.1744122952222824,
+                0.044333092868328094,
+                0.011268822476267815,
+                0.002614916767925024,
+                0.0006288192234933376,
+                0.0002766562975011766
+              ],
+              "iterDone": [
+                13.0,
+                13.0,
+                14.0,
+                14.0,
+                26.0,
+                2.0
+              ],
+              "masksum": [
+                12329.0,
+                12329.0,
+                12329.0,
+                12329.0,
+                12329.0,
+                12329.0
+              ],
+              "modelFlux": [
+                0.5051237344741821,
+                0.6335189938545227,
+                0.6673625707626343,
+                0.675338089466095,
+                0.6769583225250244,
+                0.6769564151763916
+              ],
+              "mpiServer": [
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0
+              ],
+              "peakRes": [
+                0.17215532064437866,
+                0.04375933110713959,
+                0.010154355317354202,
+                0.002441846299916506,
+                0.0010743137681856751,
+                0.0010500751668587327
+              ],
+              "peakResNM": [
+                0.17215532064437866,
+                0.04375933110713959,
+                0.010154355317354202,
+                0.002441846299916506,
+                0.0016282516298815608,
+                0.0016250008484348655
+              ],
+              "startIterDone": [
+                0.0,
+                13.0,
+                26.0,
+                40.0,
+                54.0,
+                80.0
+              ],
+              "startModelFlux": [
+                0.0,
+                0.5051237344741821,
+                0.6335189938545227,
+                0.6673625707626343,
+                0.675338089466095,
+                0.6769583225250244
+              ],
+              "startPeakRes": [
+                0.6772790551185608,
+                0.17215459048748016,
+                0.043759170919656754,
+                0.010154263116419315,
+                0.002441835356876254,
+                0.0010743137681856751
+              ],
+              "startPeakResNM": [
+                0.6772790551185608,
+                0.17215459048748016,
+                0.043759170919656754,
+                0.010154263116419315,
+                0.002441835356876254,
+                0.0016282552387565374
+              ],
+              "stopCode": [
+                2.0,
+                2.0,
+                2.0,
+                2.0,
+                5.0,
+                6.0
+              ]
+            }
+          }
+        }
+      }
+    },
+    "source": "pipeline_context",
+    "stop_description": "any combination of n-sigma and other valid exit criterion",
+    "stopcode": 8
+  },
+  "visibility_id": "0012-399",
+  "vla_background_rms_jy_per_beam": 0.00024,
+  "warnings": []
+}
