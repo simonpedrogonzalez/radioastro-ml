@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Literal, Optional, Tuple
 
@@ -122,6 +122,35 @@ class BeamRegion:
 
 
 @dataclass(frozen=True)
+class MetricDefinition:
+    """Stable human- and report-facing definition of one image metric."""
+
+    key: str
+    name: str
+    formula: str
+    latex: str
+    description: str
+    unit: str
+
+    def __repr__(self) -> str:
+        return f"{self.name}={self.formula}"
+
+    def to_report_dict(self) -> Dict[str, str]:
+        return {
+            "key": self.key,
+            "name": self.name,
+            "formula": self.formula,
+            "latex": self.latex,
+            "description": self.description,
+            "unit": self.unit,
+        }
+
+    def format_value(self, value: str) -> str:
+        unit = "" if self.unit == "dimensionless" else f" {self.unit}"
+        return f"{self!r}={value}{unit}"
+
+
+@dataclass(frozen=True)
 class RegionMetrics:
     n_pixels: int
     area_synthesized_beams: float
@@ -170,6 +199,8 @@ class QAReport:
     tclean_summary: Optional[TcleanRunSummary]
     pipeline_background: Optional[PipelineBackground]
     warnings: Tuple[str, ...] = ()
+    plot_recipes: Dict[str, Any] = field(default_factory=dict)
+    temporary_products: Dict[str, Optional[Path]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -180,15 +211,18 @@ class ImagingResult:
     output_dir: Path
     resolved_config: Optional[ResolvedImagingConfig]
     effective_imaging_parameters: Dict[str, Any]
-    dirty_image: Path
-    clean_image: Path
-    residual_image: Path
+    dirty_image: Optional[Path]
+    clean_image: Optional[Path]
+    residual_image: Optional[Path]
+    dirty_fits: Path
+    clean_fits: Path
+    residual_fits: Path
     model_image: Optional[Path]
     mask_image: Optional[Path]
     psf_image: Optional[Path]
-    dirty_png: Path
-    clean_png: Path
-    residual_png: Path
+    dirty_png: Optional[Path]
+    clean_png: Optional[Path]
+    residual_png: Optional[Path]
     qa_text: Path
     qa_json: Path
     tclean_summary: Optional[TcleanRunSummary]

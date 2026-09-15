@@ -19,7 +19,7 @@ stand-alone scripts with hard-coded inputs and outputs.
 
 | File | Current responsibility |
 | --- | --- |
-| [`scripts/corruption.py`](../scripts/corruption.py) | `Corruption`, `GainCorruption`, and the concrete `AntennaGainCorruption` builder/applier. |
+| [`scripts/corruption/core.py`](../scripts/corruption/core.py) | `Corruption`, `GainCorruption`, and the concrete `AntennaGainCorruption` builder/applier. |
 | [`scripts/corrfn.py`](../scripts/corrfn.py) | Time-dependent scalar models: linear drift, sine waves, random-phase sine waves, and fractional Brownian motion (fBM). |
 | [`scripts/timegrid.py`](../scripts/timegrid.py) | Converts a solution interval such as `"10m"` into gain-table sampling knots and declares interpolation behavior. |
 | [`scripts/corrtab_utils.py`](../scripts/corrtab_utils.py) | Builds an identity CASA gain table, represents its row metadata as `GTab`, and filters/groups rows with `GTabQuery`. |

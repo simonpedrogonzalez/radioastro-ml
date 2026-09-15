@@ -456,6 +456,7 @@ def image_ms_VLA_pipe(
     imsize: int | Sequence[int] = DEFAULT_IMSIZE,
     mask_nbeams: Optional[float] = DEFAULT_MASK_NBEAMS,
     metric_region: BeamRegion = BeamRegion(),
+    keep_intermediate_products: bool = False,
 ) -> ImagingResult:
     """Image one MS with a beam-scaled central mask on an explicitly sized grid."""
     requested_imsize = normalize_imsize(imsize)
@@ -586,6 +587,7 @@ def image_ms_VLA_pipe(
         warnings=tuple(warnings),
         metric_region=metric_region,
         pipeline_background=pipeline_background,
+        keep_intermediate_products=keep_intermediate_products,
     )
 
 

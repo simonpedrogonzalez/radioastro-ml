@@ -85,6 +85,7 @@ def process_sample(ms_path: Path, experiment_dir: Path) -> dict:
         ms_path,
         experiment_dir / sample_id / "vla_pipeline",
         imsize=IMSIZE,
+        keep_intermediate_products=True,
     )
     return {
         "id": sample_id,

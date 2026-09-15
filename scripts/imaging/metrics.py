@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Iterable, Optional, Sequence
 
 from .config import read_beam
-from .models import Beam, BeamRegion, ImageMetrics, RegionMetrics
+from .models import Beam, BeamRegion, ImageMetrics, MetricDefinition, RegionMetrics
 
 
 @dataclass(frozen=True)
@@ -307,6 +307,63 @@ METRIC_UNITS: dict[str, Any] = {
 }
 
 
+IMAGING_METRIC_DEFINITIONS: tuple[MetricDefinition, ...] = (
+    MetricDefinition(
+        key="sigma",
+        name="sigma",
+        formula="1.4826*median(|R-median(R)|)",
+        latex=r"\sigma=1.4826\,\operatorname{median}(|R-\operatorname{median}(R)|)",
+        description="Robust residual noise measured inside the plotted metric annulus.",
+        unit="Jy/beam",
+    ),
+    MetricDefinition(
+        key="rms",
+        name="rms",
+        formula="sqrt(mean(R^2))",
+        latex=r"\mathrm{rms}=\sqrt{\operatorname{mean}(R^2)}",
+        description="Residual root-mean-square inside the same metric annulus.",
+        unit="Jy/beam",
+    ),
+    MetricDefinition(
+        key="max",
+        name="max",
+        formula="max(|R|)/sigma",
+        latex=r"\mathrm{max}=\max(|R|)/\sigma",
+        description="Largest absolute residual in robust-noise units.",
+        unit="dimensionless",
+    ),
+    MetricDefinition(
+        key="p99",
+        name="p99",
+        formula="P99(|R|)/sigma",
+        latex=r"p_{99}=P_{99}(|R|)/\sigma",
+        description="99th percentile absolute residual in robust-noise units.",
+        unit="dimensionless",
+    ),
+    MetricDefinition(
+        key="p995",
+        name="p995",
+        formula="P99.5(|R|)/sigma",
+        latex=r"p_{99.5}=P_{99.5}(|R|)/\sigma",
+        description="99.5th percentile absolute residual in robust-noise units.",
+        unit="dimensionless",
+    ),
+    MetricDefinition(
+        key="DR",
+        name="DR",
+        formula="max(I_clean)/sigma",
+        latex=r"\mathrm{DR}=\max(I_{\mathrm{clean}})/\sigma",
+        description="Clean-image peak divided by the robust residual noise.",
+        unit="dimensionless",
+    ),
+)
+
+
+def imaging_metric_definitions() -> tuple[dict[str, str], ...]:
+    """Return the canonical image-metric descriptions for external reports."""
+    return tuple(definition.to_report_dict() for definition in IMAGING_METRIC_DEFINITIONS)
+
+
 def _new_image():
     try:
         from casatools import image
@@ -525,8 +582,10 @@ def vla_pipeline_annulus_rms(
 
 
 __all__ = [
+    "IMAGING_METRIC_DEFINITIONS",
     "METRIC_UNITS",
     "beam_region_mask",
+    "imaging_metric_definitions",
     "measure_image_metrics",
     "measure_pb_region",
     "summarize_residual_pixels",

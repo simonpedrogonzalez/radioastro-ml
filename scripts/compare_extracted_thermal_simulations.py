@@ -252,9 +252,9 @@ def _verify_completed_entry(entry: dict[str, Any], experiment_dir: Path) -> None
         )
         for key in ("original_result_dir", "simulation_result_dir")
     ]
-    if any(int(qa.get("schema_version", 1)) != 2 for qa in qa_reports):
+    if any(int(qa.get("schema_version", 1)) not in {2, 3} for qa in qa_reports):
         raise RuntimeError(
-            f"Completed sample {entry.get('id')} does not use QA schema version 2"
+            f"Completed sample {entry.get('id')} does not use a supported QA schema"
         )
     regions = [(qa.get("metrics", {}) or {}).get("region") for qa in qa_reports]
     if regions[0] != regions[1] or regions[0] != entry.get("metric_region"):
@@ -302,6 +302,7 @@ def process_sample(ms_path: Path, experiment_dir: Path) -> dict[str, Any]:
             sample_dir / "original" / "default_imaging",
             imsize=IMAGING_IMSIZE,
             metric_region_resolver=metric_region_for_resolved_grid,
+            keep_intermediate_products=True,
         )
         metric_region = original.qa.metrics.region
 
@@ -353,6 +354,7 @@ def process_sample(ms_path: Path, experiment_dir: Path) -> dict[str, Any]:
             sample_dir / "simulation" / "default_imaging",
             imsize=IMAGING_IMSIZE,
             metric_region=metric_region,
+            keep_intermediate_products=True,
         )
         _assert_matched_imaging_settings(original, simulated)
         if original.qa.metrics.region != simulated.qa.metrics.region:

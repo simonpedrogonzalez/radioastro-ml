@@ -52,21 +52,36 @@ class Imaging0012399IntegrationTests(unittest.TestCase):
                 metric_region_resolver=lambda _: region,
             )
             for path in (
-                result.dirty_image,
-                result.clean_image,
-                result.residual_image,
-                result.dirty_png,
-                result.clean_png,
-                result.residual_png,
+                result.dirty_fits,
+                result.clean_fits,
+                result.residual_fits,
                 result.qa_text,
                 result.qa_json,
             ):
                 self.assertTrue(path.exists(), path)
+            self.assertIsNone(result.dirty_image)
+            self.assertIsNone(result.clean_image)
+            self.assertIsNone(result.residual_image)
+            self.assertIsNone(result.dirty_png)
             payload = json.loads(result.qa_json.read_text(encoding="utf-8"))
             metrics = payload["metrics"]
-            self.assertEqual(payload["schema_version"], 2)
+            self.assertEqual(payload["schema_version"], 3)
             self.assertEqual(payload["visibility_id"], "0012-399")
             self.assertEqual(payload["engine"], "direct")
+            self.assertEqual(
+                payload["products"],
+                {
+                    "dirty_fits": "dirty.fits.gz",
+                    "clean_fits": "clean.fits.gz",
+                    "residual_fits": "residual.fits.gz",
+                    "qa_text": "qa.txt",
+                    "qa_json": "qa.json",
+                },
+            )
+            self.assertFalse((result.output_dir / "dirty.png").exists())
+            self.assertFalse((result.output_dir / "clean.png").exists())
+            self.assertFalse((result.output_dir / "residual.png").exists())
+            self.assertEqual(set(payload["plot_recipes"]), {"dirty", "clean", "residual"})
             self.assertEqual(
                 metrics["region"],
                 {"min_radius_beams": 3.0, "max_radius_beams": None},
@@ -94,6 +109,9 @@ class Imaging0012399IntegrationTests(unittest.TestCase):
                 metric_region=BeamRegion(min_radius_beams=3.0),
             )
             payload = json.loads(result.qa_json.read_text(encoding="utf-8"))
+            for path in (result.dirty_fits, result.clean_fits, result.residual_fits):
+                self.assertTrue(path.exists(), path)
+            self.assertIsNone(result.dirty_image)
             self.assertEqual(payload["engine"], "vla_pipeline")
             self.assertIsNone(payload["resolved_config"])
             self.assertEqual(payload["effective_imaging_parameters"]["requested_imsize"], [256, 256])

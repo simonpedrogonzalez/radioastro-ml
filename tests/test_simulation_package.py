@@ -3,6 +3,7 @@ from __future__ import annotations
 import inspect
 import math
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -355,19 +356,58 @@ class NoiseSelectorTests(unittest.TestCase):
 
 
 class PublicContractTests(unittest.TestCase):
+    def test_versioned_reports_write_as_a_pair_and_read_schema_one(self):
+        report = {
+            "schema_version": simulation.SIMULATION_REPORT_SCHEMA_VERSION,
+            "sample_id": "sample",
+            "components": [],
+            "noise": None,
+            "operations": ["copy", "weights"],
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            json_path, text_path = simulation.write_simulation_reports(
+                report, root / "simulation.json", root / "simulation.txt"
+            )
+            self.assertEqual(simulation.load_simulation_report(json_path), report)
+            self.assertIn("Operation stages", text_path.read_text(encoding="utf-8"))
+            legacy = root / "legacy.json"
+            legacy.write_text('{"schema_version": 1}\n', encoding="utf-8")
+            self.assertEqual(simulation.load_simulation_report(legacy)["schema_version"], 1)
+
+    def test_nonfinite_simulation_report_leaves_no_pair(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with self.assertRaisesRegex(ValueError, "strict JSON"):
+                simulation.write_simulation_reports(
+                    {
+                        "schema_version": simulation.SIMULATION_REPORT_SCHEMA_VERSION,
+                        "bad": float("nan"),
+                    },
+                    root / "simulation.json",
+                    root / "simulation.txt",
+                )
+            self.assertFalse((root / "simulation.json").exists())
+            self.assertFalse((root / "simulation.txt").exists())
+
     def test_public_exports_are_exact(self):
         self.assertEqual(
             set(simulation.__all__),
             {
                 "SimulationResult",
+                "SIMULATION_REPORT_SCHEMA_VERSION",
+                "SUPPORTED_SIMULATION_REPORT_SCHEMAS",
                 "get_phase_center",
                 "get_reference_frequency",
                 "natural_image_rms_from_simplenoise",
+                "load_simulation_report",
                 "phase_center_point_source",
                 "phase_center_point_source_from_snr",
                 "simulate_ms",
+                "render_simulation_text",
                 "simplenoise_from_image_rms",
                 "theoretical_vla_simplenoise",
+                "write_simulation_reports",
             },
         )
         parameters = inspect.signature(simulation.simulate_ms).parameters

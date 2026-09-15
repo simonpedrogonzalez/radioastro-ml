@@ -10,10 +10,11 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
+from .metrics import IMAGING_METRIC_DEFINITIONS
 from .models import QAReport, TcleanRunSummary
 
 
-QA_SCHEMA_VERSION = 2
+QA_SCHEMA_VERSION = 3
 
 
 def json_safe(value: Any) -> Any:
@@ -169,11 +170,39 @@ def normalize_tclean_summary(
 
 def write_qa_reports(report: QAReport, text_path: Path, json_path: Path) -> None:
     payload = json_safe(report)
-    json_path.write_text(
-        json.dumps(payload, indent=2, sort_keys=True, allow_nan=False) + "\n",
-        encoding="utf-8",
+    for field in ("products", "temporary_products"):
+        for name, value in payload.get(field, {}).items():
+            if not isinstance(value, str):
+                continue
+            path = Path(value)
+            if path.is_absolute():
+                try:
+                    payload[field][name] = path.relative_to(json_path.parent).as_posix()
+                except ValueError:
+                    pass
+    from scripts.preprocessing.schema import atomic_write_json
+
+    atomic_write_json(json_path, payload)
+    destination = text_path.expanduser().resolve()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    rendered = render_qa_text(report)
+    import os
+    import tempfile
+
+    handle = tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", dir=destination.parent,
+        prefix=f".{destination.name}.", suffix=".tmp", delete=False
     )
-    text_path.write_text(render_qa_text(report), encoding="utf-8")
+    temporary = Path(handle.name)
+    try:
+        with handle:
+            handle.write(rendered)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, destination)
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        raise
 
 
 def _display(value: Any, precision: int = 6) -> str:
@@ -306,28 +335,24 @@ def _metric_lines(report: QAReport) -> List[str]:
     region = metrics.region
     minimum = "center" if region.min_radius_beams is None else f"{_display(region.min_radius_beams)} beams"
     maximum = "edge" if region.max_radius_beams is None else f"{_display(region.max_radius_beams)} beams"
+    definitions = {definition.key: definition for definition in IMAGING_METRIC_DEFINITIONS}
     lines = [
         f"metric region = radial {minimum} to {maximum} (lower inclusive, upper exclusive)",
         f"selected area = {residual.n_pixels} pixels = {_display(residual.area_synthesized_beams)} synthesized beams",
-        f"clean peak = global max(clean image) = {_display(metrics.clean_peak_jy_per_beam)} Jy/beam",
-        f"residual RMS = sqrt(mean(residual^2)) = {_display(residual.rms_jy_per_beam)} Jy/beam",
-        "scaled MAD = 1.4826 x median(|residual - median(residual)|) = "
-        f"{_display(residual.scaled_mad_jy_per_beam)} Jy/beam",
+        f"clean_peak=max(I_clean)={_display(metrics.clean_peak_jy_per_beam)} Jy/beam",
+        definitions["rms"].format_value(_display(residual.rms_jy_per_beam)),
+        definitions["sigma"].format_value(_display(residual.scaled_mad_jy_per_beam)),
         "residual absolute peak = max(|residual|) = "
         f"{_display(residual.residual_abs_peak_jy_per_beam)} Jy/beam",
         f"residual minimum = min(residual) = {_display(residual.residual_min_jy_per_beam)} Jy/beam",
         f"residual maximum = max(residual) = {_display(residual.residual_max_jy_per_beam)} Jy/beam",
-        "peak / scaled MAD = max(|residual|) / scaled MAD = "
-        f"{_display(residual.peak_over_scaled_mad)}",
-        "p99 / scaled MAD = P99(|residual|) / scaled MAD = "
-        f"{_display(residual.p99_over_scaled_mad)}",
-        "p99.5 / scaled MAD = P99.5(|residual|) / scaled MAD = "
-        f"{_display(residual.p99_5_over_scaled_mad)}",
+        definitions["max"].format_value(_display(residual.peak_over_scaled_mad)),
+        definitions["p99"].format_value(_display(residual.p99_over_scaled_mad)),
+        definitions["p995"].format_value(_display(residual.p99_5_over_scaled_mad)),
         f"RMS / scaled MAD = {_display(residual.rms_over_scaled_mad)}",
         "dynamic range (RMS) = global max(clean image) / selected residual RMS = "
         f"{_display(metrics.dynamic_range_rms)}",
-        "dynamic range (robust) = global max(clean image) / selected residual scaled MAD = "
-        f"{_display(metrics.dynamic_range_scaled_mad)}",
+        definitions["DR"].format_value(_display(metrics.dynamic_range_scaled_mad)),
     ]
     if report.pipeline_background is not None:
         lines.append(

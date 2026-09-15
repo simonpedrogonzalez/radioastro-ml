@@ -9,8 +9,11 @@ from .config import (
     ImagingConfig,
 )
 from .imaging import image_ms
+from .fits import export_casa_fits, export_fits_triplet
 from .metrics import (
+    IMAGING_METRIC_DEFINITIONS,
     beam_region_mask,
+    imaging_metric_definitions,
     measure_image_metrics,
     measure_pb_region,
     summarize_residual_pixels,
@@ -24,6 +27,7 @@ from .models import (
     ImageGrid,
     ImagingResult,
     ImageMetrics,
+    MetricDefinition,
     MSBandMeta,
     QAReport,
     PipelineBackground,
@@ -33,6 +37,11 @@ from .models import (
     ResolvedImagingConfig,
     ResolvedMS,
     TcleanRunSummary,
+)
+from .plot_utils import (
+    casa_image_to_png,
+    shared_fits_display_limits,
+    write_fits_comparison_plots,
 )
 from .vla_pipeline import image_ms_VLA_pipe
 
@@ -50,7 +59,9 @@ __all__ = [
     "ImagingConfig",
     "ImagingResult",
     "ImageMetrics",
+    "IMAGING_METRIC_DEFINITIONS",
     "MSBandMeta",
+    "MetricDefinition",
     "QAReport",
     "PipelineBackground",
     "RegionMetrics",
@@ -60,10 +71,16 @@ __all__ = [
     "ResolvedMS",
     "TcleanRunSummary",
     "beam_region_mask",
+    "casa_image_to_png",
+    "export_casa_fits",
+    "export_fits_triplet",
     "image_ms",
     "image_ms_VLA_pipe",
+    "imaging_metric_definitions",
     "measure_image_metrics",
     "measure_pb_region",
+    "shared_fits_display_limits",
     "summarize_residual_pixels",
     "vla_pipeline_annulus_rms",
+    "write_fits_comparison_plots",
 ]

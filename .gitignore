@@ -225,3 +225,9 @@ collect/experiments
 
 # CASA table locks are runtime state, not regression-fixture data.
 tests/fixtures/**/table.lock
+
+AGENTS.md.backup
+
+.agent/CONTINUITY.md
+
+AGENTS.md

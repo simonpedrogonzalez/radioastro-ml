@@ -85,6 +85,12 @@ class _ConstantCurve:
         values = np.asarray(times, dtype=float)
         return np.full(values.shape, self.value, dtype=float)
 
+    def to_report_dict(self) -> dict[str, object]:
+        return {"type": "constant", "value": self.value}
+
+    def to_report_text(self) -> str:
+        return repr(self)
+
 
 def _resolve_manifest_path(experiment_dir: Path, value: object, *, name: str) -> Path:
     if not isinstance(value, str) or not value.strip():
@@ -281,10 +287,14 @@ def _run_variant(
 ) -> dict[str, Any]:
     # Lazy imports let source discovery and fast tests run outside CASA.
     os.environ.setdefault("MPLBACKEND", "Agg")
-    from scripts.corruption import AntennaGainCorruption
-    from scripts.corrtab_utils import GCOLS, GTabQuery
+    from scripts.corruption import (
+        AntennaGainCorruption,
+        GCOLS,
+        GTabQuery,
+        TimeGrid,
+        write_corruption_reports,
+    )
     from scripts.imaging import BeamRegion, DefaultImagingConfig, image_ms
-    from scripts.timegrid import TimeGrid
 
     variant_dir = experiment_dir / spec.name
     variant_dir.mkdir()
@@ -326,6 +336,20 @@ def _run_variant(
             str(copied_ms.resolve()), str(gain_table.resolve()), seed=spec.seed
         )
 
+    corruption_reports = write_corruption_reports(
+        corruption,
+        json_path=variant_dir / "corruption.json",
+        text_path=variant_dir / "corruption.txt",
+        context={
+            "name": "single_amp_vs_phase_corruption_simulation",
+            "sample_id": SAMPLE_ID,
+            "retained_sample_id": f"{SAMPLE_ID}_{spec.name}",
+            "variant": spec.name,
+            "application_index": 0,
+            "seed": spec.seed,
+        },
+    )
+
     region = BeamRegion(
         min_radius_beams=source.metric_min_radius_beams,
         max_radius_beams=source.metric_max_radius_beams,
@@ -336,6 +360,7 @@ def _run_variant(
         variant_dir / "default_imaging",
         imsize=source.imsize,
         metric_region=region,
+        keep_intermediate_products=True,
     )
     if result.qa.metrics.region != region:
         raise RuntimeError(
@@ -346,6 +371,8 @@ def _run_variant(
     required = (
         gain_table,
         images_dir / "corruption_function.png",
+        corruption_reports.json_path,
+        corruption_reports.text_path,
         result.dirty_png,
         result.clean_png,
         result.residual_png,
@@ -374,6 +401,12 @@ def _run_variant(
         "gain_table": _relative(gain_table, experiment_dir),
         "corruption_plot": _relative(
             images_dir / "corruption_function.png", experiment_dir
+        ),
+        "corruption_json": _relative(
+            corruption_reports.json_path, experiment_dir
+        ),
+        "corruption_text": _relative(
+            corruption_reports.text_path, experiment_dir
         ),
         "result_dir": _relative(result.output_dir, experiment_dir),
         "qa_json": _relative(result.qa_json, experiment_dir),

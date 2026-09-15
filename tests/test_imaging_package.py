@@ -22,10 +22,12 @@ from scripts.imaging import (
     DefaultImagingConfig,
     GridConfig,
     ImageMetrics,
+    IMAGING_METRIC_DEFINITIONS,
     PipelineBackground,
     QAReport,
     RegionMetrics,
     beam_region_mask,
+    export_casa_fits,
     image_ms,
     image_ms_VLA_pipe,
     measure_image_metrics,
@@ -40,7 +42,11 @@ from scripts.imaging.metadata import (
     resolve_path,
 )
 from scripts.imaging.qa import json_safe, normalize_tclean_summary, render_qa_text
-from scripts.imaging.plot_utils import _fits_beam_geometry, write_individual_plots
+from scripts.imaging.plot_utils import (
+    _fits_beam_geometry,
+    write_fits_comparison_plots,
+    write_individual_plots,
+)
 from scripts.imaging.metrics import _ImagePlane, _metric_validity
 from scripts.imaging.vla_pipeline import (
     _pipeline_summary,
@@ -81,6 +87,16 @@ class DefaultsAndMetadataTests(unittest.TestCase):
             inspect.signature(image_ms_VLA_pipe).parameters["metric_region"].default,
             BeamRegion(),
         )
+        self.assertEqual(
+            inspect.signature(image_ms).parameters["fits_invalid_policy"].default,
+            "error",
+        )
+
+    def test_fits_export_rejects_invalid_fill_configuration_before_casa(self):
+        with self.assertRaisesRegex(ValueError, "invalid_policy"):
+            export_casa_fits("unused", "unused.fits.gz", invalid_policy="ignore")
+        with self.assertRaisesRegex(ValueError, "fill_value"):
+            export_casa_fits("unused", "unused.fits.gz", fill_value=math.inf)
 
     def test_metric_region_resolver_is_exclusive_and_must_be_callable(self):
         # The comparison driver deliberately reloads local CASA packages when
@@ -285,10 +301,19 @@ class SummaryTests(unittest.TestCase):
         self.assertIn("Engine: vla_pipeline", rendered)
         self.assertIn("Input MS: /data/simulated_constant_0.7Jy_phasecenter.ms", rendered)
         self.assertIn("deconvolver=mtmfs | nterms=1", rendered)
-        self.assertIn("scaled MAD = 1.4826 x median", rendered)
-        self.assertIn("= 0.00015 Jy/beam", rendered)
+        self.assertIn(
+            "sigma=1.4826*median(|R-median(R)|)=0.00015 Jy/beam",
+            rendered,
+        )
+        self.assertIn("max=max(|R|)/sigma=6", rendered)
         self.assertNotIn("interactive", rendered)
         self.assertNotIn('"effective_imaging_parameters"', rendered)
+
+    def test_metric_definitions_have_stable_text_and_latex_representations(self):
+        definitions = {item.key: item for item in IMAGING_METRIC_DEFINITIONS}
+        self.assertEqual(repr(definitions["max"]), "max=max(|R|)/sigma")
+        self.assertEqual(definitions["DR"].latex, r"\mathrm{DR}=\max(I_{\mathrm{clean}})/\sigma")
+        self.assertIn("description", definitions["p995"].to_report_dict())
 
 
 class PipelineArtifactTests(unittest.TestCase):
@@ -465,6 +490,43 @@ class PlotTests(unittest.TestCase):
         header = {"BMAJ": 0.002, "BMIN": 0.001, "BPA": 45.0}
 
         self.assertEqual(_fits_beam_geometry(header, beam), (0.002, 0.001, 45.0))
+
+    def test_comparison_panels_reuse_canonical_plotter_and_channel_scales(self):
+        region = BeamRegion(min_radius_beams=3.0, max_radius_beams=8.0)
+        samples = [
+            (
+                "baseline",
+                "rho_corr=0",
+                {name: Path(f"baseline-{name}.fits.gz") for name in ("dirty", "clean", "residual")},
+            ),
+            (
+                "variant",
+                "rho_corr=10",
+                {name: Path(f"variant-{name}.fits.gz") for name in ("dirty", "clean", "residual")},
+            ),
+        ]
+        with tempfile.TemporaryDirectory() as temporary, patch(
+            "scripts.imaging.plot_utils.shared_fits_display_limits",
+            side_effect=[(-1.0, 1.0), (-2.0, 2.0), (-3.0, 3.0)],
+        ), patch(
+            "scripts.imaging.plot_utils.casa_image_to_png", return_value={"colormap": "inferno"}
+        ) as render:
+            rows, recipes = write_fits_comparison_plots(
+                samples, Path(temporary), metric_region=region
+            )
+
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(render.call_count, 6)
+        self.assertEqual(
+            recipes["limits_mjy_per_beam"],
+            {"dirty": [-1.0, 1.0], "clean": [-2.0, 2.0], "residual": [-3.0, 3.0]},
+        )
+        dirty_call = render.call_args_list[0]
+        residual_call = render.call_args_list[2]
+        self.assertEqual(dirty_call.kwargs["display_limits_mjy_per_beam"], (-1.0, 1.0))
+        self.assertIsNone(dirty_call.kwargs["metric_region"])
+        self.assertEqual(residual_call.kwargs["metric_region"], region)
+        self.assertTrue(all(item.kwargs["draw_beam"] for item in render.call_args_list))
 
 
 class BeamRegionMetricTests(unittest.TestCase):

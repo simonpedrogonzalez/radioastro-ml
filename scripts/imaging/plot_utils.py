@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import math
+import platform
 import tempfile
 from pathlib import Path
-from typing import Optional
+from typing import Mapping, Optional, Sequence
 
 from .metrics import beam_region_mask
 from .models import Beam, BeamRegion
@@ -47,14 +48,16 @@ def casa_image_to_png(
     robust_percentile: float = 99.5,
     metric_region: Optional[BeamRegion] = None,
     fallback_beam: Optional[Beam] = None,
-) -> None:
-    """Render one CASA image in mJy/beam with celestial axes."""
+    display_limits_mjy_per_beam: Optional[tuple[float, float]] = None,
+) -> dict[str, object]:
+    """Render one CASA image or retained FITS plane using the canonical style."""
     try:
         import matplotlib
 
         matplotlib.use("Agg", force=True)
         import matplotlib.pyplot as plt
         import numpy as np
+        import astropy
         from astropy.io import fits
         from astropy.wcs import WCS
         from casatasks import exportfits
@@ -67,20 +70,32 @@ def casa_image_to_png(
         ) from exc
 
     png_path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = tempfile.NamedTemporaryFile(
-        prefix=f".{png_path.stem}-", suffix=".fits", dir=str(png_path.parent), delete=False
+    image_path = Path(image_path)
+    source_is_fits = image_path.is_file() and image_path.name.casefold().endswith(
+        (".fits", ".fits.gz", ".fit", ".fit.gz")
     )
-    fits_path = Path(temporary.name)
-    temporary.close()
+    owns_fits_path = not source_is_fits
+    if source_is_fits:
+        fits_path = image_path
+    else:
+        temporary = tempfile.NamedTemporaryFile(
+            prefix=f".{png_path.stem}-",
+            suffix=".fits",
+            dir=str(png_path.parent),
+            delete=False,
+        )
+        fits_path = Path(temporary.name)
+        temporary.close()
     mask_fits_path = None
     try:
-        exportfits(
-            imagename=str(image_path),
-            fitsimage=str(fits_path),
-            overwrite=True,
-            dropstokes=False,
-            dropdeg=True,
-        )
+        if owns_fits_path:
+            exportfits(
+                imagename=str(image_path),
+                fitsimage=str(fits_path),
+                overwrite=True,
+                dropstokes=False,
+                dropdeg=True,
+            )
         with fits.open(fits_path) as hdul:
             values = np.squeeze(np.asarray(hdul[0].data))
             wcs = WCS(hdul[0].header).celestial
@@ -94,7 +109,15 @@ def casa_image_to_png(
             raise RuntimeError(f"No finite pixels in {image_path}")
         display = values * 1e3
         finite_values = display[finite]
-        if symmetric:
+        if display_limits_mjy_per_beam is not None:
+            if len(display_limits_mjy_per_beam) != 2:
+                raise ValueError("display_limits_mjy_per_beam must contain (vmin, vmax)")
+            vmin, vmax = (float(value) for value in display_limits_mjy_per_beam)
+            if not all(math.isfinite(value) for value in (vmin, vmax)) or vmin >= vmax:
+                raise ValueError(
+                    "display_limits_mjy_per_beam must be finite with vmin < vmax"
+                )
+        elif symmetric:
             limit = float(np.percentile(np.abs(finite_values), robust_percentile))
             vmin, vmax = -limit, limit
         else:
@@ -211,10 +234,163 @@ def casa_image_to_png(
         plt.tight_layout()
         figure.savefig(png_path, dpi=180)
         plt.close(figure)
+        return {
+            "source_plane": (
+                "retained FITS image" if source_is_fits else "squeezed CASA image"
+            ),
+            "display_unit": "mJy/beam",
+            "value_multiplier": 1000.0,
+            "vmin": vmin,
+            "vmax": vmax,
+            "robust_percentile": robust_percentile,
+            "symmetric": symmetric,
+            "colormap": "inferno",
+            "origin": "lower",
+            "interpolation": None,
+            "figure_size_inches": list(figure.get_size_inches()),
+            "dpi": 180,
+            "title": title or image_path.name,
+            "axis_labels": ["RA", "Dec"],
+            "colorbar_label": "mJy/beam",
+            "beam": {
+                "draw": draw_beam,
+                "major_deg": bmaj,
+                "minor_deg": bmin,
+                "position_angle_deg": bpa,
+                "edgecolor": "lime",
+                "linewidth": 1.5,
+            },
+            "metric_region": None
+            if metric_region is None
+            else {
+                "min_radius_beams": metric_region.min_radius_beams,
+                "max_radius_beams": metric_region.max_radius_beams,
+            },
+            "mask_contour_was_rendered": mask_path is not None,
+            "versions": {
+                "python": platform.python_version(),
+                "numpy": np.__version__,
+                "astropy": astropy.__version__,
+                "matplotlib": matplotlib.__version__,
+            },
+        }
     finally:
-        fits_path.unlink(missing_ok=True)
+        if owns_fits_path:
+            fits_path.unlink(missing_ok=True)
         if mask_fits_path is not None:
             mask_fits_path.unlink(missing_ok=True)
+
+
+def shared_fits_display_limits(
+    image_paths: Sequence[Path],
+    *,
+    symmetric: bool = True,
+    robust_percentile: float = 99.5,
+) -> tuple[float, float]:
+    """Calculate one mJy/beam color scale shared by retained FITS variants."""
+    try:
+        import numpy as np
+        from astropy.io import fits
+    except ImportError as exc:
+        raise RuntimeError("Astropy and NumPy are required to scale FITS plots") from exc
+    if not image_paths:
+        raise ValueError("image_paths must not be empty")
+    finite_values = []
+    for image_path in image_paths:
+        with fits.open(image_path) as hdul:
+            values = np.squeeze(np.asarray(hdul[0].data, dtype=float))
+        while values.ndim > 2:
+            values = values[0]
+        if values.ndim != 2:
+            raise RuntimeError(
+                f"Unexpected image dimensionality {values.ndim} for {image_path}"
+            )
+        selected = values[np.isfinite(values)] * 1e3
+        if selected.size:
+            finite_values.append(selected.reshape(-1))
+    if not finite_values:
+        raise RuntimeError("No finite pixels in FITS comparison")
+    combined = np.concatenate(finite_values)
+    if symmetric:
+        limit = float(np.percentile(np.abs(combined), robust_percentile))
+        vmin, vmax = -limit, limit
+    else:
+        vmin, vmax = (
+            float(value)
+            for value in np.percentile(
+                combined, [100.0 - robust_percentile, robust_percentile]
+            )
+        )
+    if not all(math.isfinite(value) for value in (vmin, vmax)) or vmin >= vmax:
+        raise RuntimeError(f"Invalid shared FITS display limits: {(vmin, vmax)!r}")
+    return vmin, vmax
+
+
+def write_fits_comparison_plots(
+    samples: Sequence[tuple[str, str, Mapping[str, Path]]],
+    output_dir: Path,
+    *,
+    metric_region: Optional[BeamRegion],
+    robust_percentile: float = 99.5,
+    display_limits_mjy_per_beam: Optional[
+        Mapping[str, tuple[float, float]]
+    ] = None,
+) -> tuple[list[dict[str, object]], dict[str, object]]:
+    """Plot retained variants through ``casa_image_to_png`` with shared scales.
+
+    Each tuple is ``(sample_key, title, {dirty, clean, residual})``. All
+    variants share one color range per image channel; residual plots also show
+    the exact metric annulus. Every panel retains its own WCS axes, colorbar,
+    and synthesized-beam glyph from the canonical imaging plotter.
+    """
+    required = ("dirty", "clean", "residual")
+    if not samples:
+        raise ValueError("samples must not be empty")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    if display_limits_mjy_per_beam is None:
+        limits = {
+            channel: shared_fits_display_limits(
+                [Path(products[channel]) for _, _, products in samples],
+                robust_percentile=robust_percentile,
+            )
+            for channel in required
+        }
+    else:
+        missing = set(required) - set(display_limits_mjy_per_beam)
+        if missing:
+            raise ValueError(f"Missing shared display limits for: {sorted(missing)}")
+        limits = {
+            channel: tuple(display_limits_mjy_per_beam[channel])
+            for channel in required
+        }
+    rows: list[dict[str, object]] = []
+    recipes: dict[str, object] = {
+        "shared_by": "image channel across all variants of one source",
+        "limits_mjy_per_beam": {
+            channel: list(channel_limits)
+            for channel, channel_limits in limits.items()
+        },
+        "panels": {},
+    }
+    panel_recipes = recipes["panels"]
+    assert isinstance(panel_recipes, dict)
+    for sample_key, title, products in samples:
+        row: dict[str, object] = {"key": sample_key, "title": title}
+        for channel in required:
+            destination = output_dir / f"{sample_key}_{channel}.png"
+            recipe = casa_image_to_png(
+                Path(products[channel]),
+                destination,
+                title=f"{title}: {channel}",
+                draw_beam=True,
+                robust_percentile=robust_percentile,
+                metric_region=metric_region if channel == "residual" else None,
+                display_limits_mjy_per_beam=limits[channel],
+            )
+            row[channel] = destination
+            panel_recipes[f"{sample_key}:{channel}"] = recipe
+        rows.append(row)
+    return rows, recipes
 
 
 def write_individual_plots(
@@ -228,19 +404,46 @@ def write_individual_plots(
     metric_region: Optional[BeamRegion] = None,
     fallback_beam: Optional[Beam] = None,
 ) -> tuple[Path, Path, Path]:
+    paths, _ = write_individual_plots_with_recipes(
+        dirty_image,
+        clean_image,
+        residual_image,
+        output_dir,
+        visibility_id=visibility_id,
+        mask_image=mask_image,
+        metric_region=metric_region,
+        fallback_beam=fallback_beam,
+    )
+    return paths
+
+
+def write_individual_plots_with_recipes(
+    dirty_image: Path,
+    clean_image: Path,
+    residual_image: Path,
+    output_dir: Path,
+    *,
+    visibility_id: Optional[str],
+    mask_image: Optional[Path] = None,
+    metric_region: Optional[BeamRegion] = None,
+    fallback_beam: Optional[Beam] = None,
+) -> tuple[tuple[Path, Path, Path], dict[str, dict[str, object]]]:
     label = visibility_id or "Measurement Set"
     dirty_png = output_dir / "dirty.png"
     clean_png = output_dir / "clean.png"
     residual_png = output_dir / "residual.png"
-    casa_image_to_png(dirty_image, dirty_png, title=f"{label} dirty", draw_beam=True)
-    casa_image_to_png(
+    recipes = {}
+    recipes["dirty"] = casa_image_to_png(
+        dirty_image, dirty_png, title=f"{label} dirty", draw_beam=True
+    )
+    recipes["clean"] = casa_image_to_png(
         clean_image,
         clean_png,
         title=f"{label} clean",
         mask_path=mask_image,
         draw_beam=True,
     )
-    casa_image_to_png(
+    recipes["residual"] = casa_image_to_png(
         residual_image,
         residual_png,
         title=f"{label} residual",
@@ -249,7 +452,13 @@ def write_individual_plots(
         metric_region=metric_region,
         fallback_beam=fallback_beam,
     )
-    return dirty_png, clean_png, residual_png
+    return (dirty_png, clean_png, residual_png), recipes
 
 
-__all__ = ["casa_image_to_png", "write_individual_plots"]
+__all__ = [
+    "casa_image_to_png",
+    "shared_fits_display_limits",
+    "write_fits_comparison_plots",
+    "write_individual_plots",
+    "write_individual_plots_with_recipes",
+]

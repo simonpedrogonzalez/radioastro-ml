@@ -1,0 +1,235 @@
+---
+format:
+  html:
+    toc: true
+    embed-resources: false
+page-layout: full
+jupyter: python3
+---
+
+<style>
+body { font-size: 0.82rem; }
+main.content { margin: 0 auto; max-width: 1800px; width: 97vw; }
+h1 { font-size: 1.55rem; }
+h2 { border-top: 2px solid #777; font-size: 1.2rem; padding-top: 0.8rem; }
+h3 { font-size: 1rem; margin: 0.8rem 0 0.25rem; }
+.summary { background: #f4f6f8; border-radius: 5px; padding: 0.65rem 0.8rem; }
+.metrics { border-collapse: collapse; font-size: 0.64rem; margin: 0.3rem 0 0.7rem; width: 100%; }
+.metrics th, .metrics td { border: 1px solid #ccc; padding: 0.22rem 0.3rem; text-align: right; }
+.metrics th:first-child, .metrics td:first-child { text-align: left; }
+.equations { background: #f7f7f7; border-left: 3px solid #777; font-size: 0.75rem; margin: 0.35rem 0 0.7rem; padding: 0.45rem 0.7rem; }
+.equation { display: inline-block; margin: 0.12rem 1.1rem 0.12rem 0; }
+.plot-grid { display: grid; gap: 0.35rem; grid-template-columns: 5rem repeat(5, minmax(0, 1fr)); margin: 0.35rem 0 0.9rem; width: 100%; }
+.plot-heading, .plot-row-label { align-items: center; display: flex; font-size: 0.68rem; font-weight: 600; justify-content: center; text-align: center; }
+.plot-cell img { display: block; height: auto; width: 100%; }
+.corruption-grid { display: grid; gap: 0.6rem; grid-template-columns: repeat(4, minmax(0, 1fr)); margin: 0.35rem 0 1rem; }
+.corruption-grid figure { margin: 0; }
+.corruption-grid figcaption { font-size: 0.7rem; text-align: center; }
+.corruption-grid img { height: auto; width: 100%; }
+.failure { color: #8a2525; }
+.muted { color: #555; }
+</style>
+
+```{python}
+#| echo: false
+#| output: asis
+
+import html
+import json
+import math
+from pathlib import Path
+
+
+HERE = Path.cwd()
+report = json.loads((HERE / "report.json").read_text(encoding="utf-8"))
+dataset_path = HERE / report.get("dataset_index", "dataset.json")
+dataset = json.loads(dataset_path.read_text(encoding="utf-8")) if dataset_path.exists() else {"samples": []}
+
+
+def load_json(path):
+    try:
+        return json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return {}
+
+
+def sample_records():
+    records = {}
+    for relative in dataset.get("samples", []):
+        manifest_path = (dataset_path.parent / relative).resolve()
+        manifest = load_json(manifest_path)
+        metadata = manifest.get("metadata") or {}
+        qa = load_json(manifest_path.parent / metadata.get("imaging_qa", ""))
+        corruptions = metadata.get("corruptions") or []
+        corruption = {}
+        if corruptions:
+            corruption = load_json(
+                manifest_path.parent / corruptions[0].get("corruption", "")
+            )
+        records[manifest.get("sample_id")] = {
+            "manifest": manifest,
+            "qa": qa,
+            "corruption": corruption,
+        }
+    return records
+
+
+records = sample_records()
+
+
+def esc(value):
+    return html.escape(str(value))
+
+
+def show(value):
+    if value is None or value == "":
+        return "—"
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return esc(value)
+    return "—" if not math.isfinite(number) else f"{number:.6g}"
+
+
+def equations(definitions):
+    items = []
+    for definition in definitions:
+        latex = esc(definition.get("latex", ""))
+        description = esc(definition.get("description", ""))
+        items.append(
+            f'<span class="equation" title="{description}">${latex}$</span>'
+        )
+    return '<div class="equations">' + "".join(items) + "</div>"
+
+
+def metric_row(source_id, suffix, level):
+    record = records.get(f"{source_id}_{suffix}", {})
+    qa_metrics = (record.get("qa", {}).get("metrics") or {})
+    residual = qa_metrics.get("residual") or {}
+    corruption = record.get("corruption", {}).get("metrics") or {}
+    physical = corruption.get("amplitude_gain")
+    if physical is None:
+        physical = corruption.get("phase_offset_deg")
+    values = (
+        level,
+        qa_metrics.get("clean_peak_jy_per_beam"),
+        residual.get("scaled_mad_jy_per_beam"),
+        residual.get("rms_jy_per_beam"),
+        residual.get("peak_over_scaled_mad"),
+        residual.get("p99_over_scaled_mad"),
+        residual.get("p99_5_over_scaled_mad"),
+        qa_metrics.get("dynamic_range_scaled_mad"),
+        corruption.get("gain_error_magnitude"),
+        corruption.get("epsilon_vis"),
+        corruption.get("rho_corr"),
+        physical,
+    )
+    return "<tr>" + "".join(f"<td>{show(value)}</td>" for value in values) + "</tr>"
+
+
+def metrics_table(source_id, family):
+    rows = [metric_row(source_id, "not_corrupted", 0)]
+    for target in report["configuration"]["targets"]:
+        text = str(int(target)) if float(target).is_integer() else f"{target:g}"
+        rows.append(metric_row(source_id, f"{family}_rho_{text}", text))
+    physical = "Amplitude gain" if family == "amp" else "Phase offset (deg)"
+    headings = (
+        "rho_target", "clean peak (Jy/beam)", "sigma (Jy/beam)",
+        "rms (Jy/beam)", "max", "p99", "p995", "DR",
+        "epsilon_g", "epsilon_vis", "rho_corr", physical,
+    )
+    return (
+        '<table class="metrics"><thead><tr>'
+        + "".join(f"<th>{esc(item)}</th>" for item in headings)
+        + "</tr></thead><tbody>"
+        + "".join(rows)
+        + "</tbody></table>"
+    )
+
+
+def image_comparison(rows):
+    channels = ("dirty", "clean", "residual")
+    cells = ['<div class="plot-grid">', '<div></div>']
+    for row in rows:
+        cells.append(f'<div class="plot-heading">{esc(row.get("title"))}</div>')
+    for channel in channels:
+        cells.append(f'<div class="plot-row-label">{esc(channel)}</div>')
+        for row in rows:
+            path = esc(row.get(channel, ""))
+            title = esc(f'{row.get("title", "")} {channel}')
+            cells.append(
+                f'<a class="plot-cell" href="{path}" target="_blank">'
+                f'<img src="{path}" alt="{title}"></a>'
+            )
+    cells.append("</div>")
+    return "".join(cells)
+
+
+def corruption_comparison(rows):
+    cells = ['<div class="corruption-grid">']
+    for row in rows:
+        path = esc(row.get("path", ""))
+        target = show(row.get("target_rho_corr"))
+        cells.append(
+            f'<figure><a href="{path}" target="_blank"><img src="{path}" '
+            f'alt="rho_corr={target} applied corruption"></a>'
+            f'<figcaption>rho_corr={target}</figcaption></figure>'
+        )
+    cells.append("</div>")
+    return "".join(cells)
+
+
+print(f"<h1>{esc(report.get('title', 'Dataset v1'))}</h1>")
+print(f"<p>{esc(report.get('description', ''))}</p>")
+iteration = report.get("dataset_iteration") or {}
+configuration = report.get("configuration") or {}
+print("<h3>Metric definitions</h3>")
+print("<p><span class='muted'>R denotes residual-image pixels inside the dashed 3-beam to border-minus-1-beam annulus. rho_corr is visibility-space; max, p99, p995, and DR describe what is visible in the image.</span></p>")
+print(equations(configuration.get("image_metric_definitions", [])))
+print(equations(configuration.get("corruption_metric_definitions", [])))
+print('<div class="summary">')
+print(f"Partition: <strong>{esc(report.get('partition'))}</strong><br>")
+print(f"Completed sources: {len(report.get('sources', []))} / {len(report.get('source_ids', []))}<br>")
+print(f"Retained dataset samples: {iteration.get('sample_count', len(dataset.get('samples', [])))}<br>")
+print(f"Intermediate CASA products retained: {report['configuration'].get('keep_intermediate_products')}<br>")
+print(
+    "Exported CASA mask pixels: "
+    f"<strong>{esc(report['configuration'].get('fits_invalid_policy'))}</strong> with "
+    f"{show(report['configuration'].get('fits_fill_value'))} Jy/beam<br>"
+)
+print(f"Reusable thermal source run: <span class='muted'>{esc(report.get('source_run'))}</span>")
+if report.get("failures"):
+    print("<div class='failure'>" + esc(report["failures"]) + "</div>")
+print("</div>")
+
+for source in report.get("sources", []):
+    source_id = source["id"]
+    baseline = records.get(f"{source_id}_not_corrupted", {})
+    baseline_metrics = (baseline.get("qa", {}).get("metrics") or {})
+    simulation_manifest = baseline.get("manifest", {}).get("metadata") or {}
+    simulation = {}
+    if simulation_manifest:
+        manifest_path = HERE / "samples" / f"{source_id}_not_corrupted"
+        simulation = load_json(manifest_path / simulation_manifest.get("simulation", ""))
+    noise = simulation.get("noise") or {}
+    print(f"<h2>{esc(source_id)}</h2>")
+    print('<div class="summary">')
+    print(
+        f"Antenna: {esc(source.get('antenna_name'))} (ID {source.get('antenna_id')}) · "
+        f"matched source S/N: {show(source.get('source_snr'))} · "
+        f"predicted image RMS: {show(source.get('predicted_image_rms_jy_per_beam'))} Jy/beam · "
+        f"thermal simplenoise: {show(noise.get('simplenoise_jy'))} Jy · "
+        f"baseline clean peak: {show(baseline_metrics.get('clean_peak_jy_per_beam'))} Jy/beam · "
+        f"baseline clean DR/MAD: {show(baseline_metrics.get('dynamic_range_scaled_mad'))}"
+    )
+    print("</div>")
+    for family, title, image_key in (
+        ("amp", "Amplitude corruption", "amplitude_plots"),
+        ("phase", "Phase corruption", "phase_plots"),
+    ):
+        print(f"<h3>{title}</h3>")
+        print(metrics_table(source_id, family))
+        print(image_comparison(source.get(image_key, [])))
+        print("<h3>Configured, sampled, and applied gain</h3>")
+        print(corruption_comparison((source.get("corruption_plots") or {}).get(family, [])))
+```

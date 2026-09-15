@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
+import shutil
 from typing import Any, Callable, Dict, Literal, Optional, Sequence, Tuple
 
 from .config import (
@@ -15,6 +16,7 @@ from .config import (
     read_beam,
 )
 from .metrics import METRIC_UNITS, _metric_validity, _metric_warnings, measure_image_metrics
+from .fits import export_fits_triplet
 from .models import (
     BeamRegion,
     ImagingResult,
@@ -23,7 +25,7 @@ from .models import (
     ResolvedImagingConfig,
     TcleanRunSummary,
 )
-from .plot_utils import write_individual_plots
+from .plot_utils import write_individual_plots_with_recipes
 from .qa import QA_SCHEMA_VERSION, normalize_tclean_summary, write_qa_reports
 
 
@@ -89,12 +91,15 @@ def _finalize_result(
     warnings: Tuple[str, ...],
     metric_region: BeamRegion,
     pipeline_background: Optional[PipelineBackground] = None,
+    keep_intermediate_products: bool = False,
+    fits_invalid_policy: Literal["error", "fill"] = "error",
+    fits_fill_value: float = 0.0,
 ) -> ImagingResult:
     _require_products(
         {"dirty": dirty_image, "clean": clean_image, "residual": residual_image},
         engine,
     )
-    dirty_png, clean_png, residual_png = write_individual_plots(
+    (dirty_png, clean_png, residual_png), plot_recipes = write_individual_plots_with_recipes(
         dirty_image,
         clean_image,
         residual_image,
@@ -104,12 +109,29 @@ def _finalize_result(
         metric_region=metric_region,
         fallback_beam=read_beam(clean_image),
     )
+    clean_beam = read_beam(clean_image)
     metrics = measure_image_metrics(clean_image, residual_image, region=metric_region)
     validity = _metric_validity(metrics)
     metric_warnings = _metric_warnings(metrics)
     qa_text = output_dir / "qa.txt"
     qa_json = output_dir / "qa.json"
+    fits_products = export_fits_triplet(
+        dirty_image,
+        clean_image,
+        residual_image,
+        output_dir,
+        fallback_beam=clean_beam,
+        invalid_policy=fits_invalid_policy,
+        fill_value=fits_fill_value,
+    )
     products: Dict[str, Optional[Path]] = {
+        "dirty_fits": fits_products["dirty"],
+        "clean_fits": fits_products["clean"],
+        "residual_fits": fits_products["residual"],
+        "qa_text": qa_text,
+        "qa_json": qa_json,
+    }
+    temporary_products: Dict[str, Optional[Path]] = {
         "dirty_image": dirty_image,
         "clean_image": clean_image,
         "residual_image": residual_image,
@@ -119,8 +141,6 @@ def _finalize_result(
         "dirty_png": dirty_png,
         "clean_png": clean_png,
         "residual_png": residual_png,
-        "qa_text": qa_text,
-        "qa_json": qa_json,
     }
     report = QAReport(
         schema_version=QA_SCHEMA_VERSION,
@@ -137,8 +157,29 @@ def _finalize_result(
         tclean_summary=tclean_summary,
         pipeline_background=pipeline_background,
         warnings=tuple(warnings) + tuple(metric_warnings),
+        plot_recipes=plot_recipes,
+        temporary_products=temporary_products,
     )
     write_qa_reports(report, qa_text, qa_json)
+    if not keep_intermediate_products:
+        protected = {path.resolve() for path in (*fits_products.values(), qa_text, qa_json)}
+        for path in sorted(output_dir.iterdir()):
+            if path.resolve() in protected:
+                continue
+            lower = path.name.casefold()
+            generated = (
+                lower in {"dirty.png", "clean.png", "residual.png", "pipeline", "mask_probe"}
+                or lower.startswith("dirty.")
+                or lower.startswith("clean.")
+                or lower.startswith("first_pass.")
+                or lower.startswith("firstpass.")
+            )
+            if not generated:
+                continue
+            if path.is_dir():
+                shutil.rmtree(path)
+            else:
+                path.unlink(missing_ok=True)
     return ImagingResult(
         engine=engine,
         ms_path=ms_path,
@@ -146,15 +187,18 @@ def _finalize_result(
         output_dir=output_dir,
         resolved_config=resolved_config,
         effective_imaging_parameters=effective_parameters,
-        dirty_image=dirty_image,
-        clean_image=clean_image,
-        residual_image=residual_image,
-        model_image=model_image,
-        mask_image=mask_image,
-        psf_image=psf_image,
-        dirty_png=dirty_png,
-        clean_png=clean_png,
-        residual_png=residual_png,
+        dirty_image=dirty_image if keep_intermediate_products else None,
+        clean_image=clean_image if keep_intermediate_products else None,
+        residual_image=residual_image if keep_intermediate_products else None,
+        dirty_fits=fits_products["dirty"],
+        clean_fits=fits_products["clean"],
+        residual_fits=fits_products["residual"],
+        model_image=model_image if keep_intermediate_products else None,
+        mask_image=mask_image if keep_intermediate_products else None,
+        psf_image=psf_image if keep_intermediate_products else None,
+        dirty_png=dirty_png if keep_intermediate_products else None,
+        clean_png=clean_png if keep_intermediate_products else None,
+        residual_png=residual_png if keep_intermediate_products else None,
         qa_text=qa_text,
         qa_json=qa_json,
         tclean_summary=tclean_summary,
@@ -173,6 +217,9 @@ def image_ms(
     metric_region_resolver: Optional[
         Callable[[ResolvedImagingConfig], BeamRegion]
     ] = None,
+    keep_intermediate_products: bool = False,
+    fits_invalid_policy: Literal["error", "fill"] = "error",
+    fits_fill_value: float = 0.0,
 ) -> ImagingResult:
     """Image one MS directly, resolving any grid-dependent metric region once."""
     if not isinstance(config, ImagingConfig):
@@ -263,6 +310,9 @@ def image_ms(
         tclean_summary=summary,
         warnings=resolved.warnings + summary_warnings,
         metric_region=metric_region,
+        keep_intermediate_products=keep_intermediate_products,
+        fits_invalid_policy=fits_invalid_policy,
+        fits_fill_value=fits_fill_value,
     )
 
 

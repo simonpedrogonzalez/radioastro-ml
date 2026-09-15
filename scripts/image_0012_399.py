@@ -184,11 +184,13 @@ def main() -> tuple[ImagingResult, ImagingResult, Path]:
         direct_config,
         experiment_dir / "direct",
         imsize=(256, 256),
+        keep_intermediate_products=True,
     )
     vla_result = image_ms_VLA_pipe(
         SIMULATION_MS,
         experiment_dir / "vla_pipeline",
         imsize=(256, 256),
+        keep_intermediate_products=True,
     )
 
     comparison_png = experiment_dir / "0012-399_direct_vs_vla_pipeline.png"

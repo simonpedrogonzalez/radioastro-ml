@@ -1,0 +1,149 @@
+"""PyTorch dataset for compact simulation samples."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any, Callable, Sequence
+
+from .fits import validate_fits_triplet
+from .partitions import normalize_partition, partition_for_sample
+from .schema import DatasetManifest, SampleManifest, load_dataset_manifest, load_sample_manifest
+
+try:  # Keep schema/cleanup imports usable in lightweight Python environments.
+    import torch
+    from torch.utils.data import Dataset
+except ImportError:  # pragma: no cover - depends on the caller's environment
+    torch = None
+    Dataset = object  # type: ignore[assignment,misc]
+
+
+def _require_torch():
+    if torch is None:
+        raise RuntimeError("PyTorch is required to load FITS samples as tensors")
+    return torch
+
+
+def _read_json(path: Path) -> dict[str, Any]:
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(value, dict):
+        raise ValueError(f"Metadata JSON must contain an object: {path}")
+    return value
+
+
+class FitsSimulationDataset(Dataset):  # type: ignore[misc]
+    def __init__(
+        self,
+        root: str | Path,
+        *,
+        partition: str,
+        index: str = "dataset.json",
+        channels: Sequence[str] = ("dirty", "clean", "residual"),
+        transform: Callable[[Any], Any] | None = None,
+        target_transform: Callable[[int], Any] | None = None,
+        validate: bool = True,
+        load_metadata: bool = True,
+        invalid_policy: str = "error",
+        fill_value: float = 0.0,
+    ) -> None:
+        _require_torch()
+        self.root = Path(root).expanduser().resolve()
+        self.partition = normalize_partition(partition)
+        self.channels = tuple(channels)
+        if self.channels != ("dirty", "clean", "residual"):
+            raise ValueError("channels must preserve ('dirty', 'clean', 'residual') order")
+        self.transform = transform
+        self.target_transform = target_transform
+        self.load_metadata = load_metadata
+        self.invalid_policy = invalid_policy
+        self.fill_value = fill_value
+        # Read every manifest only far enough to identify its source dataset.
+        # Full file and checksum validation is deliberately limited to the
+        # requested partition.
+        self.index: DatasetManifest = load_dataset_manifest(
+            self.root / index, require_samples=False
+        )
+        selected: list[SampleManifest] = []
+        for path in self.index.samples:
+            candidate = load_sample_manifest(
+                path, require_files=False, verify_integrity=False
+            )
+            if self.index.labels.get(candidate.label_name) != candidate.label_id:
+                raise ValueError(
+                    f"Sample {candidate.sample_id!r} label does not match "
+                    "dataset label map"
+                )
+            if partition_for_sample(candidate.sample_id) != self.partition:
+                continue
+            if validate:
+                candidate = load_sample_manifest(
+                    path, require_files=True, verify_integrity=True
+                )
+            selected.append(candidate)
+        self.samples = tuple(selected)
+
+    def __len__(self) -> int:
+        return len(self.samples)
+
+    def __getitem__(self, index: int) -> dict[str, Any]:
+        torch_module = _require_torch()
+        manifest = self.samples[index]
+        planes = validate_fits_triplet(
+            manifest.products,
+            invalid_policy=self.invalid_policy,
+            fill_value=self.fill_value,
+        )
+        image = torch_module.stack(
+            [torch_module.from_numpy(planes[name].values.copy()) for name in self.channels]
+        ).to(dtype=torch_module.float32)
+        target: Any = manifest.label_id
+        if self.transform is not None:
+            image = self.transform(image)
+        if self.target_transform is not None:
+            target = self.target_transform(target)
+        metadata: dict[str, Any] | None = None
+        if self.load_metadata:
+            metadata = {
+                "simulation": _read_json(manifest.simulation),
+                "imaging": _read_json(manifest.imaging_qa),
+                "corruptions": [
+                    _read_json(reference.corruption) for reference in manifest.corruptions
+                ],
+            }
+        return {
+            "image": image,
+            "label": target,
+            "sample_id": manifest.sample_id,
+            "partition": self.partition,
+            "qa": None if metadata is None else metadata["imaging"],
+            "metadata": metadata,
+            "paths": {
+                "manifest": manifest.path,
+                "products": dict(manifest.products),
+                "simulation": manifest.simulation,
+                "imaging": manifest.imaging_qa,
+                "corruptions": [
+                    {
+                        "corruption": reference.corruption,
+                        "corruption_text": reference.corruption_text,
+                    }
+                    for reference in manifest.corruptions
+                ],
+            },
+        }
+
+
+def simulation_collate(batch: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    torch_module = _require_torch()
+    return {
+        "image": torch_module.stack([item["image"] for item in batch]),
+        "label": torch_module.as_tensor([item["label"] for item in batch]),
+        "sample_id": [item["sample_id"] for item in batch],
+        "partition": [item["partition"] for item in batch],
+        "qa": [item["qa"] for item in batch],
+        "metadata": [item["metadata"] for item in batch],
+        "paths": [item["paths"] for item in batch],
+    }
+
+
+__all__ = ["FitsSimulationDataset", "simulation_collate"]

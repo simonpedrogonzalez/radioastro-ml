@@ -179,6 +179,11 @@ class SimulationIntegrationTests(unittest.TestCase):
             self.assertEqual(result.seed, 12345)
             self.assertIsNone(result.component_list)
             self.assertTrue(result.metadata_json.is_file())
+            self.assertTrue(result.metadata_text and result.metadata_text.is_file())
+            self.assertEqual(
+                json.loads(result.metadata_json.read_text(encoding="utf-8"))["schema_version"],
+                2,
+            )
             self.assertEqual(_persistent_tree_hash(SOURCE_MS), original_hash)
 
             real_mean, imag_mean, real_std, imag_std, count = _visibility_noise_statistics(
@@ -238,6 +243,7 @@ class SimulationIntegrationTests(unittest.TestCase):
             result = simulate_ms(SOURCE_MS, [component], root / "source.ms")
             self.assertTrue(result.component_list and result.component_list.is_dir())
             self.assertTrue(result.metadata_json.is_file())
+            self.assertTrue(result.metadata_text and result.metadata_text.is_file())
             self.assertEqual(_persistent_tree_hash(SOURCE_MS), original_hash)
             _assert_weight_contract(self, result.ms_path, None)
 
@@ -322,8 +328,15 @@ class SimulationIntegrationTests(unittest.TestCase):
                 mask_nbeams=None,
                 clean=CleanIterationsConfig(niter=0),
             )
-            original_image = image_ms(SOURCE_MS, config, root / "original_image")
-            simulated_image = image_ms(simulated.ms_path, config, root / "simulated_image")
+            original_image = image_ms(
+                SOURCE_MS, config, root / "original_image", keep_intermediate_products=True
+            )
+            simulated_image = image_ms(
+                simulated.ms_path,
+                config,
+                root / "simulated_image",
+                keep_intermediate_products=True,
+            )
             for imaging_result in (original_image, simulated_image):
                 for path in (
                     imaging_result.dirty_image,

@@ -6,13 +6,16 @@ import json
 import math
 import operator
 import shutil
+import subprocess
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Mapping, Sequence
 
 from scripts.imaging.metadata import resolve_path
 
 from .noise import _apply_noise, _normalized_noise_request, _set_constant_sigma
+from .reporting import SIMULATION_REPORT_SCHEMA_VERSION, write_simulation_reports
 
 
 @dataclass(frozen=True)
@@ -22,6 +25,7 @@ class SimulationResult:
     metadata_json: Path
     simplenoise_jy: float | None
     seed: int | None
+    metadata_text: Path | None = None
 
 
 def _positive_count(value: int, *, name: str) -> int:
@@ -36,7 +40,7 @@ def _positive_count(value: int, *, name: str) -> int:
     return result
 
 
-def _output_paths(output_ms: str | Path) -> tuple[Path, Path, Path]:
+def _output_paths(output_ms: str | Path) -> tuple[Path, Path, Path, Path]:
     ms_path = Path(output_ms).expanduser().resolve()
     if ms_path.suffix.lower() != ".ms":
         raise ValueError(f"output_ms must end in .ms: {ms_path}")
@@ -45,6 +49,7 @@ def _output_paths(output_ms: str | Path) -> tuple[Path, Path, Path]:
         ms_path,
         Path(f"{base}.components.cl"),
         Path(f"{base}.simulation.json"),
+        Path(f"{base}.simulation.txt"),
     )
 
 
@@ -129,6 +134,19 @@ def _casa_version() -> str | None:
     return None
 
 
+def _repository_commit() -> str | None:
+    try:
+        return subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=Path(__file__).resolve().parents[2],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip() or None
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
 def _initialize_weights(ms_path: Path, sigma_jy: float | None) -> str:
     try:
         from casatasks import initweights
@@ -167,10 +185,10 @@ def simulate_ms(
     if not component_records and normalized_noise is None:
         raise ValueError("At least one component or a noise_model is required")
 
-    destination, component_path, metadata_path = _output_paths(output_ms)
+    destination, component_path, metadata_path, metadata_text_path = _output_paths(output_ms)
     if destination == source:
         raise ValueError("output_ms must not be the input Measurement Set")
-    paths_to_check = [destination, metadata_path]
+    paths_to_check = [destination, metadata_path, metadata_text_path]
     if component_records:
         paths_to_check.append(component_path)
     existing = [path for path in paths_to_check if path.exists()]
@@ -216,30 +234,65 @@ def simulate_ms(
 
         sigma = None if noise_metadata is None else float(noise_metadata["simplenoise_jy"])
         weight_mode = _initialize_weights(destination, sigma)
+        operations = ["copy"]
+        if component_records:
+            operations.extend(("predict",))
+        else:
+            operations.append("zero_visibility_data")
+        if noise_metadata is not None:
+            operations.append("noise")
+        operations.append("weights")
         payload = {
-            "schema_version": 1,
+            "schema_version": SIMULATION_REPORT_SCHEMA_VERSION,
+            "sample_id": destination.with_suffix("").name,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "repository_commit": _repository_commit(),
             "input_ms": str(source),
             "output_ms": str(destination),
+            "input_visibility": {
+                "local_path": str(source),
+                "archive_locator": None,
+                "checksum": None,
+            },
             "component_list": str(component_path) if component_records else None,
             "components": component_records,
             "noise": noise_metadata,
             "weight_initialization": weight_mode,
             "casa_version": _casa_version(),
+            "operations": operations,
+            "generated_artifacts": [
+                {
+                    "role": "output_ms",
+                    "path": str(destination),
+                    "lifecycle": "temporary",
+                },
+                *(
+                    [
+                        {
+                            "role": "component_list",
+                            "path": str(component_path),
+                            "lifecycle": "temporary",
+                        }
+                    ]
+                    if component_records
+                    else []
+                ),
+            ],
+            "status": "success",
+            "warnings": [],
             "created_paths": [
                 str(path)
                 for path in (
                     destination,
                     component_path if component_records else None,
                     metadata_path,
+                    metadata_text_path,
                 )
                 if path is not None
             ],
         }
-        metadata_path.write_text(
-            json.dumps(payload, indent=2, sort_keys=True, allow_nan=False) + "\n",
-            encoding="utf-8",
-        )
-        created.append(metadata_path)
+        write_simulation_reports(payload, metadata_path, metadata_text_path)
+        created.extend((metadata_path, metadata_text_path))
     except Exception as exc:
         if hasattr(exc, "add_note") and created:
             exc.add_note(
@@ -254,6 +307,7 @@ def simulate_ms(
         metadata_json=metadata_path,
         simplenoise_jy=None if noise_metadata is None else float(noise_metadata["simplenoise_jy"]),
         seed=None if noise_metadata is None else int(noise_metadata["seed"]),
+        metadata_text=metadata_text_path,
     )
 
 
