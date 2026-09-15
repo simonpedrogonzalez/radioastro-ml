@@ -198,17 +198,21 @@ must scan the source-only $V$, applying one documented validity mask:
 - finite complex values only; and
 - only rows whose baseline contains antenna $k$ for the affected sum.
 
-Accumulate descriptive exact quantities in `float64`/`complex128`:
+Accumulate quantities named directly after the equation. The public/result
+values should be the norms, while a chunked implementation may use `_sq`
+accumulators internally:
 
 ```text
-signal_squared_norm
-    = sum_all(|V|^2)
+V_L2_sq = sum_all(|V|^2)
+V_L2 = sqrt(V_L2_sq) = ||V||_2
 
-affected_signal_squared_norm
-    = sum_affected(|V|^2)
+V_Ak_L2_sq = sum_Ak(|V|^2)
+V_Ak_L2 = sqrt(V_Ak_L2_sq) = ||V_Ak||_2
 
-affected_whitened_signal_squared_norm
-    = sum_affected(|V|^2 / sigma_m^2)
+V_Ak_over_sigma_L2_sq = sum_Ak(|V / sigma|^2)
+V_Ak_over_sigma_L2
+    = sqrt(V_Ak_over_sigma_L2_sq)
+    = ||V_Ak / sigma_Ak||_2
 ```
 
 For the current homogeneous thermal-noise model, $\sigma_m$ is the recorded
@@ -221,20 +225,16 @@ when a validated heterogeneous-noise model exists.
 Use
 
 ```text
-unit_gain_corruption_snr
-    = sqrt(affected_whitened_signal_squared_norm)
-
-epsilon_g
-    = target_snr_corr / unit_gain_corruption_snr
+eps_g = SNR_corr_target / V_Ak_over_sigma_L2
 ```
 
 Then preserve the existing physical conversions and domain checks:
 
-- amplitude: `amplitude_gain=1 + sign*epsilon_g`, requiring a positive gain
+- amplitude: `g_amp=1 + sign*eps_g`, requiring a positive gain
   under the current magnitude convention;
-- phase: `phase_offset_rad=sign*2*asin(epsilon_g/2)`, requiring
-  `epsilon_g <= 2`; and
-- amplitude and phase variants at the same target must have the same
+- phase: `phi_rad=sign*2*asin(eps_g/2)`, requiring `eps_g <= 2`, with
+  `phi_deg=degrees(phi_rad)` only as a display convenience; and
+- amplitude and phase variants at the same `SNR_corr_target` must have the same
   $\epsilon_g=|g-1|$.
 
 For the constant one-antenna special case, the predicted fractional
@@ -260,21 +260,24 @@ Before adding noise, compare the source-only and corrupted MSs chunk by chunk
 and calculate:
 
 ```text
-delta_visibility = V_corr - V
-epsilon_vis = sqrt(sum(|delta_visibility|^2) / sum(|V|^2))
-snr_corr = sqrt(sum(|delta_visibility|^2 / sigma_m^2))
+Delta_V = V_corr - V
+Delta_V_L2 = sqrt(sum(|Delta_V|^2))
+Delta_V_over_sigma_L2 = sqrt(sum(|Delta_V / sigma|^2))
+
+eps_vis = Delta_V_L2 / V_L2
+SNR_corr = Delta_V_over_sigma_L2
 ```
 
 Report both requested/predicted and measured values, plus absolute or relative
 closure errors such as:
 
 ```text
-snr_target
-snr_corr_predicted
-snr_corr_measured
-snr_relative_error
-epsilon_vis_predicted
-epsilon_vis_measured
+SNR_corr_target
+SNR_corr_expected
+SNR_corr
+SNR_corr_relerr
+eps_vis_expected
+eps_vis
 ```
 
 The run should fail if the measured result differs from the predicted result
@@ -291,23 +294,27 @@ equivalent.
 
 | Current name | Updated name |
 | --- | --- |
-| `rho_corr` | `snr_corr` |
-| `target_rho_corr` | `target_snr_corr` |
-| `unit_gain_detectability` | `unit_gain_corruption_snr` |
-| `TARGET_DETECTABILITIES` | `TARGET_CORRUPTION_SNRS` |
+| `rho_corr` | `SNR_corr` |
+| `target_rho_corr` | `SNR_corr_target` |
+| `unit_gain_detectability` | `V_Ak_over_sigma_L2` |
+| `TARGET_DETECTABILITIES` | `SNR_CORR_TARGETS` |
 | `DetectabilityMetrics` | `CorruptionMetrics` |
 | `DetectabilityMetricDefinition` | `CorruptionMetricDefinition` |
 | `detectability_metric_definitions()` | `corruption_metric_definitions()` |
-| `from_detectability(...)` | `from_target_snr(...)` or a dedicated solver function |
+| `from_detectability(...)` | a dedicated `solve_constant_gain(...)` function |
 | `amp_rho_10` / `phase_rho_10` | `amp_snr_10` / `phase_snr_10` |
-| `P_all` | `signal_squared_norm` |
-| `P_A` | `affected_signal_squared_norm` |
-| `P_A,w` | `affected_whitened_signal_squared_norm` |
+| `P_all` | `V_L2_sq` or `V_L2`, as appropriate |
+| `P_A` | `V_Ak_L2_sq` or `V_Ak_L2`, as appropriate |
+| `P_A,w` | `V_Ak_over_sigma_L2_sq` or `V_Ak_over_sigma_L2` |
+| `gain_error_magnitude` | `eps_g` |
+| `epsilon_vis` | `eps_vis` |
+| `amplitude_gain` | `g_amp` |
+| `phase_offset_rad` / `phase_offset_deg` | `phi_rad` / `phi_deg` |
 
-Keep `epsilon_g`, `epsilon_vis`, `amplitude_gain`, `phase_offset_rad`, and
-`phase_offset_deg`; those names still match the updated definitions. In prose
-and equations, use $A_k$ only for the **set of affected samples**, never as a
-power or norm.
+The casing is intentional: `V`, `Delta_V`, and `SNR_corr` visually match the
+mathematical symbols, while suffixes identify operations or qualifiers:
+`_L2`, `_sq`, `_target`, `_expected`, and `_relerr`. In prose and equations,
+use $A_k$ only for the **set of affected samples**, never as a power or norm.
 
 ## A8. Update report schemas and provenance
 
@@ -374,9 +381,10 @@ Specific changes:
 
 In `scripts/reporting/create_dataset_v1.qmd`:
 
-- replace every `rho_corr` label/key with `SNR_corr`/`snr_corr`;
-- show `SNR_target`, `SNR_corr_predicted`, and `SNR_corr_measured` distinctly;
-- show predicted and measured `epsilon_vis` when both are retained;
+- replace every `rho_corr` label/key with `SNR_corr`;
+- show `SNR_corr_target`, `SNR_corr_expected`, and the independently measured
+  `SNR_corr` distinctly;
+- show `eps_vis_expected` and the independently measured `eps_vis`;
 - display the canonical equations directly from package-owned definitions;
 - explain that $V$ is noiseless sky visibility and
   $\Delta V=V^{\mathrm{corr}}-V$, both evaluated before noise;
@@ -385,7 +393,7 @@ In `scripts/reporting/create_dataset_v1.qmd`:
 - retain the current imaging-package plots, shared color scales, beam glyphs,
   and metric annuli; and
 - retain the gain-function diagnostic plots, but label them with
-  `SNR_target`.
+  `SNR_corr_target`.
 
 ## A11. Replace the tests that encode the old semantics
 
@@ -467,7 +475,7 @@ target-S/N solve to a dedicated constant-gain service/module, for example:
 
 ```text
 measure_constant_gain_basis(source_ms, antenna_id, sigma)
-solve_constant_gain(target_snr_corr, basis, corruption_type, sign)
+solve_constant_gain(SNR_corr_target, V_Ak_over_sigma_L2, corruption_type, sign)
 ```
 
 The result can then be passed explicitly into `AntennaGainCorruption`.
@@ -479,26 +487,28 @@ constructor later mutates it. `write_corruption_reports()` then discovers that
 state with `getattr`. This implicit side channel makes configuration and run
 results easy to confuse.
 
-Return an explicit immutable object such as:
+Keep the scientific values explicit without creating a hierarchy of run-result
+wrappers. One small immutable solution object and one metrics object are
+enough:
 
 ```text
-ConstantGainPlan
-    corruption
-    solution
-    predicted_metrics
+ConstantGainSolution
+    eps_g
+    g_amp or phi_rad
+    SNR_corr_target
+    SNR_corr_expected
+    eps_vis_expected
 
-AppliedCorruptionResult
-    configuration
-    solution
-    predicted_metrics
-    measured_metrics
-    gain_table
-    diagnostic_plot
+CorruptionMetrics
+    SNR_corr
+    eps_vis
 ```
 
-Have the report writer accept the result explicitly. A fixed `Constant` with no
-target should remain reportable without pretending that metrics were
-calculated.
+Pass these objects explicitly between the driver, corruption construction, and
+report writer. Do not attach them to `Constant` or discover them through
+`getattr`. Paths are already owned by the caller and do not need another result
+object. A fixed `Constant` with no target should remain reportable without
+pretending that metrics were calculated.
 
 ### B1.4. Make canonical metric definitions data, not hand-built prose
 
@@ -506,9 +516,9 @@ Retain the useful idea of one package-owned definition per metric, but change
 the definitions to the updated formulas. The stable representation should be:
 
 ```text
-epsilon_g=|g-1|
-epsilon_vis=||Delta V||_2/||V||_2
-SNR_corr=||Delta V/sigma||_2
+eps_g=|g-1|
+eps_vis=||Delta_V||_2/||V||_2
+SNR_corr=||Delta_V/sigma||_2
 ```
 
 Keep plain-text formula, LaTeX, one-sentence description, and unit in each
@@ -535,10 +545,11 @@ be retained.
 Do not overload `detectability` for a target, a norm, and a measured metric.
 Use:
 
-- `target_snr_corr` for the requested control variable;
-- `unit_gain_corruption_snr` for the solver denominator;
-- `predicted_*` for analytic values calculated before application;
-- `measured_*` for values calculated from $V^{\mathrm{corr}}-V$; and
+- `SNR_corr_target` for the requested control variable;
+- `V_Ak_over_sigma_L2` for the solver denominator;
+- `SNR_corr_expected` and `eps_vis_expected` for analytic values;
+- `SNR_corr` and `eps_vis` for values measured from
+  $\Delta V=V^{\mathrm{corr}}-V$; and
 - `image_*` or the existing image metric names for post-imaging outcomes.
 
 This also avoids the current report ambiguity where the displayed
@@ -587,21 +598,15 @@ scripts/corruption/
 If `visibility.py` would contain only one short reader, keep it in `metrics.py`.
 The goal is visible scientific logic, not the maximum number of modules.
 
-## Section 2 — Optional cleanup of the core, corruption functions, and selection scheme
+## Section 2 — Optional cleanup of the core and corruption functions
 
-These improvements are worthwhile but are not required to correct the current
-experiment. They should follow the functional changes and their regression
-tests.
+These are the optional changes worth implementing after the functional
+correction and its regression tests. They must preserve the generalized core:
+arbitrary `CorrFn` implementations, `TimeGrid`, flexible `GTabQuery`
+selection/grouping, multiple antenna groups, and extension to additional
+corruption families.
 
-### B2.1. Split gain-table execution from diagnostics
-
-`build_corrtable()` currently creates the template, loads and selects rows,
-samples functions, interpolates, writes `CPARAM`, and generates a plot. Return
-a `GainTableBuildResult` containing the sampled/applied realization, then let a
-separate diagnostic function plot that result. Plotting failures should not
-determine whether scientific table construction succeeds.
-
-### B2.2. Make corruption functions immutable specifications
+### B2.1. Make corruption functions immutable specifications
 
 `RandomPhaseMaxSineWave.sample()` and `fBM.sample()` mutate and return the same
 object. Reusing one instance across groups can leak sampled state. Prefer:
@@ -614,14 +619,14 @@ realization.evaluate(times) -> values
 Use only the passed `numpy.random.Generator`; remove the global
 `np.random.seed(...)` side effect in the fBM path.
 
-### B2.3. Normalize the `CorrFn` protocol
+### B2.2. Normalize the `CorrFn` protocol
 
 The base class and subclasses currently disagree about whether `eval` accepts
 `rng`, while diagnostics call it without `rng`. Define one signature for
 sampling and one for evaluating a sampled realization, then make every built-in
 function follow it. Add protocol/conformance tests.
 
-### B2.4. Fix `TimeGrid` before expanding its use
+### B2.3. Fix `TimeGrid` before expanding its use
 
 The existing design document correctly notes that `solint="int"` is broken:
 `build_corrtable()` calls `full_grid()` before reaching its special-case code,
@@ -632,67 +637,29 @@ Make `TimeGrid` frozen and validated, represent parsed intervals explicitly,
 support both interpolation modes in its type, and test boundary knots and
 per-integration behavior.
 
-### B2.5. Replace the mutable stringly typed query when requirements stabilize
-
-`GTabQuery` is a mutable fluent builder whose columns and operations are raw
-strings/tuples. For the present one-antenna use case, a small immutable
-`GainSelection(antenna_ids=..., fields=..., spws=...)` would be clearer and
-would serialize naturally. Keep a lower-level query only if current experiments
-actually need arbitrary table-column predicates.
-
-Whichever interface remains, centralize visibility/gain-table selection rules
-so the target solver, table builder, measured-metric pass, and report all refer
-to the same antenna/sample set.
-
-### B2.6. Return explicit results instead of fluent mutation chains
+### B2.4. Make mutation steps explicit without adding result wrappers
 
 Both `build_corrtable()` and `apply_corrtable()` mutate external state and
-return `self`. The fluent call hides failure boundaries and generated paths.
-Prefer explicit operations returning immutable results. If older research
-scripts still require chaining, keep a thin compatibility shim temporarily,
-but do not use it in the corrected dataset driver.
+return `self`. The fluent call hides the boundary between table creation and MS
+mutation, but a new result-object hierarchy would be unnecessary bloat.
 
-### B2.7. Tighten path and resource safety
+Use the minimal change:
 
-- Do not unconditionally delete an existing gain table in
-  `make_template_gain_corrtab()`; refuse overwrite by default or require an
-  explicit overwrite policy.
-- Use `try/finally` around every CASA simulator/table lifecycle.
-- Validate that selected gain-table rows are nonempty before writing.
-- Write to a temporary gain-table path and install it only after verification
-  where CASA table semantics permit it.
-- Remove incidental console output such as `Grup:` and use structured progress
-  at the experiment-driver level.
+```python
+corruption.build_corrtable(ms, gain_table, ...)
+corruption.apply_corrtable(ms, gain_table, ...)
+```
 
-### B2.8. Clarify interpolation and application semantics
+Stop chaining in supported callers, change the two methods to return `None`
+when old callers have been migrated, and let the caller continue to own the
+paths it supplied. The solution and metrics are already represented by the
+small scientific objects described in Section 1; do not duplicate paths,
+configuration, or metrics in another execution-result wrapper.
 
-The builder supports `nearest` and `linear`, but `apply_corrtable()` hard-codes
-CASA `interp="linear"`. Decide whether interpolation is fully materialized in
-the table or delegated to CASA, and expose only one source of truth. Add tests
-at times between gain-table rows.
+### B2.5. Remove incidental output
 
-### B2.9. Strengthen flag, correlation, and antenna handling
-
-Use one shared sample-mask implementation for metric calculation and related
-antenna discovery. `get_unflagged_antennas()` should explicitly account for
-`FLAG_ROW`, autocorrelations, supported correlations, and finite data according
-to the same experiment contract. Test antennas that occur only in invalid
-rows.
-
-### B2.10. Defer generality until a concrete corruption requires it
-
-Do not build a universal Jones-chain or arbitrary noise-provider framework as
-part of this correction. The immediate design needs:
-
-- exact source visibilities;
-- one-antenna constant amplitude/phase gains;
-- scalar `simplenoise`;
-- explicit stage ordering; and
-- measured validation.
-
-Generalize to multiple antennas, frequency dependence, heterogeneous
-$\sigma_m$, or other corruption types only with a corresponding experiment and
-analytical test.
+Remove incidental console output such as
+`Grup:`. Progress messages should come from the experiment driver.
 
 ## Recommended implementation order and gates
 
@@ -704,9 +671,9 @@ analytical test.
 | `scripts/simulation/simulations.py` | Support an explicit source-only stage and record the corrected ordered provenance; avoid forcing prediction and noise into one inseparable operation. |
 | `scripts/simulation/reporting.py` | Render the ordered stages and bump the schema if its structured representation changes. |
 | `scripts/simulation/__init__.py` | Export the selected public staged-simulation/noise API. |
-| `scripts/corruption/metrics.py` | Replace noise debiasing and `P_*` aggregates with exact $V$/$\Delta V$ norms, new names, canonical definitions, and predicted/measured result records. |
+| `scripts/corruption/metrics.py` | Replace noise debiasing and `P_*` aggregates with exact $V$/$\Delta V$ norms, equation-shaped names, canonical definitions, and expected/measured result records. |
 | `scripts/corruption/functions.py` | Remove the MS-reading target solver from `Constant`; keep it as a scalar function specification. |
-| `scripts/corruption/core.py` | Accept an explicit solved constant, return explicit build/application results, and stop owning metrics through mutable hidden state. |
+| `scripts/corruption/core.py` | Accept an explicit solved constant, stop owning metrics through mutable hidden state, and keep the generalized corruption scheme. |
 | `scripts/corruption/reporting.py` | Bump the report schema and render explicit configuration plus predicted/measured results without `getattr(..., "metrics")`. |
 | `scripts/corruption/__init__.py` | Replace old detectability exports with the updated metric/solver/result API. |
 | `scripts/create_dataset_v1.py` | Rebuild the baseline and variants from source-only $V$, corrupt before noise, reuse one noise seed, rename labels/keys, and measure the applied corruption. |
@@ -737,7 +704,7 @@ one-source run passes.
    equality, gain plots, shared-scale images, and image metrics.
 8. **Choose the production target ladder:** adjust only after seeing the
    corrected images and metrics.
-9. **Apply optional Section 2 cleanup:** keep each change separately tested and
+9. **Apply the Section 2 cleanup:** keep each change separately tested and
    behavior-preserving.
 
 The corrected one-source run is complete only when the report demonstrates all
@@ -745,9 +712,9 @@ of the following:
 
 ```text
 V is exact and noiseless
-Delta V is measured before noise
-SNR_corr_measured ~= SNR_target
-epsilon_vis_measured ~= epsilon_vis_predicted
+Delta_V is measured before noise
+SNR_corr ~= SNR_corr_target
+eps_vis ~= eps_vis_expected
 noise_baseline == noise_variant
 operation order == predict -> corrupt (optional) -> noise -> image
 all image variants use the same per-channel display scale
