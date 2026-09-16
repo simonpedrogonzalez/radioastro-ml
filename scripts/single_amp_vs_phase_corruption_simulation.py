@@ -332,11 +332,12 @@ def _run_variant(
     with _working_directory(variant_dir):
         corruption.build_corrtable(
             str(copied_ms.resolve()), str(gain_table.resolve()), seed=spec.seed
-        ).apply_corrtable(
+        )
+        corruption.apply_corrtable(
             str(copied_ms.resolve()), str(gain_table.resolve()), seed=spec.seed
         )
 
-    corruption_reports = write_corruption_reports(
+    corruption_json, corruption_text = write_corruption_reports(
         corruption,
         json_path=variant_dir / "corruption.json",
         text_path=variant_dir / "corruption.txt",
@@ -371,8 +372,8 @@ def _run_variant(
     required = (
         gain_table,
         images_dir / "corruption_function.png",
-        corruption_reports.json_path,
-        corruption_reports.text_path,
+        corruption_json,
+        corruption_text,
         result.dirty_png,
         result.clean_png,
         result.residual_png,
@@ -402,12 +403,8 @@ def _run_variant(
         "corruption_plot": _relative(
             images_dir / "corruption_function.png", experiment_dir
         ),
-        "corruption_json": _relative(
-            corruption_reports.json_path, experiment_dir
-        ),
-        "corruption_text": _relative(
-            corruption_reports.text_path, experiment_dir
-        ),
+        "corruption_json": _relative(corruption_json, experiment_dir),
+        "corruption_text": _relative(corruption_text, experiment_dir),
         "result_dir": _relative(result.output_dir, experiment_dir),
         "qa_json": _relative(result.qa_json, experiment_dir),
     }

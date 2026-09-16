@@ -162,6 +162,40 @@ def _initialize_weights(ms_path: Path, sigma_jy: float | None) -> str:
     return "sigma"
 
 
+def add_thermal_noise_inplace(
+    ms: str | Path,
+    *,
+    noise_model: str,
+    noise_parameters: Mapping[str, object] | None,
+    seed: int,
+) -> dict[str, object]:
+    """Add thermal noise to an existing MS and initialize its noise weights."""
+    path = resolve_path(ms).path
+    model, parameters = _normalized_noise_request(noise_model, noise_parameters)
+    random_seed = _positive_count(seed, name="seed")
+    try:
+        from casatools import simulator
+    except ImportError as exc:  # pragma: no cover - exercised outside CASA
+        raise RuntimeError("CASA casatools is required to add thermal noise") from exc
+    sm = simulator()
+    try:
+        if not sm.openfromms(str(path)):
+            raise RuntimeError(f"CASA simulator could not open {path}")
+        metadata = _apply_noise(
+            sm,
+            path,
+            noise_model=model,
+            noise_parameters=parameters,
+            seed=random_seed,
+        )
+    finally:
+        sm.close()
+    sigma = float(metadata["simplenoise_jy"])
+    metadata = dict(metadata)
+    metadata["weight_initialization"] = _initialize_weights(path, sigma)
+    return metadata
+
+
 def simulate_ms(
     ms: str | Path,
     components: Sequence[Mapping[str, object]],
@@ -220,20 +254,23 @@ def simulate_ms(
                 complist=str(component_path), incremental=False
             ):
                 raise RuntimeError(f"CASA simulator prediction failed for {destination}")
-            if normalized_noise is not None:
-                model, parameters = normalized_noise
-                noise_metadata = _apply_noise(
-                    sm,
-                    destination,
-                    noise_model=model,
-                    noise_parameters=parameters,
-                    seed=random_seed,
-                )
         finally:
             sm.close()
 
+        if normalized_noise is not None:
+            model, parameters = normalized_noise
+            noise_metadata = add_thermal_noise_inplace(
+                destination,
+                noise_model=model,
+                noise_parameters=parameters,
+                seed=random_seed,
+            )
         sigma = None if noise_metadata is None else float(noise_metadata["simplenoise_jy"])
-        weight_mode = _initialize_weights(destination, sigma)
+        weight_mode = (
+            _initialize_weights(destination, None)
+            if noise_metadata is None
+            else str(noise_metadata["weight_initialization"])
+        )
         operations = ["copy"]
         if component_records:
             operations.extend(("predict",))
@@ -260,6 +297,10 @@ def simulate_ms(
             "weight_initialization": weight_mode,
             "casa_version": _casa_version(),
             "operations": operations,
+            "stages": [
+                {"name": operation, "order": index}
+                for index, operation in enumerate(operations, start=1)
+            ],
             "generated_artifacts": [
                 {
                     "role": "output_ms",
@@ -311,4 +352,4 @@ def simulate_ms(
     )
 
 
-__all__ = ["SimulationResult", "simulate_ms"]
+__all__ = ["SimulationResult", "add_thermal_noise_inplace", "simulate_ms"]

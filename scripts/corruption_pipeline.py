@@ -122,12 +122,14 @@ def process_row(row: pd.Series) -> None:
     ant_ids = list(ants.values())[:2]
 
     rmtables(gtab_inj)
-    AntennaGainCorruption(
+    corruption = AntennaGainCorruption(
         timegrid=TimeGrid(solint="10m", interp="linear"),
         amp_fn=None,
         query=GTabQuery().where_in(GCOLS.ANTENNA1, ant_ids).group_by([GCOLS.ANTENNA1]),
         phase_fn=fBM(max_amp=0.15 * np.pi, H=0.05),
-    ).build_corrtable(str(ms_out), gtab_inj, seed=0).apply_corrtable(str(ms_out), gtab_inj)
+    )
+    corruption.build_corrtable(str(ms_out), gtab_inj, seed=0)
+    corruption.apply_corrtable(str(ms_out), gtab_inj)
 
     print("[DIFF] in vs corrupt")
     col_diff(str(ms_in), str(ms_out))

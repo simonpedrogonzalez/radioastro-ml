@@ -10,8 +10,8 @@ from pathlib import Path
 from typing import Any
 
 
-SIMULATION_REPORT_SCHEMA_VERSION = 2
-SUPPORTED_SIMULATION_REPORT_SCHEMAS = (1, 2)
+SIMULATION_REPORT_SCHEMA_VERSION = 3
+SUPPORTED_SIMULATION_REPORT_SCHEMAS = (1, 2, 3)
 
 
 def load_simulation_report(path: str | Path) -> dict[str, Any]:
@@ -53,9 +53,15 @@ def render_simulation_text(report: Mapping[str, Any]) -> str:
         "Operation stages",
         "-" * 80,
     ]
-    operations = report.get("operations") or []
-    if isinstance(operations, list):
-        lines.extend(f"- {operation}" for operation in operations)
+    stages = report.get("stages") or []
+    if isinstance(stages, list) and stages:
+        for stage in stages:
+            if isinstance(stage, Mapping):
+                lines.append(f"- {stage.get('order')}: {stage.get('name')}")
+    else:
+        operations = report.get("operations") or []
+        if isinstance(operations, list):
+            lines.extend(f"- {operation}" for operation in operations)
     return "\n".join(lines).rstrip() + "\n"
 
 

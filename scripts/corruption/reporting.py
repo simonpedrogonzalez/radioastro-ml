@@ -7,24 +7,17 @@ import math
 import os
 import tempfile
 from collections.abc import Mapping
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
 
-CORRUPTION_REPORT_SCHEMA_VERSION = 1
+CORRUPTION_REPORT_SCHEMA_VERSION = 2
 
 
 class ReportableCorruption(Protocol):
     def to_report_dict(self) -> dict[str, object]: ...
 
     def to_report_text(self) -> str: ...
-
-
-@dataclass(frozen=True)
-class CorruptionReportPaths:
-    json_path: Path
-    text_path: Path
 
 
 def _strict_json_value(value: Any, *, location: str) -> Any:
@@ -73,6 +66,53 @@ def _context_text(context: Mapping[str, Any]) -> list[str]:
     return lines
 
 
+def _report_value(value: object | None, *, name: str) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    method = getattr(value, "to_report_dict", None)
+    if not callable(method):
+        raise TypeError(f"{name} must implement to_report_dict()")
+    payload = method()
+    if not isinstance(payload, Mapping):
+        raise TypeError(f"{name}.to_report_dict() must return a mapping")
+    return _strict_json_value(payload, location=name)
+
+
+def _render_scientific_text(
+    solution: Mapping[str, Any] | None,
+    metrics: Mapping[str, Any] | None,
+) -> str:
+    if solution is None and metrics is None:
+        return "Corruption metrics: not calculated"
+
+    scientific = solution or metrics
+    assert scientific is not None
+    definitions = scientific.get("metric_definitions") or []
+    lines = [
+        "Corruption Metrics",
+        "-" * 80,
+        "Delta_V=V_corr-V (evaluated before thermal noise)",
+        *(f"{item['key']}={item['formula']}" for item in definitions),
+    ]
+    if solution is not None:
+        norms = solution.get("norms") or {}
+        lines += [""] + [
+            f"{key}: {value}"
+            for key, value in (
+                *(solution.items()),
+                *(norms.items()),
+            )
+            if key not in {"type", "visibility_source", "metric_definitions", "norms"}
+        ]
+    if metrics is not None:
+        lines += [""] + [
+            f"{key}: {value}"
+            for key, value in metrics.items()
+            if key not in {"visibility_source", "delta_definition", "metric_definitions"}
+        ]
+    return "\n".join(lines)
+
+
 def _write_temporary(path: Path, text: str) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     handle = tempfile.NamedTemporaryFile(
@@ -100,8 +140,10 @@ def write_corruption_reports(
     *,
     json_path: str | Path,
     text_path: str | Path,
+    solution: object | None = None,
+    metrics: object | None = None,
     context: Mapping[str, Any] | None = None,
-) -> CorruptionReportPaths:
+) -> tuple[Path, Path]:
     """Write reports without knowing the concrete corruption configuration."""
     dictionary_method = getattr(corruption, "to_report_dict", None)
     text_method = getattr(corruption, "to_report_text", None)
@@ -121,29 +163,17 @@ def write_corruption_reports(
     if not isinstance(rendered_configuration, str) or not rendered_configuration.strip():
         raise TypeError("corruption.to_report_text() must return non-empty text")
 
-    metrics = getattr(corruption, "metrics", None)
-    if metrics is None:
-        normalized_metrics = None
-        rendered_metrics = "Detectability metrics: not calculated"
-    else:
-        metrics_dictionary_method = getattr(metrics, "to_report_dict", None)
-        metrics_text_method = getattr(metrics, "to_report_text", None)
-        if not callable(metrics_dictionary_method) or not callable(metrics_text_method):
-            raise TypeError(
-                "corruption.metrics must implement to_report_dict() and to_report_text()"
-            )
-        metrics_dictionary = metrics_dictionary_method()
-        if not isinstance(metrics_dictionary, Mapping):
-            raise TypeError("corruption.metrics.to_report_dict() must return a mapping")
-        normalized_metrics = _strict_json_value(metrics_dictionary, location="metrics")
-        rendered_metrics = metrics_text_method()
-        if not isinstance(rendered_metrics, str) or not rendered_metrics.strip():
-            raise TypeError("corruption.metrics.to_report_text() must return non-empty text")
+    normalized_solution = _report_value(solution, name="solution")
+    normalized_metrics = _report_value(metrics, name="metrics")
+    rendered_metrics = _render_scientific_text(
+        normalized_solution, normalized_metrics
+    )
 
     payload = {
         "schema_version": CORRUPTION_REPORT_SCHEMA_VERSION,
         "context": normalized_context,
         "configuration": normalized_configuration,
+        "solution": normalized_solution,
         "metrics": normalized_metrics,
     }
     json_text = json.dumps(
@@ -195,12 +225,11 @@ def write_corruption_reports(
         if text_temporary is not None:
             text_temporary.unlink(missing_ok=True)
 
-    return CorruptionReportPaths(json_destination, text_destination)
+    return json_destination, text_destination
 
 
 __all__ = [
     "CORRUPTION_REPORT_SCHEMA_VERSION",
-    "CorruptionReportPaths",
     "ReportableCorruption",
     "write_corruption_reports",
 ]

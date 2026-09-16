@@ -397,6 +397,7 @@ class PublicContractTests(unittest.TestCase):
                 "SimulationResult",
                 "SIMULATION_REPORT_SCHEMA_VERSION",
                 "SUPPORTED_SIMULATION_REPORT_SCHEMAS",
+                "add_thermal_noise_inplace",
                 "get_phase_center",
                 "get_reference_frequency",
                 "natural_image_rms_from_simplenoise",

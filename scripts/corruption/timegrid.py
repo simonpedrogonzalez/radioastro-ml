@@ -2,25 +2,34 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
 import numpy as np
 
 
-@dataclass
+@dataclass(frozen=True)
 class TimeGrid:
     solint: str | int = "int"
-    interp: Literal["linear"] = "linear"
+    interp: Literal["linear", "nearest"] = "linear"
+    dt: str | float = field(init=False, repr=False)
 
     def __post_init__(self):
+        if self.interp not in ("linear", "nearest"):
+            raise ValueError("interp must be 'linear' or 'nearest'")
         if self.solint == "int":
-            self.dt = "int"
+            object.__setattr__(self, "dt", "int")
             return
+        if isinstance(self.solint, bool):
+            raise ValueError("solint must be 'int', '#s', '#m', or a positive integer")
         if isinstance(self.solint, int):
-            self.dt = float(self.solint)
+            if self.solint <= 0:
+                raise ValueError("integer solint must be positive")
+            object.__setattr__(self, "dt", float(self.solint))
             return
 
+        if not isinstance(self.solint, str):
+            raise TypeError("solint must be a string or integer")
         value = self.solint.strip().lower()
         if value.endswith("s"):
             seconds = int(value[:-1])
@@ -30,7 +39,9 @@ class TimeGrid:
             raise ValueError(
                 f"Invalid solint '{self.solint}'. Use 'int', '#s', or '#m'."
             )
-        self.dt = float(seconds)
+        if seconds <= 0:
+            raise ValueError("solint must resolve to a positive duration")
+        object.__setattr__(self, "dt", float(seconds))
 
     def get_times(self, times: np.ndarray, *, t0: float) -> tuple[np.ndarray, np.ndarray]:
         times = np.asarray(times, dtype=float)

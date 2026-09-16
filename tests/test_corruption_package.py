@@ -27,22 +27,23 @@ class CorruptionReportingTests(unittest.TestCase):
     def test_generic_writer_uses_object_owned_representations(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            result = write_corruption_reports(
+            json_path, text_path = write_corruption_reports(
                 _ExampleCorruption(),
                 json_path=root / "corruption.json",
                 text_path=root / "corruption.txt",
                 context={"sample_id": "0012-399", "seed": 7},
             )
-            payload = json.loads(result.json_path.read_text(encoding="utf-8"))
-            rendered = result.text_path.read_text(encoding="utf-8")
+            payload = json.loads(json_path.read_text(encoding="utf-8"))
+            rendered = text_path.read_text(encoding="utf-8")
 
         self.assertEqual(payload["schema_version"], CORRUPTION_REPORT_SCHEMA_VERSION)
         self.assertEqual(payload["context"], {"sample_id": "0012-399", "seed": 7})
         self.assertEqual(payload["configuration"], _ExampleCorruption().to_report_dict())
+        self.assertIsNone(payload["solution"])
         self.assertIsNone(payload["metrics"])
         self.assertIn("ExampleCorruption(strength=3.5)", rendered)
         self.assertIn("sample_id: 0012-399", rendered)
-        self.assertIn("Detectability metrics: not calculated", rendered)
+        self.assertIn("Corruption metrics: not calculated", rendered)
 
     def test_new_configuration_type_needs_no_writer_changes(self):
         class OtherCorruption:
@@ -54,12 +55,12 @@ class CorruptionReportingTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            paths = write_corruption_reports(
+            json_path, _ = write_corruption_reports(
                 OtherCorruption(),
                 json_path=root / "other.json",
                 text_path=root / "other.txt",
             )
-            payload = json.loads(paths.json_path.read_text(encoding="utf-8"))
+            payload = json.loads(json_path.read_text(encoding="utf-8"))
 
         self.assertEqual(payload["configuration"]["type"], "other")
 
@@ -93,13 +94,12 @@ class CorruptionReportingTests(unittest.TestCase):
                 def to_report_text(self):
                     return "invalid metrics"
 
-            corruption = _ExampleCorruption()
-            corruption.metrics = NonfiniteMetrics()
             with self.assertRaisesRegex(ValueError, "non-finite"):
                 write_corruption_reports(
-                    corruption,
+                    _ExampleCorruption(),
                     json_path=root / "metrics-nan.json",
                     text_path=root / "metrics-nan.txt",
+                    metrics=NonfiniteMetrics(),
                 )
             self.assertFalse((root / "metrics-nan.json").exists())
             self.assertFalse((root / "metrics-nan.txt").exists())
@@ -136,18 +136,18 @@ class CorruptionConfigurationTests(unittest.TestCase):
         from scripts import corruption
         from scripts.corruption.functions import Constant
         from scripts.corruption.metrics import (
-            ConstantGainParameters,
-            DetectabilityMetricDefinition,
-            DetectabilityMetrics,
+            ConstantGainSpec,
+            CorruptionMetricDefinition,
+            CorruptionMetrics,
         )
 
         self.assertIs(Constant, corruption.Constant)
-        self.assertIs(ConstantGainParameters, corruption.ConstantGainParameters)
+        self.assertIs(ConstantGainSpec, corruption.ConstantGainSpec)
         self.assertIs(
-            DetectabilityMetricDefinition,
-            corruption.DetectabilityMetricDefinition,
+            CorruptionMetricDefinition,
+            corruption.CorruptionMetricDefinition,
         )
-        self.assertIs(DetectabilityMetrics, corruption.DetectabilityMetrics)
+        self.assertIs(CorruptionMetrics, corruption.CorruptionMetrics)
 
     def test_current_constructor_and_method_interface_is_preserved(self):
         from scripts.corruption import AntennaGainCorruption
@@ -205,20 +205,16 @@ class CorruptionConfigurationTests(unittest.TestCase):
         self.assertIn("Constant(value=0.25)", corruption.to_report_text())
 
     def test_fbm_report_excludes_sampled_array_state(self):
-        import numpy as np
-
         from scripts.corruption import fBM
 
         function = fBM(max_amp=0.2, H=0.6)
-        function.t_grid = np.array([1.0, 2.0])
-        function.x_grid = np.array([0.0, 0.1])
         self.assertEqual(
             function.to_report_dict(),
             {"type": "fractional_brownian_motion", "max_amp": 0.2, "H": 0.6},
         )
         self.assertEqual(repr(function), "fBM(max_amp=0.2, H=0.6)")
 
-    def test_existing_build_and_apply_methods_still_return_self(self):
+    def test_build_and_apply_methods_are_explicit_non_fluent_calls(self):
         import numpy as np
 
         import scripts.corruption.core as core
@@ -272,7 +268,7 @@ class CorruptionConfigurationTests(unittest.TestCase):
             SCAN_NUMBER=np.array([1, 1]),
             OBSERVATION_ID=np.array([0, 0]),
         )
-        corruption = AntennaGainCorruption(TimeGrid(solint=1))
+        corruption = AntennaGainCorruption(TimeGrid(solint="int"))
         fake_table = FakeTable()
         with (
             patch.object(core, "make_template_gain_corrtab"),
@@ -282,11 +278,15 @@ class CorruptionConfigurationTests(unittest.TestCase):
             patch.object(core, "corrfun_plot_add"),
             patch.object(core, "corrfun_plot_finish"),
         ):
-            self.assertIs(corruption.build_corrtable("input.ms", "gain.G", seed=4), corruption)
+            self.assertIsNone(
+                corruption.build_corrtable("input.ms", "gain.G", seed=4)
+            )
 
         fake_simulator = FakeSimulator()
         with patch("casatools.simulator", return_value=fake_simulator):
-            self.assertIs(corruption.apply_corrtable("input.ms", "gain.G", seed=4), corruption)
+            self.assertIsNone(
+                corruption.apply_corrtable("input.ms", "gain.G", seed=4)
+            )
         self.assertEqual(fake_simulator.parameters["table"], "gain.G")
         self.assertFalse(fake_simulator.parameters["calwt"])
 

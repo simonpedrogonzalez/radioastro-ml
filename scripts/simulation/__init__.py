@@ -11,7 +11,7 @@ from .noise import (
     simplenoise_from_image_rms,
     theoretical_vla_simplenoise,
 )
-from .simulations import SimulationResult, simulate_ms
+from .simulations import SimulationResult, add_thermal_noise_inplace, simulate_ms
 from .reporting import (
     SIMULATION_REPORT_SCHEMA_VERSION,
     SUPPORTED_SIMULATION_REPORT_SCHEMAS,
@@ -24,6 +24,7 @@ __all__ = [
     "SimulationResult",
     "SIMULATION_REPORT_SCHEMA_VERSION",
     "SUPPORTED_SIMULATION_REPORT_SCHEMAS",
+    "add_thermal_noise_inplace",
     "get_phase_center",
     "get_reference_frequency",
     "natural_image_rms_from_simplenoise",

@@ -640,6 +640,11 @@ move to an Obsidian vault, archive, shared folder, or another machine.
 The preferred result is one self-contained HTML file. Also support a portable
 folder when retaining separate PNG files is more convenient.
 
+The implemented minimal exporter currently provides the preferred
+`single-html` mode. Portable-folder collection and optional source bundles are
+left as follow-up features so the initial implementation does not introduce a
+second HTML/CSS resource-copying subsystem.
+
 ## Why copying `report.html` is insufficient
 
 The current QMD templates read `report.json`, per-sample `qa.json`, and
@@ -683,22 +688,17 @@ export_detached_report(
     report,
     destination,
     *,
-    mode="single-html",
     overwrite=False,
-    include_source=False,
 ) -> ReportExport
 ```
 
 Where:
 
 - `report` is the experiment's `report.qmd`, not an arbitrary directory;
-- `destination` is either the final `.html` path for `single-html` mode or a
-  new directory for `folder` mode;
-- `mode` accepts only `"single-html"` or `"folder"`;
+- `destination` is the final `.html` path;
 - `overwrite=False` refuses an existing destination;
-- `include_source=False` excludes the QMD and build-time JSON by default; and
-- `ReportExport` returns the final HTML path, mode, exported byte count,
-  resource count, and optional export-manifest path.
+- `ReportExport` returns the final HTML path, mode, exported byte count, and
+  embedded-resource count.
 
 Typical use is deliberately separate from `QuartoReporter`:
 
@@ -727,8 +727,8 @@ python -m scripts.reporting.export \
     /path/to/vault/report.html
 ```
 
-The CLI should expose the same two modes and overwrite policy. It is an export
-command, not a publishing or synchronization service.
+The current CLI exposes the overwrite policy. It is an export command, not a
+publishing or synchronization service.
 
 ## Mode 1: self-contained HTML
 

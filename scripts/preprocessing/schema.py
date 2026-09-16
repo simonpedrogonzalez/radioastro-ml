@@ -15,9 +15,10 @@ from typing import Any
 
 SAMPLE_SCHEMA_VERSION = 1
 DATASET_SCHEMA_VERSION = 1
-CORRUPTION_SCHEMA_VERSION = 1
+CORRUPTION_SCHEMA_VERSION = 2
 SUPPORTED_QA_SCHEMAS = (2, 3)
-SUPPORTED_SIMULATION_SCHEMAS = (1, 2)
+SUPPORTED_SIMULATION_SCHEMAS = (1, 2, 3)
+SUPPORTED_CORRUPTION_SCHEMAS = (1, 2)
 CHANNEL_ORDER = ("dirty", "clean", "residual")
 
 
@@ -299,7 +300,7 @@ def _validate_json_metadata(manifest: SampleManifest) -> None:
             name=f"corruption report {index}.schema_version",
             minimum=1,
         )
-        if version != CORRUPTION_SCHEMA_VERSION:
+        if version not in SUPPORTED_CORRUPTION_SCHEMAS:
             raise ValueError(f"Unsupported corruption report schema_version {version}")
         if not isinstance(report.get("context"), Mapping):
             raise ValueError(f"corruption report {index}.context must be an object")
@@ -561,6 +562,7 @@ __all__ = [
     "DATASET_SCHEMA_VERSION",
     "SAMPLE_SCHEMA_VERSION",
     "SUPPORTED_QA_SCHEMAS",
+    "SUPPORTED_CORRUPTION_SCHEMAS",
     "SUPPORTED_SIMULATION_SCHEMAS",
     "CorruptionReference",
     "DatasetManifest",

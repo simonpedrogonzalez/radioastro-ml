@@ -106,12 +106,21 @@ def metric_row(source_id, suffix, level):
     record = records.get(f"{source_id}_{suffix}", {})
     qa_metrics = (record.get("qa", {}).get("metrics") or {})
     residual = qa_metrics.get("residual") or {}
-    corruption = record.get("corruption", {}).get("metrics") or {}
-    physical = corruption.get("amplitude_gain")
+    corruption_report = record.get("corruption", {})
+    context = corruption_report.get("context") or {}
+    solution = corruption_report.get("solution") or {}
+    corruption = corruption_report.get("metrics") or {}
+    antenna = None
+    if solution:
+        antenna_id = solution.get("antenna_id")
+        antenna_name = context.get("antenna_name")
+        antenna = f"{antenna_name} (ID {antenna_id})"
+    physical = solution.get("g_amp")
     if physical is None:
-        physical = corruption.get("phase_offset_deg")
+        physical = solution.get("phi_deg")
     values = (
         level,
+        antenna,
         qa_metrics.get("clean_peak_jy_per_beam"),
         residual.get("scaled_mad_jy_per_beam"),
         residual.get("rms_jy_per_beam"),
@@ -119,9 +128,9 @@ def metric_row(source_id, suffix, level):
         residual.get("p99_over_scaled_mad"),
         residual.get("p99_5_over_scaled_mad"),
         qa_metrics.get("dynamic_range_scaled_mad"),
-        corruption.get("gain_error_magnitude"),
-        corruption.get("epsilon_vis"),
-        corruption.get("rho_corr"),
+        solution.get("eps_g"),
+        corruption.get("eps_vis"),
+        corruption.get("SNR_corr"),
         physical,
     )
     return "<tr>" + "".join(f"<td>{show(value)}</td>" for value in values) + "</tr>"
@@ -129,14 +138,17 @@ def metric_row(source_id, suffix, level):
 
 def metrics_table(source_id, family):
     rows = [metric_row(source_id, "not_corrupted", 0)]
-    for target in report["configuration"]["targets"]:
+    for target in report["configuration"]["SNR_corr_targets"]:
         text = str(int(target)) if float(target).is_integer() else f"{target:g}"
-        rows.append(metric_row(source_id, f"{family}_rho_{text}", text))
+        rows.append(metric_row(source_id, f"{family}_snr_{text}", text))
     physical = "Amplitude gain" if family == "amp" else "Phase offset (deg)"
     headings = (
-        "rho_target", "clean peak (Jy/beam)", "sigma (Jy/beam)",
-        "rms (Jy/beam)", "max", "p99", "p995", "DR",
-        "epsilon_g", "epsilon_vis", "rho_corr", physical,
+        "SNR_corr_target", "Antenna", "clean peak (Jy/beam)", "sigma_R (Jy/beam)",
+        "rms_R (Jy/beam)", "max=|R|_max/sigma_R",
+        "p99=P99(|R|)/sigma_R", "p995=P99.5(|R|)/sigma_R",
+        "DR=clean_peak/sigma_R", "eps_g=|g-1|",
+        "eps_vis=||Delta_V||_2/||V||_2",
+        "SNR_corr=||Delta_V/sigma||_2", physical,
     )
     return (
         '<table class="metrics"><thead><tr>'
@@ -169,11 +181,11 @@ def corruption_comparison(rows):
     cells = ['<div class="corruption-grid">']
     for row in rows:
         path = esc(row.get("path", ""))
-        target = show(row.get("target_rho_corr"))
+        target = show(row.get("SNR_corr_target"))
         cells.append(
             f'<figure><a href="{path}" target="_blank"><img src="{path}" '
-            f'alt="rho_corr={target} applied corruption"></a>'
-            f'<figcaption>rho_corr={target}</figcaption></figure>'
+            f'alt="SNR_corr={target} applied corruption"></a>'
+            f'<figcaption>SNR_corr_target={target}</figcaption></figure>'
         )
     cells.append("</div>")
     return "".join(cells)
@@ -184,11 +196,17 @@ print(f"<p>{esc(report.get('description', ''))}</p>")
 iteration = report.get("dataset_iteration") or {}
 configuration = report.get("configuration") or {}
 print("<h3>Metric definitions</h3>")
-print("<p><span class='muted'>R denotes residual-image pixels inside the dashed 3-beam to border-minus-1-beam annulus. rho_corr is visibility-space; max, p99, p995, and DR describe what is visible in the image.</span></p>")
+print("<p><span class='muted'>R denotes residual-image pixels inside the dashed 3-beam to border-minus-1-beam annulus. V is the noiseless sky visibility, Delta_V=V_corr-V is measured before noise, and every branch receives the same thermal-noise request and seed. SNR_corr is visibility-space; max, p99, p995, and DR describe the image.</span></p>")
 print(equations(configuration.get("image_metric_definitions", [])))
 print(equations(configuration.get("corruption_metric_definitions", [])))
 print('<div class="summary">')
 print(f"Partition: <strong>{esc(report.get('partition'))}</strong><br>")
+partition_counts = report.get("source_partition_counts") or {}
+print(
+    "Completed thermal sources by partition: "
+    + " · ".join(f"{esc(name)}={show(count)}" for name, count in partition_counts.items())
+    + "<br>"
+)
 print(f"Completed sources: {len(report.get('sources', []))} / {len(report.get('source_ids', []))}<br>")
 print(f"Retained dataset samples: {iteration.get('sample_count', len(dataset.get('samples', [])))}<br>")
 print(f"Intermediate CASA products retained: {report['configuration'].get('keep_intermediate_products')}<br>")
@@ -200,6 +218,12 @@ print(
 print(f"Reusable thermal source run: <span class='muted'>{esc(report.get('source_run'))}</span>")
 if report.get("failures"):
     print("<div class='failure'>" + esc(report["failures"]) + "</div>")
+if report.get("excluded_sources"):
+    excluded = "; ".join(
+        f"{item.get('id')} ({item.get('partition')}): {item.get('error')}"
+        for item in report["excluded_sources"]
+    )
+    print("<div class='failure'>Excluded upstream sources: " + esc(excluded) + "</div>")
 print("</div>")
 
 for source in report.get("sources", []):
@@ -212,10 +236,10 @@ for source in report.get("sources", []):
         manifest_path = HERE / "samples" / f"{source_id}_not_corrupted"
         simulation = load_json(manifest_path / simulation_manifest.get("simulation", ""))
     noise = simulation.get("noise") or {}
-    print(f"<h2>{esc(source_id)}</h2>")
+    print(f"<h2>{esc(source_id)} <span class='muted'>[{esc(source.get('partition'))}]</span></h2>")
     print('<div class="summary">')
     print(
-        f"Antenna: {esc(source.get('antenna_name'))} (ID {source.get('antenna_id')}) · "
+        "Corruption antenna: independently selected per variant · "
         f"matched source S/N: {show(source.get('source_snr'))} · "
         f"predicted image RMS: {show(source.get('predicted_image_rms_jy_per_beam'))} Jy/beam · "
         f"thermal simplenoise: {show(noise.get('simplenoise_jy'))} Jy · "

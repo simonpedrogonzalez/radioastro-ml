@@ -7,6 +7,10 @@ the current repository code with the updated scientific definition in:
 
 - `/Users/u1528314/Documents/Obsidian Vault/Notes/Constant Antenna Phase and Amplitude Error Simulation.md`
 
+The one-source restriction below was a validation stage. After that run passed,
+the dataset driver was expanded to every completed source in all three fixed
+preprocessing partitions.
+
 The inspected implementation includes:
 
 - `scripts/corruption/`, especially `metrics.py`, `functions.py`, `core.py`,

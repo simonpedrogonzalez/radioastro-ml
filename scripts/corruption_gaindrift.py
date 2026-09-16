@@ -1620,14 +1620,15 @@ def new_corruption():
     ants, _ = get_unflagged_antennas(MS_IN)
     # ants = [ants['ea01'], ants['ea02'], ants['ea03']]
 
-    AntennaGainCorruption(
+    corruption = AntennaGainCorruption(
         timegrid=TimeGrid(solint='10m', interp="linear"),
         amp_fn=None,
         query=GTabQuery().where_in(GCOLS.ANTENNA1, [0, 1]).group_by([GCOLS.ANTENNA1]),
         # phase_fn=RandomPhaseMaxSineWave(max_amp=np.deg2rad(10.0), period_s=60*60*2)
         phase_fn=fBM(max_amp=0.15 * np.pi, H=0.05),
-    ).build_corrtable(MS_OUT, gtab_injected, seed=0)\
-        .apply_corrtable(MS_OUT, gtab_injected)
+    )
+    corruption.build_corrtable(MS_OUT, gtab_injected, seed=0)
+    corruption.apply_corrtable(MS_OUT, gtab_injected)
 
     print("CORRUPTION")
     col_diff(MS_IN, MS_OUT)

@@ -12,7 +12,7 @@ from .tables import GCOLS, GTab, GTabQuery, make_template_gain_corrtab
 
 if TYPE_CHECKING:
     from .functions import CorrFn
-    from .metrics import ConstantGainParameters
+    from .metrics import ConstantGainSolution
 else:
     CorrFn = Any
 
@@ -43,7 +43,7 @@ class Corruption:
         *,
         seed: int = 0,
         diagnostic_plot: str | Path = "images/corruption_function.png",
-    ):
+    ) -> None:
         raise NotImplementedError
 
     def to_report_dict(self) -> dict[str, object]:
@@ -69,29 +69,27 @@ class AntennaGainCorruption(GainCorruption):
         self.amp_fn = amp_fn
         self.phase_fn = phase_fn
         self.query = query
-        self.metrics = None
 
     @classmethod
-    def from_detectability(
+    def from_constant_gain_solution(
         cls,
         timegrid,
-        parameters: "ConstantGainParameters",
+        solution: "ConstantGainSolution",
     ) -> "AntennaGainCorruption":
-        """Construct a one-antenna constant gain at a requested detectability."""
+        """Construct a one-antenna constant gain from an explicit solution."""
         from .functions import Constant
-        from .metrics import ConstantGainParameters
+        from .metrics import ConstantGainSolution
 
-        if not isinstance(parameters, ConstantGainParameters):
-            raise TypeError("parameters must be ConstantGainParameters")
-        constant = Constant.from_detectability(parameters)
+        if not isinstance(solution, ConstantGainSolution):
+            raise TypeError("solution must be ConstantGainSolution")
+        constant = Constant(solution.constant_value)
         query = GTabQuery().where_eq(
-            GCOLS.ANTENNA1, parameters.antenna_id
+            GCOLS.ANTENNA1, solution.antenna_id
         ).group_by([GCOLS.ANTENNA1])
-        if parameters.corruption_type == "amp":
+        if solution.corruption_type == "amp":
             result = cls(timegrid, amp_fn=constant, query=query)
         else:
             result = cls(timegrid, phase_fn=constant, query=query)
-        result.metrics = constant.metrics
         return result
 
     def __repr__(self) -> str:
@@ -154,7 +152,7 @@ class AntennaGainCorruption(GainCorruption):
         *,
         seed: int = 0,
         diagnostic_plot: str | Path = "images/corruption_function.png",
-    ):
+    ) -> None:
         try:
             from casatools import table
         except ImportError as exc:
@@ -167,7 +165,11 @@ class AntennaGainCorruption(GainCorruption):
             gtab0 = GTab.from_casa_table(tb)
             t0_global = float(gtab0.TIME.min())
             tf_global = float(gtab0.TIME.max())
-            centers = self.tg.full_grid(t0_global, tf_global)
+            global_centers = (
+                None
+                if self.tg.dt == "int"
+                else self.tg.full_grid(t0_global, tf_global)
+            )
             current_parameters = np.asarray(tb.getcol("CPARAM"))
             new_parameters = current_parameters.copy()
             query = (self.query or GTabQuery()).sort_by([GCOLS.TIME])
@@ -176,7 +178,6 @@ class AntennaGainCorruption(GainCorruption):
 
             figure, phase_axis, amplitude_axis = corrfun_plot_start()
             for group_key, gtab in groups:
-                print(f"Grup: {group_key}")
                 if gtab.nrow == 0:
                     continue
 
@@ -185,19 +186,24 @@ class AntennaGainCorruption(GainCorruption):
                 rng = np.random.default_rng(seed + key_mix)
                 times = gtab.TIME
                 row_ids = gtab.ROWID
+                centers = (
+                    np.unique(np.sort(times))
+                    if global_centers is None
+                    else global_centers
+                )
 
                 if self.amp_fn is None:
+                    amp_realization = None
                     amplitude_centers = np.ones_like(centers, dtype=float)
                 else:
-                    amplitude_centers = self.amp_fn.sample(
-                        rng, times=centers
-                    ).eval(centers)
+                    amp_realization = self.amp_fn.sample(rng, times=centers)
+                    amplitude_centers = amp_realization.eval(centers)
                 if self.phase_fn is None:
+                    phase_realization = None
                     phase_centers = np.zeros_like(centers, dtype=float)
                 else:
-                    phase_centers = self.phase_fn.sample(
-                        rng, times=centers
-                    ).eval(centers)
+                    phase_realization = self.phase_fn.sample(rng, times=centers)
+                    phase_centers = phase_realization.eval(centers)
 
                 if amplitude_centers.shape != centers.shape or phase_centers.shape != centers.shape:
                     raise ValueError(
@@ -207,14 +213,16 @@ class AntennaGainCorruption(GainCorruption):
                 gain_centers = amplitude_centers * np.exp(1j * phase_centers)
 
                 if self.tg.dt == "int":
-                    if self.amp_fn is None:
-                        amplitude_rows = np.ones_like(times, dtype=float)
-                    else:
-                        amplitude_rows = self.amp_fn.sample(rng, times=times).eval(times)
-                    if self.phase_fn is None:
-                        phase_rows = np.zeros_like(times, dtype=float)
-                    else:
-                        phase_rows = self.phase_fn.sample(rng, times=times).eval(times)
+                    amplitude_rows = (
+                        np.ones_like(times, dtype=float)
+                        if amp_realization is None
+                        else amp_realization.eval(times)
+                    )
+                    phase_rows = (
+                        np.zeros_like(times, dtype=float)
+                        if phase_realization is None
+                        else phase_realization.eval(times)
+                    )
                     gain = amplitude_rows * np.exp(1j * phase_rows)
                 elif self.tg.interp == "linear":
                     amplitude_rows = np.interp(times, centers, amplitude_centers)
@@ -238,8 +246,8 @@ class AntennaGainCorruption(GainCorruption):
                 corrfun_plot_add(
                     phase_axis,
                     amplitude_axis,
-                    amp_fn=self.amp_fn,
-                    phase_fn=self.phase_fn,
+                    amp_fn=amp_realization,
+                    phase_fn=phase_realization,
                     centers=centers,
                     amp_eff=amplitude_centers,
                     phase_eff=phase_centers,
@@ -258,9 +266,8 @@ class AntennaGainCorruption(GainCorruption):
             tb.flush()
         finally:
             tb.close()
-        return self
 
-    def apply_corrtable(self, ms: str, corrtab: str, seed: int = 0):
+    def apply_corrtable(self, ms: str, corrtab: str, seed: int = 0) -> None:
         try:
             from casatools import simulator
         except ImportError as exc:
@@ -272,7 +279,6 @@ class AntennaGainCorruption(GainCorruption):
         sm.setapply(table=corrtab, type="G", interp="linear", calwt=False)
         sm.corrupt()
         sm.done()
-        return self
 
 
 __all__ = ["AntennaGainCorruption", "Corruption", "GainCorruption"]
