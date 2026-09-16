@@ -111,7 +111,7 @@ class CorruptionMetricTests(unittest.TestCase):
             "corruption_type": "amp",
             "SNR_corr_target": 2.0,
             "sigma": 2.0,
-            "sign": 1,
+            "seed": 0,
         }
         values.update(overrides)
         return ConstantGainSpec(**values)
@@ -141,13 +141,13 @@ class CorruptionMetricTests(unittest.TestCase):
             norms = measure_constant_gain_norms(self._spec())
         target = 1.0
         amplitude = solve_constant_gain(
-            self._spec(SNR_corr_target=target, sign=-1), norms
+            self._spec(SNR_corr_target=target, seed=1), norms
         )
         phase = solve_constant_gain(
             self._spec(
                 SNR_corr_target=target,
                 corruption_type="phase",
-                sign=-1,
+                seed=1,
             ),
             norms,
         )
@@ -158,6 +158,18 @@ class CorruptionMetricTests(unittest.TestCase):
         self.assertAlmostEqual(phase.phi_deg, math.degrees(phase.phi_rad))
         self.assertAlmostEqual(amplitude.SNR_corr_expected, target)
         self.assertAlmostEqual(amplitude.eps_vis_expected, 2.0 / math.sqrt(28.0))
+
+    def test_regular_constant_spec_samples_a_seeded_sign(self):
+        from scripts.corruption import ConstantGainSpec
+
+        arguments = (self.V_ms, 2, "amp", 2.0, 2.0)
+        positive = ConstantGainSpec(*arguments, seed=0)
+        positive_again = ConstantGainSpec(*arguments, seed=0)
+        negative = ConstantGainSpec(*arguments, seed=1)
+
+        self.assertEqual(positive.sign, positive_again.sign)
+        self.assertEqual(positive.sign, 1)
+        self.assertEqual(negative.sign, -1)
 
     def test_measured_Delta_V_metrics_match_hand_calculation(self):
         import scripts.corruption.metrics as metric_module
@@ -221,7 +233,7 @@ class CorruptionMetricTests(unittest.TestCase):
         with patch.object(metric_module, "_new_table", side_effect=factory):
             norms = measure_constant_gain_norms(self._spec())
         with self.assertRaisesRegex(ValueError, "non-positive"):
-            solve_constant_gain(self._spec(sign=-1), norms)
+            solve_constant_gain(self._spec(seed=1), norms)
         with self.assertRaisesRegex(ValueError, "eps_g <= 2"):
             solve_constant_gain(
                 self._spec(corruption_type="phase", SNR_corr_target=5.0), norms
@@ -268,7 +280,7 @@ class CorruptionMetricCasaIntegrationTests(unittest.TestCase):
             )
             sigma = 0.001
             solution = solve_constant_gain(
-                ConstantGainSpec(V_result.ms_path, 0, "amp", 5.0, sigma)
+                ConstantGainSpec(V_result.ms_path, 0, "amp", 5.0, sigma, 2718)
             )
             V_corr = root / "V_corr.ms"
             shutil.copytree(V_result.ms_path, V_corr)

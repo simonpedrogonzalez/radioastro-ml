@@ -511,6 +511,7 @@ def _finalize_sample(
             or norms is None
         ):
             raise RuntimeError("Corrupted variants require a selected antenna and norms")
+        corruption_seed = _stable_seed(source.source_id, variant.label_name)
         solution = solve_constant_gain(
             ConstantGainSpec(
                 V_ms,
@@ -518,13 +519,13 @@ def _finalize_sample(
                 variant.family,
                 variant.SNR_corr_target,
                 sigma,
+                corruption_seed,
             ),
             norms,
         )
         corruption = AntennaGainCorruption.from_constant_gain_solution(
             TimeGrid(CORRUPTION_SOLINT), solution
         )
-        corruption_seed = _stable_seed(source.source_id, variant.label_name)
         gain_table = root / f"{source.source_id}_{variant.label_name}.G"
         corruption.build_corrtable(
             str(observed_ms),
@@ -790,9 +791,9 @@ def _new_report_manifest(
         "description": (
             "Every completed source in the fixed train, test, and validation partitions "
             "has one uncorrupted baseline and constant one-antenna amplitude and phase "
-            "variants. Each corrupted variant independently draws an unflagged antenna. "
-            "SNR_corr=||Delta_V/sigma||_2 is measured against noiseless V before the "
-            "shared thermal noise is added."
+            "variants. Each corrupted variant independently draws an unflagged antenna "
+            "and a uniform random sign from {-1, +1}. SNR_corr=||Delta_V/sigma||_2 is "
+            "measured against noiseless V before the shared thermal noise is added."
         ),
         "partition": "all",
         "source_ids": list(source_ids),
@@ -811,6 +812,10 @@ def _new_report_manifest(
             "antenna_selection_seed_scheme": (
                 "stable SHA-256 seed of base_seed, source_id, and "
                 "'<variant_label>:antenna'"
+            ),
+            "constant_error_sign_policy": (
+                "uniform random choice from {-1, +1} using the per-variant "
+                "corruption seed"
             ),
             "imaging_configuration": "DefaultImagingConfig",
             "keep_intermediate_products": False,
@@ -970,6 +975,10 @@ def run_experiment(
                                             variant.family,
                                             variant.SNR_corr_target,
                                             sigma,
+                                            _stable_seed(
+                                                source.source_id,
+                                                variant.label_name,
+                                            ),
                                         )
                                     )
                                 )

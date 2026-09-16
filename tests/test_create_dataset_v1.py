@@ -91,6 +91,14 @@ class FullDatasetConfigurationTests(unittest.TestCase):
         arguments = experiment._parse_args([])
         self.assertFalse(hasattr(arguments, "source_id"))
 
+    def test_report_uses_realized_gain_and_signed_phase(self):
+        template = experiment.REPORT_TEMPLATE.read_text(encoding="utf-8")
+
+        self.assertIn('physical = solution.get("g_amp")', template)
+        self.assertIn('physical = solution.get("phi_deg")', template)
+        self.assertIn('"Amplitude gain"', template)
+        self.assertIn('"Phase offset (deg)"', template)
+
     def test_run_visits_every_source_and_variant(self):
         source_ids = (TRAIN_IDS[0], TEST_IDS[0], VAL_IDS[0])
         sources = {
