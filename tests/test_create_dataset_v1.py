@@ -22,6 +22,28 @@ class FullDatasetConfigurationTests(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertIn(first, choices)
 
+    def test_fixed_overrides_or_random_per_variant_seeds(self):
+        first, second = experiment.VARIANTS[:2]
+
+        with patch.object(experiment, "FIXED_ANTENNA_ID", 1):
+            self.assertIsNone(experiment._antenna_seed("0012-399", first))
+            self.assertEqual(
+                experiment._select_fixed_antenna(((0, "ea01"), (1, "ea02")), 1),
+                (1, "ea02"),
+            )
+        with patch.object(experiment, "FIXED_ANTENNA_ID", None):
+            self.assertNotEqual(
+                experiment._antenna_seed("0012-399", first),
+                experiment._antenna_seed("0012-399", second),
+            )
+        with patch.object(experiment, "FIXED_ERROR_SIGN", 1):
+            self.assertIsNone(experiment._error_direction_seed("0012-399", first))
+        with patch.object(experiment, "FIXED_ERROR_SIGN", None):
+            self.assertNotEqual(
+                experiment._error_direction_seed("0012-399", first),
+                experiment._error_direction_seed("0012-399", second),
+            )
+
     def test_unflagged_antenna_choices_are_sorted(self):
         fake_corruption = SimpleNamespace(
             get_unflagged_antennas=Mock(
@@ -91,6 +113,14 @@ class FullDatasetConfigurationTests(unittest.TestCase):
         arguments = experiment._parse_args([])
         self.assertFalse(hasattr(arguments, "source_id"))
 
+    def test_source_ids_to_process_selects_and_validates_ids(self):
+        selected = (TRAIN_IDS[0], TEST_IDS[0])
+        with patch.object(experiment, "SOURCE_IDS_TO_PROCESS", selected):
+            self.assertEqual(experiment._configured_source_ids(), selected)
+        with patch.object(experiment, "SOURCE_IDS_TO_PROCESS", ("not-a-source",)):
+            with self.assertRaisesRegex(ValueError, "unknown IDs"):
+                experiment._configured_source_ids()
+
     def test_report_uses_realized_gain_and_signed_phase(self):
         template = experiment.REPORT_TEMPLATE.read_text(encoding="utf-8")
 
@@ -131,7 +161,7 @@ class FullDatasetConfigurationTests(unittest.TestCase):
                 pass
 
         fake_corruption = SimpleNamespace(
-            ConstantGainSpec=lambda *args: args,
+            ConstantGainSpec=lambda *args, **kwargs: (args, kwargs),
             measure_constant_gain_norms=lambda spec: object(),
         )
         manifest = lambda source_run, ids, excluded: {
@@ -165,6 +195,8 @@ class FullDatasetConfigurationTests(unittest.TestCase):
             _shared_source_display_limits=Mock(return_value={}),
             _write_comparison_plots=Mock(return_value={"panels": [], "recipes": {}}),
             _cleanup_V_work=Mock(),
+            FIXED_ANTENNA_ID=None,
+            FIXED_ERROR_SIGN=None,
         ):
             output = experiment.run_experiment(output_dir=temporary)
             report = json.loads(

@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 import operator
 import random
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Literal
 
@@ -56,8 +56,8 @@ class ConstantGainSpec:
     corruption_type: Literal["amp", "phase"]
     SNR_corr_target: float
     sigma: float
-    seed: int
-    sign: Literal[-1, 1] = field(init=False)
+    seed: int | None = None
+    sign: Literal[-1, 1] | None = None
 
     def __post_init__(self) -> None:
         if self.corruption_type not in ("amp", "phase"):
@@ -65,16 +65,35 @@ class ConstantGainSpec:
                 "corruption_type must be exactly 'amp' or 'phase', "
                 f"got {self.corruption_type!r}"
             )
-        if isinstance(self.seed, bool):
-            raise ValueError(f"seed must be an integer, got {self.seed!r}")
-        try:
-            seed = operator.index(self.seed)
-        except TypeError as exc:
-            raise ValueError(f"seed must be an integer, got {self.seed!r}") from exc
+        seed = self.seed
+        if seed is not None:
+            if isinstance(seed, bool):
+                raise ValueError(f"seed must be an integer, got {seed!r}")
+            try:
+                seed = operator.index(seed)
+            except TypeError as exc:
+                raise ValueError(f"seed must be an integer, got {seed!r}") from exc
+            seed = int(seed)
+        sign = self.sign
+        if sign is None:
+            if seed is None:
+                raise ValueError("seed is required when sign is not fixed")
+            sign = random.Random(seed).choice((-1, 1))
+        else:
+            if isinstance(sign, bool):
+                raise ValueError(f"sign must be exactly -1 or 1, got {sign!r}")
+            try:
+                sign = operator.index(sign)
+            except TypeError as exc:
+                raise ValueError(
+                    f"sign must be exactly -1 or 1, got {sign!r}"
+                ) from exc
+            if sign not in (-1, 1):
+                raise ValueError(f"sign must be exactly -1 or 1, got {sign!r}")
         object.__setattr__(self, "V_ms", _existing_ms(self.V_ms, name="V_ms"))
         object.__setattr__(self, "antenna_id", _antenna_id(self.antenna_id))
-        object.__setattr__(self, "seed", int(seed))
-        object.__setattr__(self, "sign", random.Random(seed).choice((-1, 1)))
+        object.__setattr__(self, "seed", seed)
+        object.__setattr__(self, "sign", int(sign))
         object.__setattr__(
             self,
             "SNR_corr_target",

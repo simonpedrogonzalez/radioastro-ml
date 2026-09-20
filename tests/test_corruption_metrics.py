@@ -171,6 +171,16 @@ class CorruptionMetricTests(unittest.TestCase):
         self.assertEqual(positive.sign, 1)
         self.assertEqual(negative.sign, -1)
 
+    def test_regular_constant_spec_accepts_a_fixed_sign_without_a_seed(self):
+        from scripts.corruption import ConstantGainSpec
+
+        positive = ConstantGainSpec(self.V_ms, 2, "amp", 2.0, 2.0, sign=1)
+        negative = ConstantGainSpec(self.V_ms, 2, "phase", 2.0, 2.0, sign=-1)
+
+        self.assertEqual(positive.sign, 1)
+        self.assertEqual(negative.sign, -1)
+        self.assertIsNone(positive.seed)
+
     def test_measured_Delta_V_metrics_match_hand_calculation(self):
         import scripts.corruption.metrics as metric_module
         from scripts.corruption import measure_corruption_metrics

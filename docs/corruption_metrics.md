@@ -73,9 +73,9 @@ For a phase corruption:
 \phi_{\mathrm{rad}}=s\,2\arcsin(\epsilon_g/2).
 \]
 
-Constructing a `ConstantGainSpec` draws `s` uniformly from `{-1, +1}` using
-the supplied seed. The sign is therefore random across variants and
-reproducible when a run is resumed.
+`ConstantGainSpec` accepts either an explicit `s` or a seed from which it draws
+`s` uniformly from `{-1, +1}`. Seeded signs are reproducible when a run is
+resumed.
 
 The driver measures `Delta_V` from the actual post-CASA `V_corr` and verifies
 that measured `SNR_corr` and `eps_vis` match the solved values before adding
@@ -84,8 +84,7 @@ noise.
 ## Package API
 
 - `ConstantGainSpec` holds `V_ms`, `antenna_id`, `corruption_type`,
-  `SNR_corr_target`, `sigma`, and `seed`; construction samples and stores its
-  reproducible sign.
+  `SNR_corr_target`, `sigma`, and either a fixed `sign` or a random-sign `seed`.
 - `measure_constant_gain_norms(spec)` measures `V_L2`, `V_Ak_L2`, and
   `V_Ak_over_sigma_L2` from `V`.
 - `solve_constant_gain(spec, norms)` returns a `ConstantGainSolution`.

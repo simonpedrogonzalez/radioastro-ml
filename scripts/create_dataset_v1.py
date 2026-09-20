@@ -26,7 +26,7 @@ import traceback
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Literal, Sequence
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -40,8 +40,35 @@ SNR_CORR_TARGETS = (10.0, 30.0, 50.0, 100.0)
 CORRUPTION_SOLINT = "10m"
 SNR_CORR_REL_TOL = 0.01
 BASE_SEED = 20260914
+# None processes every available source in the fixed partitions. To restrict a
+# run, set a tuple such as ("0012-399", "0846-261").
+SOURCE_IDS_TO_PROCESS: tuple[str, ...] | None = (
+    "0012-399",
+    "0846-261",
+    "0005+383",
+    "1513-102",
+)
+# Set either override to None for the default independent random draw per
+# source variant. Integer values are shared globally by all sources/variants.
+FIXED_ANTENNA_ID: int | None = 1
+FIXED_ERROR_SIGN: Literal[-1, 1] | None = 1
+if FIXED_ANTENNA_ID is not None and (
+    isinstance(FIXED_ANTENNA_ID, bool)
+    or not isinstance(FIXED_ANTENNA_ID, int)
+    or FIXED_ANTENNA_ID < 0
+):
+    raise ValueError("FIXED_ANTENNA_ID must be a nonnegative integer or None")
+if FIXED_ERROR_SIGN not in (None, -1, 1) or isinstance(FIXED_ERROR_SIGN, bool):
+    raise ValueError("FIXED_ERROR_SIGN must be -1, +1, or None")
 ANTENNA_SELECTION_POLICY = (
-    "independent_uniform_with_replacement_from_unflagged_antennas_per_variant"
+    f"fixed antenna ID {FIXED_ANTENNA_ID} shared by all sources and variants"
+    if FIXED_ANTENNA_ID is not None
+    else "independent_uniform_with_replacement_from_unflagged_antennas_per_variant"
+)
+CONSTANT_ERROR_SIGN_POLICY = (
+    f"fixed sign {FIXED_ERROR_SIGN:+d} shared by all sources and variants"
+    if FIXED_ERROR_SIGN is not None
+    else "uniform random choice from {-1, +1} using the per-variant corruption seed"
 )
 REPORT_EVERY_SOURCES = 5
 MIN_FREE_HEADROOM_BYTES = 2 * 1024**3
@@ -149,10 +176,28 @@ def _load_thermal_run(path: Path, required_ids: Sequence[str]) -> dict[str, Any]
     return manifest
 
 
+def _configured_source_ids() -> tuple[str, ...]:
+    from scripts.preprocessing import ALL_IDS
+
+    if SOURCE_IDS_TO_PROCESS is None:
+        return tuple(ALL_IDS)
+    source_ids = tuple(SOURCE_IDS_TO_PROCESS)
+    if not source_ids:
+        raise ValueError("SOURCE_IDS_TO_PROCESS must not be empty")
+    if any(not isinstance(source_id, str) for source_id in source_ids):
+        raise ValueError("SOURCE_IDS_TO_PROCESS must contain only source ID strings")
+    if len(set(source_ids)) != len(source_ids):
+        raise ValueError("SOURCE_IDS_TO_PROCESS contains duplicate source IDs")
+    unknown = [source_id for source_id in source_ids if source_id not in ALL_IDS]
+    if unknown:
+        raise ValueError(f"SOURCE_IDS_TO_PROCESS contains unknown IDs: {unknown}")
+    return source_ids
+
+
 def find_thermal_run(
     source_run: str | Path | None = None,
 ) -> tuple[Path, dict[str, Any], tuple[str, ...]]:
-    from scripts.preprocessing import ALL_IDS
+    requested_ids = _configured_source_ids()
 
     if source_run is not None:
         candidates = [Path(source_run).expanduser().resolve()]
@@ -171,7 +216,13 @@ def find_thermal_run(
                 for item in manifest.get("samples", [])
                 if isinstance(item, dict)
             }
-            source_ids = tuple(source_id for source_id in ALL_IDS if source_id in completed)
+            source_ids = (
+                requested_ids
+                if SOURCE_IDS_TO_PROCESS is not None
+                else tuple(
+                    source_id for source_id in requested_ids if source_id in completed
+                )
+            )
             if not source_ids:
                 raise ValueError("no completed partitioned sources")
             usable.append(
@@ -242,6 +293,18 @@ def _stable_seed(source_id: str, suffix: str) -> int:
         f"{BASE_SEED}:{source_id}:{suffix}".encode("utf-8")
     ).digest()
     return int.from_bytes(digest[:8], "big") % 2_147_483_646 + 1
+
+
+def _antenna_seed(source_id: str, variant: Variant) -> int | None:
+    if FIXED_ANTENNA_ID is not None:
+        return None
+    return _stable_seed(source_id, f"{variant.label_name}:antenna")
+
+
+def _error_direction_seed(source_id: str, variant: Variant) -> int | None:
+    if FIXED_ERROR_SIGN is not None:
+        return None
+    return _stable_seed(source_id, variant.label_name)
 
 
 def _sample_id(source_id: str, suffix: str) -> str:
@@ -453,6 +516,17 @@ def _select_antenna(
     return random.Random(seed).choice(choices)
 
 
+def _select_fixed_antenna(
+    choices: Sequence[tuple[int, str]], antenna_id: int
+) -> tuple[int, str]:
+    try:
+        return next(choice for choice in choices if choice[0] == antenna_id)
+    except StopIteration as exc:
+        raise RuntimeError(
+            f"Fixed antenna ID {antenna_id} is not available in unflagged rows"
+        ) from exc
+
+
 def _assert_imaging_match(source_qa: dict[str, Any], result: Any) -> None:
     expected = source_qa.get("effective_imaging_parameters") or {}
     actual = result.effective_imaging_parameters
@@ -471,6 +545,7 @@ def _finalize_sample(
     antenna_id: int | None,
     antenna_name: str | None,
     antenna_selection_seed: int | None,
+    error_direction_seed: int | None,
     V_ms: Path,
     sigma: float,
     norms: Any | None,
@@ -507,7 +582,6 @@ def _finalize_sample(
         if (
             antenna_id is None
             or antenna_name is None
-            or antenna_selection_seed is None
             or norms is None
         ):
             raise RuntimeError("Corrupted variants require a selected antenna and norms")
@@ -519,7 +593,8 @@ def _finalize_sample(
                 variant.family,
                 variant.SNR_corr_target,
                 sigma,
-                corruption_seed,
+                seed=error_direction_seed,
+                sign=FIXED_ERROR_SIGN,
             ),
             norms,
         )
@@ -561,6 +636,7 @@ def _finalize_sample(
                     "antenna_id": antenna_id,
                     "antenna_name": antenna_name,
                     "antenna_selection_seed": antenna_selection_seed,
+                    "error_direction_seed": error_direction_seed,
                     "seed": corruption_seed,
                 },
             ),
@@ -743,7 +819,9 @@ def _iterate_and_validate_dataset(
 
 
 def _thermal_exclusions(
-    manifest: dict[str, Any], source_ids: Sequence[str]
+    manifest: dict[str, Any],
+    source_ids: Sequence[str],
+    requested_ids: Sequence[str] | None = None,
 ) -> list[dict[str, Any]]:
     from scripts.preprocessing import ALL_IDS, partition_for_sample
 
@@ -762,7 +840,7 @@ def _thermal_exclusions(
                 "error", "No completed thermal simulation entry"
             ),
         }
-        for source_id in ALL_IDS
+        for source_id in (ALL_IDS if requested_ids is None else requested_ids)
         if source_id not in completed
     ]
 
@@ -791,9 +869,9 @@ def _new_report_manifest(
         "description": (
             "Every completed source in the fixed train, test, and validation partitions "
             "has one uncorrupted baseline and constant one-antenna amplitude and phase "
-            "variants. Each corrupted variant independently draws an unflagged antenna "
-            "and a uniform random sign from {-1, +1}. SNR_corr=||Delta_V/sigma||_2 is "
-            "measured against noiseless V before the shared thermal noise is added."
+            "variants. Antenna and error-direction draws follow the configured selection "
+            "modes. SNR_corr=||Delta_V/sigma||_2 is measured against noiseless V before "
+            "the shared thermal noise is added."
         ),
         "partition": "all",
         "source_ids": list(source_ids),
@@ -808,15 +886,16 @@ def _new_report_manifest(
             "corruption_solint": CORRUPTION_SOLINT,
             "SNR_corr_relative_tolerance": SNR_CORR_REL_TOL,
             "base_seed": BASE_SEED,
+            "fixed_antenna_id": FIXED_ANTENNA_ID,
             "antenna_selection_policy": ANTENNA_SELECTION_POLICY,
             "antenna_selection_seed_scheme": (
-                "stable SHA-256 seed of base_seed, source_id, and "
+                None
+                if FIXED_ANTENNA_ID is not None
+                else "stable SHA-256 seed of base_seed, source_id, and "
                 "'<variant_label>:antenna'"
             ),
-            "constant_error_sign_policy": (
-                "uniform random choice from {-1, +1} using the per-variant "
-                "corruption seed"
-            ),
+            "fixed_error_sign": FIXED_ERROR_SIGN,
+            "constant_error_sign_policy": CONSTANT_ERROR_SIGN_POLICY,
             "imaging_configuration": "DefaultImagingConfig",
             "keep_intermediate_products": False,
             "fits_invalid_policy": "fill",
@@ -853,7 +932,11 @@ def run_experiment(
         _thermal_source(thermal_dir, thermal_manifest, source_id)
         for source_id in source_ids
     ]
-    excluded_sources = _thermal_exclusions(thermal_manifest, source_ids)
+    excluded_sources = _thermal_exclusions(
+        thermal_manifest,
+        source_ids,
+        requested_ids=_configured_source_ids(),
+    )
     if output_dir is None:
         timestamp = datetime.now().strftime("%Y%m%dT%H%M%S")
         output = EXPERIMENTS_ROOT / f"dataset_v1_{timestamp}"
@@ -882,11 +965,22 @@ def run_experiment(
                 "Existing dataset run uses a different antenna-selection policy; "
                 "use a new --output-dir"
             )
+        existing_sign_policy = (report.get("configuration") or {}).get(
+            "constant_error_sign_policy"
+        )
+        if existing_sign_policy != CONSTANT_ERROR_SIGN_POLICY:
+            raise RuntimeError(
+                "Existing dataset run uses a different error-direction policy; "
+                "use a new --output-dir"
+            )
     else:
         report = _new_report_manifest(thermal_dir, source_ids, excluded_sources)
         _atomic_write_json(report_json, report)
     report.setdefault("configuration", {}).update(
+        fixed_antenna_id=FIXED_ANTENNA_ID,
         antenna_selection_policy=ANTENNA_SELECTION_POLICY,
+        fixed_error_sign=FIXED_ERROR_SIGN,
+        constant_error_sign_policy=CONSTANT_ERROR_SIGN_POLICY,
         fits_invalid_policy="fill",
         fits_fill_value=0.0,
     )
@@ -952,16 +1046,25 @@ def run_experiment(
                     ]
                     try:
                         antenna_id = antenna_name = antenna_selection_seed = None
+                        error_direction_seed = None
                         norms = None
                         if variant is not None:
-                            antenna_selection_seed = _stable_seed(
-                                source.source_id,
-                                f"{variant.label_name}:antenna",
+                            antenna_selection_seed = _antenna_seed(
+                                source.source_id, variant
                             )
-                            antenna_id, antenna_name = _select_antenna(
-                                antenna_choices,
-                                seed=antenna_selection_seed,
+                            error_direction_seed = _error_direction_seed(
+                                source.source_id, variant
                             )
+                            if FIXED_ANTENNA_ID is None:
+                                assert antenna_selection_seed is not None
+                                antenna_id, antenna_name = _select_antenna(
+                                    antenna_choices,
+                                    seed=antenna_selection_seed,
+                                )
+                            else:
+                                antenna_id, antenna_name = _select_fixed_antenna(
+                                    antenna_choices, FIXED_ANTENNA_ID
+                                )
                             print(
                                 f"[{sample_id}] selected unflagged antenna "
                                 f"{antenna_name} (ID {antenna_id})"
@@ -975,10 +1078,8 @@ def run_experiment(
                                             variant.family,
                                             variant.SNR_corr_target,
                                             sigma,
-                                            _stable_seed(
-                                                source.source_id,
-                                                variant.label_name,
-                                            ),
+                                            seed=error_direction_seed,
+                                            sign=FIXED_ERROR_SIGN,
                                         )
                                     )
                                 )
@@ -989,6 +1090,7 @@ def run_experiment(
                             antenna_id,
                             antenna_name,
                             antenna_selection_seed,
+                            error_direction_seed,
                             V_ms,
                             sigma,
                             norms,
