@@ -9,7 +9,7 @@ from .config import (
     ImagingConfig,
 )
 from .imaging import image_ms
-from .fits import export_casa_fits, export_fits_triplet
+from .fits import export_casa_fits, export_fits_products, export_fits_triplet
 from .metrics import (
     IMAGING_METRIC_DEFINITIONS,
     beam_region_mask,
@@ -73,6 +73,7 @@ __all__ = [
     "beam_region_mask",
     "casa_image_to_png",
     "export_casa_fits",
+    "export_fits_products",
     "export_fits_triplet",
     "image_ms",
     "image_ms_VLA_pipe",

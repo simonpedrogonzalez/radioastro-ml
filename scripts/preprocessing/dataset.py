@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
-from .fits import validate_fits_triplet
+from .fits import validate_fits_products
 from .partitions import normalize_partition, partition_for_sample
 from .schema import DatasetManifest, SampleManifest, load_dataset_manifest, load_sample_manifest
 
@@ -38,7 +38,7 @@ class FitsSimulationDataset(Dataset):  # type: ignore[misc]
         *,
         partition: str,
         index: str = "dataset.json",
-        channels: Sequence[str] = ("dirty", "clean", "residual"),
+        channels: Sequence[str] = ("dirty", "clean", "residual", "psf"),
         transform: Callable[[Any], Any] | None = None,
         target_transform: Callable[[int], Any] | None = None,
         validate: bool = True,
@@ -50,8 +50,10 @@ class FitsSimulationDataset(Dataset):  # type: ignore[misc]
         self.root = Path(root).expanduser().resolve()
         self.partition = normalize_partition(partition)
         self.channels = tuple(channels)
-        if self.channels != ("dirty", "clean", "residual"):
-            raise ValueError("channels must preserve ('dirty', 'clean', 'residual') order")
+        if self.channels != ("dirty", "clean", "residual", "psf"):
+            raise ValueError(
+                "channels must preserve ('dirty', 'clean', 'residual', 'psf') order"
+            )
         self.transform = transform
         self.target_transform = target_transform
         self.load_metadata = load_metadata
@@ -88,7 +90,7 @@ class FitsSimulationDataset(Dataset):  # type: ignore[misc]
     def __getitem__(self, index: int) -> dict[str, Any]:
         torch_module = _require_torch()
         manifest = self.samples[index]
-        planes = validate_fits_triplet(
+        planes = validate_fits_products(
             manifest.products,
             invalid_policy=self.invalid_policy,
             fill_value=self.fill_value,

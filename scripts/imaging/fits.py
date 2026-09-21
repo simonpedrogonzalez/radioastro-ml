@@ -132,4 +132,50 @@ def export_fits_triplet(
     return destinations
 
 
-__all__ = ["export_casa_fits", "export_fits_triplet"]
+def export_fits_products(
+    dirty_image: Path,
+    clean_image: Path,
+    residual_image: Path,
+    psf_image: Path,
+    output_dir: Path,
+    *,
+    fallback_beam: Beam,
+    invalid_policy: Literal["error", "fill"] = "error",
+    fill_value: float = 0.0,
+) -> dict[str, Path]:
+    """Export and validate the four durable imaging products."""
+    destinations = {
+        "dirty": output_dir / "dirty.fits.gz",
+        "clean": output_dir / "clean.fits.gz",
+        "residual": output_dir / "residual.fits.gz",
+        "psf": output_dir / "psf.fits.gz",
+    }
+    installed: list[Path] = []
+    try:
+        for name, source in (
+            ("dirty", dirty_image),
+            ("clean", clean_image),
+            ("residual", residual_image),
+            ("psf", psf_image),
+        ):
+            installed.append(
+                export_casa_fits(
+                    source,
+                    destinations[name],
+                    fallback_beam=fallback_beam,
+                    fallback_unit="1" if name == "psf" else "Jy/beam",
+                    invalid_policy=invalid_policy,
+                    fill_value=fill_value,
+                )
+            )
+        from scripts.preprocessing.fits import validate_fits_products
+
+        validate_fits_products(destinations)
+    except Exception:
+        for path in installed:
+            path.unlink(missing_ok=True)
+        raise
+    return destinations
+
+
+__all__ = ["export_casa_fits", "export_fits_products", "export_fits_triplet"]

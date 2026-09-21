@@ -56,6 +56,7 @@ def finalize_simulation_sample(
             "dirty": imaging_result.dirty_fits,
             "clean": imaging_result.clean_fits,
             "residual": imaging_result.residual_fits,
+            "psf": imaging_result.psf_fits,
         },
         imaging_qa=imaging_result.qa_json,
         imaging_text=imaging_result.qa_text,

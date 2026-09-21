@@ -217,6 +217,7 @@ class ImagingResult:
     dirty_fits: Path
     clean_fits: Path
     residual_fits: Path
+    psf_fits: Path
     model_image: Optional[Path]
     mask_image: Optional[Path]
     psf_image: Optional[Path]

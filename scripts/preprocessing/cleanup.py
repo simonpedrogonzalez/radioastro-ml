@@ -6,7 +6,7 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
-from .fits import validate_fits_triplet
+from .fits import validate_fits_products
 from .schema import atomic_write_json, load_sample_manifest, referenced_files
 
 
@@ -124,7 +124,7 @@ def cleanup_simulation_sample(
     if not root.is_dir():
         raise NotADirectoryError(f"Sample directory does not exist: {root}")
     sample = load_sample_manifest(root / manifest, require_files=True, verify_integrity=True)
-    validate_fits_triplet(sample.products)
+    validate_fits_products(sample.products)
     retained = {path.resolve() for path in referenced_files(sample)} | {sample.path.resolve()}
     existing_audit = root / "cleanup.audit.json"
     if existing_audit.is_file():
@@ -160,7 +160,7 @@ def cleanup_simulation_sample(
         )
         # Revalidate after mutation so cleanup cannot report success with a damaged sample.
         load_sample_manifest(sample.path, require_files=True, verify_integrity=True)
-        validate_fits_triplet(sample.products)
+        validate_fits_products(sample.products)
     return CleanupReport(
         sample_dir=root,
         manifest=sample.path,

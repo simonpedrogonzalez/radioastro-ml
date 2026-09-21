@@ -785,7 +785,7 @@ def _iterate_and_validate_dataset(
         load_sample_manifest,
         partition_for_sample,
         source_dataset_id,
-        validate_fits_triplet,
+        validate_fits_products,
     )
 
     index = load_dataset_manifest(dataset_index)
@@ -798,7 +798,7 @@ def _iterate_and_validate_dataset(
         source_id = source_dataset_id(sample.sample_id)
         if source_id not in expected_sources:
             raise RuntimeError(f"Unexpected source entered dataset v1: {source_id}")
-        planes = validate_fits_triplet(sample.products)
+        planes = validate_fits_products(sample.products)
         shapes.add(planes["dirty"].shape)
         label_counts[sample.label_name] += 1
         partition_counts[partition_for_sample(sample.sample_id)] += 1

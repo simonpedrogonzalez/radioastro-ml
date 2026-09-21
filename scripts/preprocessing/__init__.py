@@ -2,7 +2,7 @@
 
 from .cleanup import CleanupEntry, CleanupReport, cleanup_simulation_sample
 from .dataset import FitsSimulationDataset, simulation_collate
-from .fits import FitsPlane, load_fits_plane, validate_fits_triplet
+from .fits import FitsPlane, load_fits_plane, validate_fits_products, validate_fits_triplet
 from .finalize import FinalizedSample, finalize_simulation_sample
 from .loader import make_simulation_dataloader
 from .partitions import (
@@ -81,6 +81,7 @@ __all__ = [
     "sha256_file",
     "simulation_collate",
     "source_dataset_id",
+    "validate_fits_products",
     "validate_fits_triplet",
     "write_sample_manifest",
     "write_dataset_manifest",

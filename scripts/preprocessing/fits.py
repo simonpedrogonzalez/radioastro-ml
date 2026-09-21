@@ -33,9 +33,11 @@ def _normalized_unit(value: Any, path: Path) -> str:
         raise ValueError(f"FITS image has no BUNIT: {path}")
     normalized = value.strip().lower().replace(" ", "")
     aliases = {"jy/beam", "jybeam-1", "jy.beam-1"}
-    if normalized not in aliases:
-        raise ValueError(f"FITS BUNIT must be Jy/beam, got {value!r}: {path}")
-    return "Jy/beam"
+    if normalized in aliases:
+        return "Jy/beam"
+    if normalized in {"1", "dimensionless"}:
+        return "dimensionless"
+    raise ValueError(f"FITS BUNIT must be Jy/beam or dimensionless, got {value!r}: {path}")
 
 
 def load_fits_plane(
@@ -104,6 +106,8 @@ def validate_fits_triplet(
         for name, path in paths.items()
     }
     reference = planes["dirty"]
+    if reference.unit != "Jy/beam":
+        raise ValueError(f"FITS image unit must be Jy/beam, got {reference.unit}")
     for name in ("clean", "residual"):
         plane = planes[name]
         if plane.shape != reference.shape:
@@ -115,4 +119,37 @@ def validate_fits_triplet(
     return planes
 
 
-__all__ = ["FitsPlane", "load_fits_plane", "validate_fits_triplet"]
+def validate_fits_products(
+    paths: dict[str, str | Path],
+    *,
+    invalid_policy: str = "error",
+    fill_value: float = 0.0,
+) -> dict[str, FitsPlane]:
+    """Validate the retained dirty, clean, residual, and PSF planes."""
+    if set(paths) != {"dirty", "clean", "residual", "psf"}:
+        raise ValueError("FITS products must contain dirty, clean, residual, and psf paths")
+    planes = validate_fits_triplet(
+        {name: paths[name] for name in ("dirty", "clean", "residual")},
+        invalid_policy=invalid_policy,
+        fill_value=fill_value,
+    )
+    psf = load_fits_plane(
+        paths["psf"], invalid_policy=invalid_policy, fill_value=fill_value
+    )
+    reference = planes["dirty"]
+    if psf.shape != reference.shape:
+        raise ValueError(f"FITS shape mismatch: dirty={reference.shape}, psf={psf.shape}")
+    if psf.unit != "dimensionless":
+        raise ValueError(f"FITS PSF unit must be dimensionless, got {psf.unit}")
+    if _wcs_signature(psf.celestial_header) != _wcs_signature(reference.celestial_header):
+        raise ValueError("FITS celestial WCS mismatch between dirty and psf")
+    planes["psf"] = psf
+    return planes
+
+
+__all__ = [
+    "FitsPlane",
+    "load_fits_plane",
+    "validate_fits_products",
+    "validate_fits_triplet",
+]

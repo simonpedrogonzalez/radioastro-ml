@@ -78,6 +78,7 @@ the dataset infer labels or product roles from directory/file names.
             ├── dirty.fits.gz
             ├── clean.fits.gz
             ├── residual.fits.gz
+            ├── psf.fits.gz
             ├── qa.json
             └── qa.txt
 ```
@@ -85,10 +86,10 @@ the dataset infer labels or product roles from directory/file names.
 Existing experiment/sample/variant hierarchy may wrap these sample directories;
 `dataset.json` points to each `sample.json` explicitly. Original, baseline, and
 corrupted variants are separate ML samples when all are wanted. One
-`sample.json` selects exactly one image triplet; the loader must never guess
+`sample.json` selects exactly one image-product set; the loader must never guess
 which nested imaging directory is intended.
 
-The baseline retained contract is exactly three FITS image products. PNGs are
+The baseline retained contract is exactly four FITS image products. PNGs are
 not retained. `qa.txt` and `simulation.txt` are kept because they are tiny and
 useful to humans, but JSON is authoritative.
 No auxiliary-product retention option is part of this design: masks,
@@ -117,17 +118,18 @@ Use a versioned schema with all file references relative to `sample.json`:
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "sample_id": "0012-399_phase_only",
   "label": {
     "id": 2,
     "name": "phase_corruption"
   },
   "products": {
-    "channel_order": ["dirty", "clean", "residual"],
+    "channel_order": ["dirty", "clean", "residual", "psf"],
     "dirty": "simulation/default_imaging/dirty.fits.gz",
     "clean": "simulation/default_imaging/clean.fits.gz",
-    "residual": "simulation/default_imaging/residual.fits.gz"
+    "residual": "simulation/default_imaging/residual.fits.gz",
+    "psf": "simulation/default_imaging/psf.fits.gz"
   },
   "metadata": {
     "imaging_qa": "simulation/default_imaging/qa.json",
@@ -382,7 +384,7 @@ FitsSimulationDataset(
     *,
     partition="train",
     index="dataset.json",
-    channels=("dirty", "clean", "residual"),
+    channels=("dirty", "clean", "residual", "psf"),
     transform=None,
     target_transform=None,
     validate=True,
@@ -394,7 +396,7 @@ Each item should have a stable structure:
 
 ```python
 {
-    "image": Tensor,          # [3, height, width], channel order from manifest
+    "image": Tensor,          # [4, height, width], channel order from manifest
     "label": int,
     "sample_id": str,
     "partition": str,
@@ -413,14 +415,13 @@ Loader behavior:
 - Open FITS with Astropy and return `torch.float32` by default.
 - Select/squeeze only declared singleton frequency/Stokes axes, then require a
   two-dimensional plane. Do not silently flatten a real cube.
-- Enforce the declared channel order `dirty`, `clean`, `residual`.
-- Require equal shapes and compatible celestial WCS for all three images.
+- Enforce the declared channel order `dirty`, `clean`, `residual`, `psf`.
+- Require equal shapes and compatible celestial WCS for all four images.
 - Preserve raw physical pixel values by default. Normalization, clipping,
   augmentation, and channel selection are explicit transforms.
 - Define a configurable NaN/Inf policy. Validation should fail by default;
   replacing invalid pixels with a fill value must be explicit and reported.
-- Validate FITS `BUNIT` and either require one unit across channels or perform an
-  explicit recorded conversion.
+- Validate FITS `BUNIT`: image channels use Jy/beam and the PSF is dimensionless.
 - Resolve all manifest references safely beneath the sample root.
 - Require `partition="train"`, `"test"`, or `"val"`; expose and fully
   validate only samples whose source ID occurs in that hard-coded list.
@@ -537,7 +538,7 @@ experiments merely because they resemble the expected layout.
 
 ### Imaging retention
 
-- Dirty/CLEAN/residual roles map to the correct FITS files for direct and VLA
+- Dirty/CLEAN/residual/PSF roles map to the correct FITS files for direct and VLA
   Pipeline imaging.
 - FITS headers preserve WCS, unit, beam, and plane information.
 - Plot scale/recipe values reproduce the renderer's selected color limits.

@@ -55,6 +55,7 @@ class Imaging0012399IntegrationTests(unittest.TestCase):
                 result.dirty_fits,
                 result.clean_fits,
                 result.residual_fits,
+                result.psf_fits,
                 result.qa_text,
                 result.qa_json,
             ):
@@ -74,6 +75,7 @@ class Imaging0012399IntegrationTests(unittest.TestCase):
                     "dirty_fits": "dirty.fits.gz",
                     "clean_fits": "clean.fits.gz",
                     "residual_fits": "residual.fits.gz",
+                    "psf_fits": "psf.fits.gz",
                     "qa_text": "qa.txt",
                     "qa_json": "qa.json",
                 },
@@ -109,7 +111,12 @@ class Imaging0012399IntegrationTests(unittest.TestCase):
                 metric_region=BeamRegion(min_radius_beams=3.0),
             )
             payload = json.loads(result.qa_json.read_text(encoding="utf-8"))
-            for path in (result.dirty_fits, result.clean_fits, result.residual_fits):
+            for path in (
+                result.dirty_fits,
+                result.clean_fits,
+                result.residual_fits,
+                result.psf_fits,
+            ):
                 self.assertTrue(path.exists(), path)
             self.assertIsNone(result.dirty_image)
             self.assertEqual(payload["engine"], "vla_pipeline")

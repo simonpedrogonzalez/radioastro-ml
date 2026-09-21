@@ -13,13 +13,13 @@ from pathlib import Path
 from typing import Any
 
 
-SAMPLE_SCHEMA_VERSION = 1
+SAMPLE_SCHEMA_VERSION = 2
 DATASET_SCHEMA_VERSION = 1
 CORRUPTION_SCHEMA_VERSION = 2
 SUPPORTED_QA_SCHEMAS = (2, 3)
 SUPPORTED_SIMULATION_SCHEMAS = (1, 2, 3)
 SUPPORTED_CORRUPTION_SCHEMAS = (1, 2)
-CHANNEL_ORDER = ("dirty", "clean", "residual")
+CHANNEL_ORDER = ("dirty", "clean", "residual", "psf")
 
 
 @dataclass(frozen=True)
@@ -420,7 +420,7 @@ def create_sample_manifest(
     destination = Path(path).expanduser().resolve()
     root = destination.parent
     if set(products) != set(CHANNEL_ORDER):
-        raise ValueError("products must contain exactly dirty, clean, and residual")
+        raise ValueError("products must contain exactly dirty, clean, residual, and psf")
     product_paths = {
         name: _input_path(products[name], root) for name in CHANNEL_ORDER
     }

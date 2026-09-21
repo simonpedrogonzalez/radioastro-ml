@@ -110,7 +110,7 @@ class ManifestTests(unittest.TestCase):
         image_dir = root / "simulation/default_imaging"
         image_dir.mkdir(parents=True)
         products = {}
-        for name in ("dirty", "clean", "residual"):
+        for name in ("dirty", "clean", "residual", "psf"):
             path = image_dir / f"{name}.fits.gz"
             path.write_bytes(f"{name}\n".encode())
             products[name] = path
@@ -162,6 +162,8 @@ class ManifestTests(unittest.TestCase):
             root = Path(temporary)
             zero = self.make_sample(root / "zero", corruptions=0)
             multiple = self.make_sample(root / "multiple", corruptions=2)
+            self.assertEqual(zero.schema_version, 2)
+            self.assertEqual(zero.channel_order, ("dirty", "clean", "residual", "psf"))
             self.assertEqual(zero.corruptions, ())
             decoded = [
                 json.loads(reference.corruption.read_text())["configuration"]["type"]
@@ -220,7 +222,7 @@ class ManifestTests(unittest.TestCase):
             (generated_ms / "table.dat").write_bytes(b"large")
             png = root / "dirty.png"
             png.write_bytes(b"png")
-            with patch("scripts.preprocessing.cleanup.validate_fits_triplet"):
+            with patch("scripts.preprocessing.cleanup.validate_fits_products"):
                 planned = cleanup_simulation_sample(root)
                 self.assertTrue(generated_ms.exists())
                 self.assertTrue(png.exists())
@@ -240,7 +242,7 @@ class ManifestTests(unittest.TestCase):
             image_dir = sample_root / "simulation/default_imaging"
             image_dir.mkdir(parents=True)
             products = {}
-            for name in ("dirty", "clean", "residual"):
+            for name in ("dirty", "clean", "residual", "psf"):
                 products[name] = image_dir / f"{name}.fits.gz"
                 products[name].write_bytes(name.encode())
             qa_json = image_dir / "qa.json"
@@ -258,6 +260,7 @@ class ManifestTests(unittest.TestCase):
                 dirty_fits=products["dirty"],
                 clean_fits=products["clean"],
                 residual_fits=products["residual"],
+                psf_fits=products["psf"],
                 qa_json=qa_json,
                 qa_text=qa_text,
             )
@@ -265,7 +268,7 @@ class ManifestTests(unittest.TestCase):
                 metadata_json=simulation_json,
                 metadata_text=simulation_text,
             )
-            with patch("scripts.preprocessing.cleanup.validate_fits_triplet"):
+            with patch("scripts.preprocessing.cleanup.validate_fits_products"):
                 finalized = finalize_simulation_sample(
                     sample_root,
                     sample_id="sample",
@@ -290,7 +293,7 @@ class ManifestTests(unittest.TestCase):
     "NumPy, Astropy, and PyTorch are required for FITS dataset tests",
 )
 class FitsDatasetTests(unittest.TestCase):
-    def test_synthetic_triplet_loads_in_declared_order_and_batches(self):
+    def test_synthetic_products_load_in_declared_order_and_batches(self):
         import numpy as np
         import torch
         from astropy.io import fits
@@ -302,7 +305,7 @@ class FitsDatasetTests(unittest.TestCase):
             image_dir = root / "sample/simulation/default_imaging"
             image_dir.mkdir(parents=True)
             products = {}
-            for index, name in enumerate(("dirty", "clean", "residual"), start=1):
+            for index, name in enumerate(("dirty", "clean", "residual", "psf"), start=1):
                 header = fits.Header(
                     {
                         "CTYPE1": "RA---TAN",
@@ -315,7 +318,7 @@ class FitsDatasetTests(unittest.TestCase):
                         "CRVAL2": 0.0,
                         "CDELT1": -0.001,
                         "CDELT2": 0.001,
-                        "BUNIT": "Jy/beam",
+                        "BUNIT": "1" if name == "psf" else "Jy/beam",
                         "BMAJ": 0.001,
                         "BMIN": 0.0005,
                         "BPA": 0.0,
@@ -348,12 +351,13 @@ class FitsDatasetTests(unittest.TestCase):
             add_sample_to_dataset(root / "dataset.json", manifest.path)
             dataset = FitsSimulationDataset(root, partition="train")
             item = dataset[0]
-            self.assertEqual(tuple(item["image"].shape), (3, 4, 4))
+            self.assertEqual(tuple(item["image"].shape), (4, 4, 4))
             self.assertTrue(torch.all(item["image"][0] == 1))
             self.assertTrue(torch.all(item["image"][1] == 2))
             self.assertTrue(torch.all(item["image"][2] == 3))
+            self.assertTrue(torch.all(item["image"][3] == 4))
             batch = next(iter(make_simulation_dataloader(dataset)))
-            self.assertEqual(tuple(batch["image"].shape), (1, 3, 4, 4))
+            self.assertEqual(tuple(batch["image"].shape), (1, 4, 4, 4))
             self.assertEqual(batch["sample_id"], ["0005+383_phase_only"])
             self.assertEqual(batch["partition"], ["train"])
             self.assertEqual(batch["metadata"][0]["corruptions"], [])

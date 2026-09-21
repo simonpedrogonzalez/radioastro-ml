@@ -59,6 +59,11 @@ class PreprocessingIntegrationTests(unittest.TestCase):
             self.assertFalse(simulation.ms_path.exists())
             self.assertTrue(finalized.cleanup.audit_path.is_file())
             self.assertEqual(
+                finalized.manifest.channel_order,
+                ("dirty", "clean", "residual", "psf"),
+            )
+            self.assertTrue(finalized.manifest.products["psf"].is_file())
+            self.assertEqual(
                 load_dataset_manifest(dataset_root / "dataset.json").samples,
                 (finalized.manifest.path,),
             )

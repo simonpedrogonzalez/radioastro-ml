@@ -16,7 +16,7 @@ from .config import (
     read_beam,
 )
 from .metrics import METRIC_UNITS, _metric_validity, _metric_warnings, measure_image_metrics
-from .fits import export_fits_triplet
+from .fits import export_fits_products
 from .models import (
     BeamRegion,
     ImagingResult,
@@ -115,10 +115,13 @@ def _finalize_result(
     metric_warnings = _metric_warnings(metrics)
     qa_text = output_dir / "qa.txt"
     qa_json = output_dir / "qa.json"
-    fits_products = export_fits_triplet(
+    if psf_image is None:
+        raise RuntimeError(f"{engine} did not create an expected PSF image")
+    fits_products = export_fits_products(
         dirty_image,
         clean_image,
         residual_image,
+        psf_image,
         output_dir,
         fallback_beam=clean_beam,
         invalid_policy=fits_invalid_policy,
@@ -128,6 +131,7 @@ def _finalize_result(
         "dirty_fits": fits_products["dirty"],
         "clean_fits": fits_products["clean"],
         "residual_fits": fits_products["residual"],
+        "psf_fits": fits_products["psf"],
         "qa_text": qa_text,
         "qa_json": qa_json,
     }
@@ -193,6 +197,7 @@ def _finalize_result(
         dirty_fits=fits_products["dirty"],
         clean_fits=fits_products["clean"],
         residual_fits=fits_products["residual"],
+        psf_fits=fits_products["psf"],
         model_image=model_image if keep_intermediate_products else None,
         mask_image=mask_image if keep_intermediate_products else None,
         psf_image=psf_image if keep_intermediate_products else None,
