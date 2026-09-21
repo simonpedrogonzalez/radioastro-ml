@@ -15,10 +15,12 @@ if str(ROOT) not in sys.path:
 
 from scripts.preprocessing import (
     ALL_IDS,
+    AssignedLabel,
     TEST_IDS,
     TRAIN_IDS,
     VAL_IDS,
     add_sample_to_dataset,
+    assign_label,
     create_sample_manifest,
     finalize_simulation_sample,
     load_dataset_manifest,
@@ -29,6 +31,56 @@ from scripts.preprocessing import (
     source_dataset_id,
     cleanup_simulation_sample,
 )
+
+
+class LabelTests(unittest.TestCase):
+    def test_constant_antenna_type_labels_and_rejects_invalid_reports(self):
+        amp = {
+            "solution": {"corruption_type": "amp", "SNR_corr_target": 30},
+            "metrics": {"SNR_corr": 30.25},
+        }
+        phase = {
+            "solution": {"corruption_type": "phase", "SNR_corr_target": 10},
+            "metrics": {"SNR_corr": 9.75},
+        }
+
+        self.assertEqual(
+            assign_label([], "constant_antenna_type"),
+            AssignedLabel(0, "none", 0.0, 0.0),
+        )
+        self.assertEqual(
+            assign_label([amp], "constant_antenna_type"),
+            AssignedLabel(1, "amp", 30.25, 30.0),
+        )
+        self.assertEqual(
+            assign_label([phase], "constant_antenna_type"),
+            AssignedLabel(2, "phase", 9.75, 10.0),
+        )
+
+        invalid = [
+            ([amp, phase], "zero or one"),
+            ([{"solution": {}, "metrics": {}}], "corruption_type"),
+            ([{"solution": amp["solution"], "metrics": {}}], "SNR_corr"),
+            (
+                [
+                    {
+                        "solution": {"corruption_type": "amp"},
+                        "metrics": {"SNR_corr": 10},
+                    }
+                ],
+                "SNR_corr_target",
+            ),
+            (
+                [{"solution": phase["solution"], "metrics": {"SNR_corr": 0}}],
+                "SNR_corr",
+            ),
+        ]
+        for reports, message in invalid:
+            with self.subTest(message=message):
+                with self.assertRaisesRegex(ValueError, message):
+                    assign_label(reports, "constant_antenna_type")
+        with self.assertRaisesRegex(ValueError, "Unknown label criterion"):
+            assign_label([], "unknown")
 
 
 class PartitionTests(unittest.TestCase):
@@ -337,6 +389,27 @@ class FitsDatasetTests(unittest.TestCase):
             simulation_json.write_text('{"schema_version": 2}\n', encoding="utf-8")
             simulation_text = root / "sample/simulation/sample.simulation.txt"
             simulation_text.write_text("Simulation\n", encoding="utf-8")
+            corruption_json = root / "sample/corruption.json"
+            corruption_json.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 2,
+                        "context": {
+                            "retained_sample_id": "0005+383_phase_only",
+                            "application_index": 0,
+                        },
+                        "configuration": {"type": "antenna_gain"},
+                        "solution": {
+                            "corruption_type": "phase",
+                            "SNR_corr_target": 30.0,
+                        },
+                        "metrics": {"SNR_corr": 30.5},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            corruption_text = root / "sample/corruption.txt"
+            corruption_text.write_text("Corruption\n", encoding="utf-8")
             manifest = create_sample_manifest(
                 root / "sample/sample.json",
                 sample_id="0005+383_phase_only",
@@ -347,10 +420,16 @@ class FitsDatasetTests(unittest.TestCase):
                 imaging_text=qa_text,
                 simulation=simulation_json,
                 simulation_text=simulation_text,
+                corruptions=[(corruption_json, corruption_text)],
             )
             add_sample_to_dataset(root / "dataset.json", manifest.path)
             dataset = FitsSimulationDataset(root, partition="train")
             item = dataset[0]
+            self.assertEqual((item["label"], item["label_name"]), (0, "baseline"))
+            self.assertEqual(
+                item["label_metadata"],
+                {"corruption_snr": None, "corruption_snr_target": None},
+            )
             self.assertEqual(tuple(item["image"].shape), (4, 4, 4))
             self.assertTrue(torch.all(item["image"][0] == 1))
             self.assertTrue(torch.all(item["image"][1] == 2))
@@ -360,7 +439,25 @@ class FitsDatasetTests(unittest.TestCase):
             self.assertEqual(tuple(batch["image"].shape), (1, 4, 4, 4))
             self.assertEqual(batch["sample_id"], ["0005+383_phase_only"])
             self.assertEqual(batch["partition"], ["train"])
-            self.assertEqual(batch["metadata"][0]["corruptions"], [])
+            self.assertEqual(len(batch["metadata"][0]["corruptions"]), 1)
+
+            derived = FitsSimulationDataset(
+                root, partition="train", label_criterion="constant_antenna_type"
+            )
+            derived_item = derived[0]
+            self.assertEqual(
+                (derived_item["label"], derived_item["label_name"]), (2, "phase")
+            )
+            self.assertEqual(
+                derived_item["label_metadata"],
+                {"corruption_snr": 30.5, "corruption_snr_target": 30.0},
+            )
+            derived_batch = next(iter(make_simulation_dataloader(derived)))
+            self.assertEqual(derived_batch["label"].tolist(), [2])
+            self.assertEqual(derived_batch["label_name"], ["phase"])
+            self.assertEqual(
+                derived_batch["label_metadata"], [derived_item["label_metadata"]]
+            )
 
 
 if __name__ == "__main__":

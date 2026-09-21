@@ -1,0 +1,14 @@
+[project]
+name = "radioastro-ml-models"
+version = "0.1.0"
+description = "Leakage-safe baseline models for radioastronomy calibration errors"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "astropy",
+    "numpy",
+    "scikit-learn",
+    "torch",
+]
+
+[tool.uv]
+package = false

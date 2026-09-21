@@ -5,6 +5,7 @@ from .dataset import FitsSimulationDataset, simulation_collate
 from .fits import FitsPlane, load_fits_plane, validate_fits_products, validate_fits_triplet
 from .finalize import FinalizedSample, finalize_simulation_sample
 from .loader import make_simulation_dataloader
+from .labels import AssignedLabel, assign_label
 from .partitions import (
     ALL_IDS,
     PARTITION_IDS,
@@ -50,6 +51,7 @@ __all__ = [
     "SUPPORTED_CORRUPTION_SCHEMAS",
     "SUPPORTED_SIMULATION_SCHEMAS",
     "ALL_IDS",
+    "AssignedLabel",
     "CleanupEntry",
     "CleanupReport",
     "CorruptionReference",
@@ -64,6 +66,7 @@ __all__ = [
     "TRAIN_IDS",
     "VAL_IDS",
     "add_sample_to_dataset",
+    "assign_label",
     "atomic_write_json",
     "build_integrity",
     "create_sample_manifest",

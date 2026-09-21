@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Callable, Sequence
 
 from .fits import validate_fits_products
+from .labels import AssignedLabel, assign_label
 from .partitions import normalize_partition, partition_for_sample
 from .schema import DatasetManifest, SampleManifest, load_dataset_manifest, load_sample_manifest
 
@@ -43,6 +44,7 @@ class FitsSimulationDataset(Dataset):  # type: ignore[misc]
         target_transform: Callable[[int], Any] | None = None,
         validate: bool = True,
         load_metadata: bool = True,
+        label_criterion: str | None = None,
         invalid_policy: str = "error",
         fill_value: float = 0.0,
     ) -> None:
@@ -57,6 +59,7 @@ class FitsSimulationDataset(Dataset):  # type: ignore[misc]
         self.transform = transform
         self.target_transform = target_transform
         self.load_metadata = load_metadata
+        self.label_criterion = label_criterion
         self.invalid_policy = invalid_policy
         self.fill_value = fill_value
         # Read every manifest only far enough to identify its source dataset.
@@ -98,7 +101,17 @@ class FitsSimulationDataset(Dataset):  # type: ignore[misc]
         image = torch_module.stack(
             [torch_module.from_numpy(planes[name].values.copy()) for name in self.channels]
         ).to(dtype=torch_module.float32)
-        target: Any = manifest.label_id
+        corruption_reports = (
+            [_read_json(reference.corruption) for reference in manifest.corruptions]
+            if self.load_metadata or self.label_criterion is not None
+            else []
+        )
+        assigned = (
+            AssignedLabel(manifest.label_id, manifest.label_name, None, None)
+            if self.label_criterion is None
+            else assign_label(corruption_reports, self.label_criterion)
+        )
+        target: Any = assigned.id
         if self.transform is not None:
             image = self.transform(image)
         if self.target_transform is not None:
@@ -108,13 +121,16 @@ class FitsSimulationDataset(Dataset):  # type: ignore[misc]
             metadata = {
                 "simulation": _read_json(manifest.simulation),
                 "imaging": _read_json(manifest.imaging_qa),
-                "corruptions": [
-                    _read_json(reference.corruption) for reference in manifest.corruptions
-                ],
+                "corruptions": corruption_reports,
             }
         return {
             "image": image,
             "label": target,
+            "label_name": assigned.name,
+            "label_metadata": {
+                "corruption_snr": assigned.corruption_snr,
+                "corruption_snr_target": assigned.corruption_snr_target,
+            },
             "sample_id": manifest.sample_id,
             "partition": self.partition,
             "qa": None if metadata is None else metadata["imaging"],
@@ -140,6 +156,8 @@ def simulation_collate(batch: Sequence[dict[str, Any]]) -> dict[str, Any]:
     return {
         "image": torch_module.stack([item["image"] for item in batch]),
         "label": torch_module.as_tensor([item["label"] for item in batch]),
+        "label_name": [item["label_name"] for item in batch],
+        "label_metadata": [item["label_metadata"] for item in batch],
         "sample_id": [item["sample_id"] for item in batch],
         "partition": [item["partition"] for item in batch],
         "qa": [item["qa"] for item in batch],
