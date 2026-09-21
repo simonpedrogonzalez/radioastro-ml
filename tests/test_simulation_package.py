@@ -340,10 +340,14 @@ class NoiseSelectorTests(unittest.TestCase):
                 "vla-thermal", {"band": "C", "sampler": "8bit", "pwv": "1mm"}
             )
 
-    def test_band_label_must_match_all_channels(self):
+    def test_wrong_band_label_is_rejected(self):
         simulator = FakeSimulator()
         sampling = noise_module._HomogeneousSampling(0, 2e6, 5.0, (7.2e9, 7.3e9))
-        with patch.object(noise_module, "_inspect_homogeneous_sampling", return_value=sampling):
+        with patch.object(
+            noise_module,
+            "_inspect_homogeneous_sampling",
+            return_value=sampling,
+        ):
             with self.assertRaisesRegex(ValueError, "do not all fall"):
                 noise_module._apply_noise(
                     simulator,
@@ -353,6 +357,24 @@ class NoiseSelectorTests(unittest.TestCase):
                     seed=1,
                 )
         self.assertEqual(simulator.calls, [])
+
+    def test_two_channels_at_band_edge_are_tolerated(self):
+        simulator = FakeSimulator()
+        sampling = noise_module._HomogeneousSampling(
+            0,
+            2e6,
+            5.0,
+            tuple(1.878e9 + index * 2e6 for index in range(64)),
+        )
+        with patch.object(noise_module, "_inspect_homogeneous_sampling", return_value=sampling):
+            noise_module._apply_noise(
+                simulator,
+                "example.ms",
+                noise_model="vla-thermal",
+                noise_parameters={"band": "L", "sampler": "8bit"},
+                seed=1,
+            )
+        self.assertEqual(simulator.calls[-1], ("corrupt",))
 
 
 class PublicContractTests(unittest.TestCase):

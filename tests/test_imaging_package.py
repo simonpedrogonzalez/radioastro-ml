@@ -546,7 +546,9 @@ class BeamRegionMetricTests(unittest.TestCase):
         try:
             import numpy as np
         except ImportError:
-            self.skipTest("NumPy is supplied by CASA, not the lightweight test interpreter")
+            self.skipTest(
+                "NumPy is supplied by CASA, not the lightweight test interpreter"
+            )
 
         full = beam_region_mask((9, 9), (1.0, 1.0), 1.0, BeamRegion())
         central = beam_region_mask((9, 9), (1.0, 1.0), 1.0, BeamRegion(max_radius_beams=3))
@@ -741,6 +743,33 @@ class BeamRegionMetricTests(unittest.TestCase):
                     "residual.image",
                     region=BeamRegion(min_radius_beams=10.0),
                 )
+
+    def test_measurement_uses_finite_residuals_when_casa_mask_misses_region(self):
+        try:
+            import numpy as np
+        except ImportError:
+            self.skipTest("NumPy is supplied by CASA, not the lightweight test interpreter")
+        values = np.arange(25, dtype=float).reshape(5, 5)
+        clean = _ImagePlane(
+            values,
+            np.ones((5, 5), dtype=bool),
+            (1.0, 1.0),
+            Beam(1.0, 1.0, 0.0),
+        )
+        residual = _ImagePlane(
+            values,
+            np.zeros((5, 5), dtype=bool),
+            (1.0, 1.0),
+            Beam(1.0, 1.0, 0.0),
+        )
+        region = BeamRegion(min_radius_beams=2.0)
+        expected = values[beam_region_mask((5, 5), (1.0, 1.0), 1.0, region)]
+        with patch(
+            "scripts.imaging.metrics._load_image_plane",
+            side_effect=[clean, residual],
+        ):
+            metrics = measure_image_metrics("clean.image", "residual.image", region=region)
+        self.assertEqual(metrics.residual.n_pixels, expected.size)
 
 
 if __name__ == "__main__":

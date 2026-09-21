@@ -81,6 +81,7 @@ EXPERIMENT_DIR: str | Path | None = None
 IMAGING_IMSIZE = (256, 256)
 METRIC_INNER_RADIUS_BEAMS = 3.0
 METRIC_BORDER_MARGIN_BEAMS = 1.0
+FITS_INVALID_POLICY = "fill"
 SOURCE_SNR_BASIS = (
     "original_global_clean_peak_over_three_beams_to_border_minus_one_beam_"
     "residual_scaled_mad"
@@ -303,6 +304,7 @@ def process_sample(ms_path: Path, experiment_dir: Path) -> dict[str, Any]:
             imsize=IMAGING_IMSIZE,
             metric_region_resolver=metric_region_for_resolved_grid,
             keep_intermediate_products=True,
+            fits_invalid_policy=FITS_INVALID_POLICY,
         )
         metric_region = original.qa.metrics.region
 
@@ -355,6 +357,7 @@ def process_sample(ms_path: Path, experiment_dir: Path) -> dict[str, Any]:
             imsize=IMAGING_IMSIZE,
             metric_region=metric_region,
             keep_intermediate_products=True,
+            fits_invalid_policy=FITS_INVALID_POLICY,
         )
         _assert_matched_imaging_settings(original, simulated)
         if original.qa.metrics.region != simulated.qa.metrics.region:
@@ -418,6 +421,7 @@ def _new_manifest(total_samples: int) -> dict[str, Any]:
             "imsize": list(IMAGING_IMSIZE),
             "source_snr_basis": SOURCE_SNR_BASIS,
             "metric_region_policy": metric_region_policy(),
+            "fits_invalid_policy": FITS_INVALID_POLICY,
             "sampler": SAMPLER,
             "eta_c": ETA_C,
             "base_seed": BASE_SEED,

@@ -226,7 +226,12 @@ def measure_image_metrics(
         residual.beam.major_arcsec,
         region,
     )
-    residual_selection = region_pixels & residual.valid & np.isfinite(residual.values)
+    finite_region = region_pixels & np.isfinite(residual.values)
+    residual_selection = finite_region & residual.valid
+    # CASA's primary-beam mask can lie wholly inside an explicitly requested
+    # outer noise annulus even though the uncorrected residual values are finite.
+    if not np.any(residual_selection):
+        residual_selection = finite_region
     if not np.any(residual_selection):
         ny, nx = residual.values.shape
         furthest_x = max(nx // 2, nx - 1 - nx // 2) * residual.cell_arcsec[0]

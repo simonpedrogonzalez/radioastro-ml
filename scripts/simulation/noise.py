@@ -430,11 +430,24 @@ def _normalize_sampler(value: object) -> str:
     return sampler
 
 
-def _validate_band_frequencies(band: str, frequencies_hz: Iterable[float]) -> None:
+def _validate_band_frequencies(
+    band: str,
+    frequencies_hz: Iterable[float],
+    channel_width_hz: float,
+) -> None:
     lower, upper = _VLA_BAND_RANGES_GHZ[band]
     frequencies_ghz = tuple(float(item) / 1e9 for item in frequencies_hz)
     outside = [item for item in frequencies_ghz if not lower <= item <= upper]
-    if outside:
+    edge_tolerance_ghz = 2.0 * float(channel_width_hz) / 1e9
+    tolerated_edge = (
+        len(outside) <= 2
+        and len(outside) < len(frequencies_ghz) / 2
+        and all(
+            lower - edge_tolerance_ghz <= item <= upper + edge_tolerance_ghz
+            for item in outside
+        )
+    )
+    if outside and not tolerated_edge:
         raise ValueError(
             f"Selected channels ({min(frequencies_ghz):.9g}--{max(frequencies_ghz):.9g} GHz) "
             f"do not all fall in VLA {band} band ({lower:g}--{upper:g} GHz)"
@@ -477,7 +490,11 @@ def _apply_noise(
         sampling = _inspect_homogeneous_sampling(ms)
         band = _normalize_band(parameters["band"])
         sampler = _normalize_sampler(parameters["sampler"])
-        _validate_band_frequencies(band, sampling.channel_frequencies_hz)
+        _validate_band_frequencies(
+            band,
+            sampling.channel_frequencies_hz,
+            sampling.effective_bw_hz,
+        )
         sefd_source = "override" if "sefd_jy" in parameters else "VLA OSS 2026A fiducial"
         eta_source = "override" if "eta_c" in parameters else "VLA OSS 2026A 8-bit"
         sefd = _positive_float(

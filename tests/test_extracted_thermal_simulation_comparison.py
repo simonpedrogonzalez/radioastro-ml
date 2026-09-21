@@ -182,6 +182,7 @@ class ExperimentDriverTests(unittest.TestCase):
             list(experiment.IMAGING_IMSIZE),
         )
         self.assertEqual(experiment.IMAGING_IMSIZE, (256, 256))
+        self.assertEqual(manifest["configuration"]["fits_invalid_policy"], "fill")
 
     def test_legacy_manifest_cannot_be_resumed_into_new_region_policy(self):
         with tempfile.TemporaryDirectory() as temporary:
