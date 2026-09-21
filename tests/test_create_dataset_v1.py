@@ -25,6 +25,9 @@ class FullDatasetConfigurationTests(unittest.TestCase):
     def test_fixed_overrides_or_random_per_variant_seeds(self):
         first, second = experiment.VARIANTS[:2]
 
+        self.assertIsNone(experiment.FIXED_ANTENNA_ID)
+        self.assertIsNone(experiment.FIXED_ERROR_SIGN)
+
         with patch.object(experiment, "FIXED_ANTENNA_ID", 1):
             self.assertIsNone(experiment._antenna_seed("0012-399", first))
             self.assertEqual(
@@ -114,6 +117,7 @@ class FullDatasetConfigurationTests(unittest.TestCase):
         self.assertFalse(hasattr(arguments, "source_id"))
 
     def test_source_ids_to_process_selects_and_validates_ids(self):
+        self.assertIsNone(experiment.SOURCE_IDS_TO_PROCESS)
         selected = (TRAIN_IDS[0], TEST_IDS[0])
         with patch.object(experiment, "SOURCE_IDS_TO_PROCESS", selected):
             self.assertEqual(experiment._configured_source_ids(), selected)

@@ -42,16 +42,11 @@ SNR_CORR_REL_TOL = 0.01
 BASE_SEED = 20260914
 # None processes every available source in the fixed partitions. To restrict a
 # run, set a tuple such as ("0012-399", "0846-261").
-SOURCE_IDS_TO_PROCESS: tuple[str, ...] | None = (
-    "0012-399",
-    "0846-261",
-    "0005+383",
-    "1513-102",
-)
+SOURCE_IDS_TO_PROCESS: tuple[str, ...] | None = None
 # Set either override to None for the default independent random draw per
 # source variant. Integer values are shared globally by all sources/variants.
-FIXED_ANTENNA_ID: int | None = 1
-FIXED_ERROR_SIGN: Literal[-1, 1] | None = 1
+FIXED_ANTENNA_ID: int | None = None
+FIXED_ERROR_SIGN: Literal[-1, 1] | None = None
 if FIXED_ANTENNA_ID is not None and (
     isinstance(FIXED_ANTENNA_ID, bool)
     or not isinstance(FIXED_ANTENNA_ID, int)
