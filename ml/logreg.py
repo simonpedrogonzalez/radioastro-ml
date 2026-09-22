@@ -25,20 +25,20 @@ from scripts.preprocessing import (
 
 
 FEATURE_NAMES = (
-    "metrics.clean_peak_jy_per_beam",
-    "metrics.dynamic_range_rms",
+    # "metrics.clean_peak_jy_per_beam",
+    # "metrics.dynamic_range_rms",
     "metrics.dynamic_range_scaled_mad",
-    "metrics.residual.n_pixels",
-    "metrics.residual.area_synthesized_beams",
-    "metrics.residual.rms_jy_per_beam",
+    # "metrics.residual.n_pixels",
+    # "metrics.residual.area_synthesized_beams",
+    # "metrics.residual.rms_jy_per_beam",
     "metrics.residual.scaled_mad_jy_per_beam",
-    "metrics.residual.residual_abs_peak_jy_per_beam",
-    "metrics.residual.residual_min_jy_per_beam",
-    "metrics.residual.residual_max_jy_per_beam",
+    # "metrics.residual.residual_abs_peak_jy_per_beam",
+    # "metrics.residual.residual_min_jy_per_beam",
+    # "metrics.residual.residual_max_jy_per_beam",
     "metrics.residual.peak_over_scaled_mad",
-    "metrics.residual.p99_over_scaled_mad",
+    # "metrics.residual.p99_over_scaled_mad",
     "metrics.residual.p99_5_over_scaled_mad",
-    "metrics.residual.rms_over_scaled_mad",
+    # "metrics.residual.rms_over_scaled_mad",
 )
 
 
@@ -167,14 +167,19 @@ def _prediction_rows(
             "probability_phase": float(probability[2]),
             "corruption_snr": metadata["corruption_snr"],
             "corruption_snr_target": metadata["corruption_snr_target"],
+            **{
+                name: float(value)
+                for name, value in zip(FEATURE_NAMES, vector, strict=True)
+            },
         }
-        for sample_id, source_id, truth, prediction, probability, metadata in zip(
+        for sample_id, source_id, truth, prediction, probability, metadata, vector in zip(
             features.sample_ids,
             features.source_ids,
             features.y,
             predictions,
             probabilities,
             features.label_metadata,
+            features.X,
             strict=True,
         )
     ]
@@ -236,7 +241,13 @@ def main(argv: list[str] | None = None) -> int:
         "python": platform.python_version(),
         **{
             package: version(package)
-            for package in ("numpy", "torch", "astropy", "scikit-learn")
+            for package in (
+                "numpy",
+                "torch",
+                "astropy",
+                "scikit-learn",
+                "matplotlib",
+            )
         },
     }
     run_dir = write_run(

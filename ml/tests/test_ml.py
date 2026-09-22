@@ -39,15 +39,15 @@ class FeatureTests(unittest.TestCase):
         self.assertEqual(result.source_ids, ("0005+383",))
 
         invalid = _qa(values)
-        invalid["metric_validity"]["residual"]["rms_jy_per_beam"] = False
+        invalid["metric_validity"]["residual"]["scaled_mad_jy_per_beam"] = False
         batch["qa"] = [invalid]
-        with self.assertRaisesRegex(ValueError, "0005.*rms_jy_per_beam"):
+        with self.assertRaisesRegex(ValueError, "0005.*scaled_mad_jy_per_beam"):
             features_from_dataloader([batch])
 
         nonfinite = _qa(values)
-        nonfinite["metrics"]["residual"]["rms_jy_per_beam"] = math.nan
+        nonfinite["metrics"]["residual"]["scaled_mad_jy_per_beam"] = math.nan
         batch["qa"] = [nonfinite]
-        with self.assertRaisesRegex(ValueError, "0005.*rms_jy_per_beam"):
+        with self.assertRaisesRegex(ValueError, "0005.*scaled_mad_jy_per_beam"):
             features_from_dataloader([batch])
 
 

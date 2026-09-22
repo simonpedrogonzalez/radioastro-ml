@@ -5,6 +5,7 @@ description = "Leakage-safe baseline models for radioastronomy calibration error
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "astropy",
+    "matplotlib>=3.11.2",
     "numpy",
     "scikit-learn",
     "torch",
