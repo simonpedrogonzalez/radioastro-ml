@@ -22,9 +22,9 @@ from scripts.img_utils import make_clean, casa_image_to_png
 # -------------------------
 # Config
 # -------------------------
-PROJECT_LIST = "/Users/u1528314/repos/radioastro-ml/collect/small_subset/small_selection.csv"
-DOWNLOAD_DIR = Path("/Users/u1528314/repos/radioastro-ml/collect/downloads")
-EXTRACTED_DIR = Path("/Users/u1528314/repos/radioastro-ml/collect/extracted")
+PROJECT_LIST = "/Users/u1528314/Documents/radioastro-ml/collect/small_subset/small_selection.csv"
+DOWNLOAD_DIR = Path("/Users/u1528314/Documents/radioastro-ml/collect/downloads")
+EXTRACTED_DIR = Path("/Users/u1528314/Documents/radioastro-ml/collect/extracted3")
 
 TCLEAN_CFG = dict(
     specmode="mfs",
@@ -68,6 +68,7 @@ STRING_COLS = [
 ]
 
 NUMERIC_COLS = [
+    "size_gb",
     "size",   # expected size from original table
     "new_size",
     "extracted_gain_onsource_min",
@@ -577,7 +578,7 @@ def ensure_download_present(df: pd.DataFrame, idx: int, csv_path: str | Path) ->
     name = str(row.get("name") or "").strip()
     wget_cmd = str(row.get("wget_command") or "").strip()
     folder_name = str(row.get("folder") or "").strip()
-    expected_size = row.get("size")
+    expected_size = row.get("size_gb")
 
     if not folder_name:
         folder_name = "".join(ch if (ch.isalnum() or ch in "_-.+") else "_" for ch in name)

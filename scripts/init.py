@@ -109,11 +109,11 @@ def run_bad_uv_dist_vs_amp_experiment() -> None:
 # check_uv_lim_issues.main()
 
 # corruption_gaindrift.new_corruption()
-# extraction_pipeline.run()
+extraction_pipeline.run()
 
 # uvlim_recal.main("/Users/u1528314/repos/radioastro-ml/collect/extracted/0205+322/0205+322/0205+322.ms")
 # run_bad_uv_dist_vs_amp_experiment()
-simulations.main()
+# simulations.main()
 # uvlim_recal.main("/Users/u1528314/repos/radioastro-ml/runs/vla_pipe_test/0205+322_pipeline_input.ms", initial_plot_only=True)
 # uvlim_recal.main("/Users/u1528314/repos/radioastro-ml/collect/extracted/0205+322/selfcal/0205+322_selfcal.ms", initial_plot_only=True)
 # single_image.main(
