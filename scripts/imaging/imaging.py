@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import math
 from pathlib import Path
 import shutil
 from typing import Any, Callable, Dict, Literal, Optional, Sequence, Tuple
@@ -225,6 +226,7 @@ def image_ms(
     keep_intermediate_products: bool = False,
     fits_invalid_policy: Literal["error", "fill"] = "error",
     fits_fill_value: float = 0.0,
+    pblimit: float | None = None,
 ) -> ImagingResult:
     """Image one MS directly, resolving any grid-dependent metric region once."""
     if not isinstance(config, ImagingConfig):
@@ -239,6 +241,11 @@ def image_ms(
         raise ValueError(
             "metric_region and metric_region_resolver cannot both specify a region"
         )
+    if pblimit is not None:
+        if isinstance(pblimit, bool) or not isinstance(pblimit, (int, float)):
+            raise TypeError("pblimit must be a finite number or None")
+        if not math.isfinite(pblimit) or pblimit in (-1, 0, 1):
+            raise ValueError("pblimit must be finite and cannot be -1, 0, or 1")
     output = _prepare_output_dir(output_dir)
     resolved = config.resolve(ms, output, imsize=imsize)
     if metric_region_resolver is not None:
@@ -257,6 +264,8 @@ def image_ms(
     _assert_prefix_available(dirty_base)
     dirty_parameters = _direct_base_parameters(config, resolved, dirty_base)
     dirty_parameters["niter"] = 0
+    if pblimit is not None:
+        dirty_parameters["pblimit"] = pblimit
     tclean(**dirty_parameters)
     dirty_image = _image_product(dirty_base, "image", config.deconvolver)
     dirty_residual = _image_product(dirty_base, "residual", config.deconvolver)
@@ -267,6 +276,8 @@ def image_ms(
     _assert_prefix_available(clean_base)
     clean_parameters = _direct_base_parameters(config, resolved, clean_base)
     clean_parameters.update(niter=controls.niter, fullsummary=True)
+    if pblimit is not None:
+        clean_parameters["pblimit"] = pblimit
     if controls.threshold is not None:
         clean_parameters["threshold"] = controls.threshold
     if controls.nsigma is not None:
@@ -280,6 +291,8 @@ def image_ms(
     return_record = tclean(**clean_parameters)
     summary, summary_warnings = normalize_tclean_summary(return_record)
     effective = dict(resolved.effective_imaging_parameters)
+    if pblimit is not None:
+        effective["pblimit"] = pblimit
     effective.update(
         niter=controls.niter,
         threshold=controls.threshold,
