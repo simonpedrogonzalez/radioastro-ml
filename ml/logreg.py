@@ -59,7 +59,9 @@ def _nested(value: Any, keys: tuple[str, ...], *, context: str) -> Any:
     return value
 
 
-def features_from_dataloader(dataloader: Any) -> FeatureSet:
+def features_from_dataloader(
+    dataloader: Any, feature_names: tuple[str, ...] = FEATURE_NAMES
+) -> FeatureSet:
     """Extract the predeclared leakage-safe feature vector from each sample."""
 
     vectors: list[list[float]] = []
@@ -79,7 +81,7 @@ def features_from_dataloader(dataloader: Any) -> FeatureSet:
             if not isinstance(qa, dict):
                 raise ValueError(f"Sample {sample_id!r} has no imaging QA metadata")
             vector = []
-            for feature_name in FEATURE_NAMES:
+            for feature_name in feature_names:
                 keys = tuple(feature_name.split("."))[1:]
                 validity = _nested(
                     qa.get("metric_validity"),

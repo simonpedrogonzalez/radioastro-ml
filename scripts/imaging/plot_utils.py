@@ -60,13 +60,12 @@ def casa_image_to_png(
         import astropy
         from astropy.io import fits
         from astropy.wcs import WCS
-        from casatasks import exportfits
         from matplotlib import patheffects
         from matplotlib.lines import Line2D
         from matplotlib.patches import Ellipse
     except ImportError as exc:
         raise RuntimeError(
-            "CASA, Astropy, NumPy, and Matplotlib are required to create image PNGs"
+            "Astropy, NumPy, and Matplotlib are required to create image PNGs"
         ) from exc
 
     png_path.parent.mkdir(parents=True, exist_ok=True)
@@ -75,6 +74,12 @@ def casa_image_to_png(
         (".fits", ".fits.gz", ".fit", ".fit.gz")
     )
     owns_fits_path = not source_is_fits
+    if owns_fits_path or mask_path is not None:
+        try:
+            from casatasks import exportfits
+        except ImportError as exc:
+            raise RuntimeError("CASA is required to export CASA images or masks") from exc
+
     if source_is_fits:
         fits_path = image_path
     else:

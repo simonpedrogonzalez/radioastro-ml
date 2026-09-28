@@ -51,40 +51,46 @@ def _metric_lines(name: str, metrics: dict[str, Any]) -> list[str]:
             for label, values in metrics["per_class"].items()
         ],
         "",
-        (
-            "| Target SNR | Samples | Accuracy | Balanced accuracy | Macro "
-            "precision | Macro recall | Macro F1 | FPR | Detection recall | "
-            "Type accuracy |"
-        ),
-        (
-            "| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | "
-            "---: | ---: |"
-        ),
-        *[
-            "| "
-            + " | ".join(
-                [
-                    level,
-                    str(values["sample_count"]),
-                    f'{values["accuracy"]:.4f}',
-                    f'{values["balanced_accuracy"]:.4f}',
-                    f'{values["macro_precision"]:.4f}',
-                    f'{values["macro_recall"]:.4f}',
-                    f'{values["macro_f1"]:.4f}',
-                    _optional(values.get("false_positive_rate")),
-                    _optional(values.get("detection_recall")),
-                    _optional(values.get("corruption_type_accuracy")),
-                ]
-            )
-            + " |"
-            for level, values in metrics["by_corruption_snr_target"].items()
-        ],
+        *_severity_lines(metrics),
         "",
     ]
 
 
-def _optional(value: float | None) -> str:
-    return "—" if value is None else f"{value:.4f}"
+def _conditional_type(values: dict[str, Any]) -> float | None:
+    if "type_accuracy_among_detected" in values:
+        return values["type_accuracy_among_detected"]
+    detected = values.get("detection_recall")
+    return values["corruption_type_accuracy"] / detected if detected else None
+
+
+def _severity_lines(metrics: dict[str, Any]) -> list[str]:
+    levels = metrics["by_corruption_snr_target"]
+    clean = levels.get("0")
+
+    def row(level: str, values: dict[str, Any]) -> str:
+        total = values["sample_count"]
+        detected = round(values["detection_recall"] * total)
+        correct = round(values["corruption_type_accuracy"] * total)
+        conditional = _conditional_type(values)
+        type_score = f"{conditional:.4f} ({correct}/{detected})" if conditional is not None else "—"
+        return (f'| {level} | {total} | {values["detection_recall"]:.4f} '
+                f'({detected}/{total}) | {type_score} |')
+
+    lines = [
+        "| Target SNR | Samples | Detected as corrupted | Correct type among detections |",
+        "| ---: | ---: | ---: | ---: |",
+        *[
+            row(level, values)
+            for level, values in levels.items() if values.get("detection_recall") is not None
+        ],
+    ]
+    if clean is not None:
+        lines += ["", f'Clean false alarms (SNR 0): '
+                         f'{round(clean["false_positive_rate"] * clean["sample_count"])}'
+                         f'/{clean["sample_count"]} ({clean["false_positive_rate"]:.4f}).']
+    lines += ["", "Detection uses all corrupted samples at that level; type correctness "
+                  "uses only those detected. If none are detected, type correctness is undefined (—)."]
+    return lines
 
 
 def _plot_severity(metrics: dict[str, Any], destination: Path) -> None:
@@ -101,11 +107,11 @@ def _plot_severity(metrics: dict[str, Any], destination: Path) -> None:
     levels.sort()
     x = [level for level, _ in levels]
     detection = [values["detection_recall"] for _, values in levels]
-    correct_type = [values["corruption_type_accuracy"] for _, values in levels]
+    correct_type = [_conditional_type(values) for _, values in levels]
 
     figure, axis = plt.subplots(figsize=(6.4, 4.0), constrained_layout=True)
     axis.plot(x, detection, marker="o", linewidth=2, label="detected as corrupted")
-    axis.plot(x, correct_type, marker="o", linewidth=2, label="correct amp/phase")
+    axis.plot(x, correct_type, marker="o", linewidth=2, label="correct type among detections")
     axis.set(xlabel="Target corruption SNR", ylabel="Fraction", ylim=(-0.02, 1.02))
     axis.set_xticks(x)
     axis.grid(alpha=0.25)
@@ -313,8 +319,8 @@ def write_run(
             "### Performance by corruption level",
             "",
             (
-                "Detection counts any non-clean prediction as detected; correct type "
-                "requires the predicted amplitude/phase class to match the true class."
+                "Detection uses all corrupted samples; type correctness uses only "
+                "the ones detected as corrupted."
             ),
             "",
             "![Performance by corruption level](severity_performance.png)",

@@ -80,8 +80,17 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual(levels["0"]["false_positive_rate"], 1.0)
         self.assertEqual(levels["10"]["detection_recall"], 0.5)
         self.assertEqual(levels["10"]["corruption_type_accuracy"], 0.5)
+        self.assertEqual(levels["10"]["type_accuracy_among_detected"], 1.0)
         self.assertEqual(levels["30"]["detection_recall"], 1.0)
         self.assertEqual(levels["30"]["corruption_type_accuracy"], 0.5)
+        self.assertEqual(levels["30"]["type_accuracy_among_detected"], 0.5)
+
+    def test_type_is_undefined_when_no_corruption_is_detected(self):
+        batch = {"sample_id": ["a", "b"], "label": [1, 2],
+                 "label_metadata": [{"corruption_snr_target": 10.0}] * 2}
+        level = evaluate([batch], {"a": 0, "b": 0})["by_corruption_snr_target"]["10"]
+        self.assertEqual(level["detection_recall"], 0.0)
+        self.assertIsNone(level["type_accuracy_among_detected"])
 
 
 if __name__ == "__main__":

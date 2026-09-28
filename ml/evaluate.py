@@ -84,11 +84,14 @@ def evaluate(
                 np.mean(np.not_equal(predicted, 0))
             )
         else:
-            level_result["detection_recall"] = float(
-                np.mean(np.not_equal(predicted, 0))
-            )
+            detected = np.not_equal(predicted, 0)
+            level_result["detection_recall"] = float(np.mean(detected))
             level_result["corruption_type_accuracy"] = float(
                 np.mean(np.equal(truth, predicted))
+            )
+            level_result["type_accuracy_among_detected"] = (
+                float(np.mean(np.equal(truth, predicted)[detected]))
+                if np.any(detected) else None
             )
         result["by_corruption_snr_target"][f"{level:g}"] = level_result
     return result
