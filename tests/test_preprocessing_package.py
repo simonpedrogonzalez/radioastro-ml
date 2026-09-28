@@ -85,14 +85,13 @@ class LabelTests(unittest.TestCase):
 
 class PartitionTests(unittest.TestCase):
     def test_hard_coded_partitions_are_complete_ordered_and_disjoint(self):
-        self.assertEqual((len(TRAIN_IDS), len(TEST_IDS), len(VAL_IDS)), (93, 20, 20))
+        self.assertEqual((len(TRAIN_IDS), len(TEST_IDS), len(VAL_IDS)), (101, 22, 22))
         self.assertEqual(len(ALL_IDS), len(set(ALL_IDS)))
-        self.assertEqual(ALL_IDS, tuple(sorted(ALL_IDS)))
-        self.assertEqual((TRAIN_IDS[-1], TEST_IDS[0], VAL_IDS[0]), (
-            "1513+236",
-            "1513-102",
-            "1927+612",
-        ))
+        for ids in (TRAIN_IDS, TEST_IDS, VAL_IDS):
+            self.assertEqual(ids, sorted(ids))
+        self.assertEqual(partition_for_sample("1923-210_phase_snr_10"), "train")
+        self.assertEqual(partition_for_sample("1146+399_amp_snr_10"), "test")
+        self.assertEqual(partition_for_sample("0022+002"), "val")
 
     def test_sample_variants_follow_their_source_dataset_partition(self):
         self.assertEqual(source_dataset_id("0012-399_phase_only"), "0012-399")
