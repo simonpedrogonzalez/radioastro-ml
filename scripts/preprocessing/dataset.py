@@ -101,16 +101,50 @@ class FitsSimulationDataset(Dataset):  # type: ignore[misc]
         image = torch_module.stack(
             [torch_module.from_numpy(planes[name].values.copy()) for name in self.channels]
         ).to(dtype=torch_module.float32)
+        simulation = _read_json(manifest.simulation)
+        noise_control = simulation.get("noise_control")
+        if noise_control is not None and not isinstance(noise_control, dict):
+            raise ValueError(
+                f"simulation.noise_control must be an object: {manifest.simulation}"
+            )
         corruption_reports = (
             [_read_json(reference.corruption) for reference in manifest.corruptions]
-            if self.load_metadata or self.label_criterion is not None
+            if self.load_metadata or self.label_criterion is not None or noise_control is not None
             else []
         )
-        assigned = (
-            AssignedLabel(manifest.label_id, manifest.label_name, None, None)
-            if self.label_criterion is None
-            else assign_label(corruption_reports, self.label_criterion)
-        )
+        if self.label_criterion is None:
+            if noise_control is not None:
+                derived = assign_label(
+                    corruption_reports,
+                    "constant_antenna_type",
+                    noise_control=noise_control,
+                )
+                if (manifest.label_id, manifest.label_name) != (0, "not_corrupted"):
+                    raise ValueError(
+                        f"Increased-noise sample {manifest.sample_id!r} must retain "
+                        "label 0/not_corrupted"
+                    )
+                assigned = AssignedLabel(
+                    manifest.label_id,
+                    manifest.label_name,
+                    derived.corruption_snr,
+                    derived.corruption_snr_target,
+                    derived.sample_kind,
+                )
+            else:
+                assigned = AssignedLabel(
+                    manifest.label_id,
+                    manifest.label_name,
+                    None,
+                    None,
+                    "gain" if manifest.corruptions else "baseline",
+                )
+        else:
+            assigned = assign_label(
+                corruption_reports,
+                self.label_criterion,
+                noise_control=noise_control,
+            )
         target: Any = assigned.id
         if self.transform is not None:
             image = self.transform(image)
@@ -119,7 +153,7 @@ class FitsSimulationDataset(Dataset):  # type: ignore[misc]
         metadata: dict[str, Any] | None = None
         if self.load_metadata:
             metadata = {
-                "simulation": _read_json(manifest.simulation),
+                "simulation": simulation,
                 "imaging": _read_json(manifest.imaging_qa),
                 "corruptions": corruption_reports,
             }
@@ -130,6 +164,7 @@ class FitsSimulationDataset(Dataset):  # type: ignore[misc]
             "label_metadata": {
                 "corruption_snr": assigned.corruption_snr,
                 "corruption_snr_target": assigned.corruption_snr_target,
+                "sample_kind": assigned.sample_kind,
             },
             "sample_id": manifest.sample_id,
             "partition": self.partition,

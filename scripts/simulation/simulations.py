@@ -162,6 +162,11 @@ def _initialize_weights(ms_path: Path, sigma_jy: float | None) -> str:
     return "sigma"
 
 
+def initialize_weights(ms: str | Path, sigma_jy: float | None) -> str:
+    """Initialize homogeneous MS weights for a resolved per-component sigma."""
+    return _initialize_weights(resolve_path(ms).path, sigma_jy)
+
+
 def add_thermal_noise_inplace(
     ms: str | Path,
     *,

@@ -41,6 +41,11 @@ THERMAL_DIR = (
     EXPERIMENTS_ROOT / "extracted_thermal_simulation_comparison_20260909T005739"
 )
 DATASET_PBLIMIT = -0.1
+NOISE_CONTROL_INDEX_NAME = "dataset_noise_controls.json"
+NOISE_CONTROL_LABELS = {"not_corrupted": 0}
+NOISE_CONTROL_REL_TOL = 1e-5
+NOISE_CONTROL_DEFAULT_PARTITION = "val"
+REPORT_SCHEMA_VERSION = 2
 REPORT_TEMPLATE = ROOT / "scripts" / "reporting" / "create_dataset_v1.qmd"
 LEGACY_SNR_CORR_TARGETS = (10.0, 30.0, 50.0, 100.0)
 SNR_CORR_TARGETS = (5.0, 10.0, 15.0, 20.0, 30.0, 40.0, 50.0, 100.0)
@@ -107,6 +112,12 @@ class Variant:
 
 
 @dataclass(frozen=True)
+class NoiseControl:
+    SNR_corr_target: float
+    label_name: str
+
+
+@dataclass(frozen=True)
 class IndexedSamples:
     manifests: dict[str, Any]
     pb_repairs: frozenset[str]
@@ -119,6 +130,10 @@ def _target_text(value: float) -> str:
 VARIANTS = tuple(
     Variant(family, target, f"{family}_snr_{_target_text(target)}")
     for family in ("amp", "phase")
+    for target in SNR_CORR_TARGETS
+)
+NOISE_CONTROLS = tuple(
+    NoiseControl(target, f"noise_snr_{_target_text(target)}")
     for target in SNR_CORR_TARGETS
 )
 LEGACY_LABELS = {
@@ -457,6 +472,7 @@ def _write_branch_simulation_reports(
     noise: dict[str, object],
     corruption_seed: int | None,
     thermal_noise_seed: int,
+    noise_control: dict[str, Any] | None = None,
 ):
     from scripts.simulation import (
         SIMULATION_REPORT_SCHEMA_VERSION,
@@ -465,9 +481,15 @@ def _write_branch_simulation_reports(
     )
 
     names = ["copy_noiseless_V"]
-    if corruption_seed is not None:
+    if noise_control is not None:
+        names += [
+            "draw_extra_noise",
+            "normalize_extra_noise",
+            "measure_extra_noise",
+        ]
+    elif corruption_seed is not None:
         names += ["corrupt_V", "measure_Delta_V"]
-    names += ["thermal_noise", "weights"]
+    names += ["shared_baseline_noise", "weights"]
     stages = [
         {"name": name, "order": index}
         for index, name in enumerate(names, start=1)
@@ -476,7 +498,10 @@ def _write_branch_simulation_reports(
         seed=thermal_noise_seed,
         shared_across_source_variants=True,
     )
-    if corruption_seed is not None:
+    if noise_control is not None:
+        stages[1]["seed"] = noise_control["extra_noise_seed"]
+        stages[-1]["sigma_jy"] = noise_control["final_total_sigma_jy"]
+    elif corruption_seed is not None:
         stages[1]["seed"] = corruption_seed
     payload = _simulation_payload(source)
     recorded_observed_ms = (
@@ -503,6 +528,7 @@ def _write_branch_simulation_reports(
                 "seed": thermal_noise_seed,
                 "policy": "same CASA simplenoise request and seed for every source variant",
             },
+            **({"noise_control": noise_control} if noise_control is not None else {}),
             "generated_artifacts": [
                 {
                     "role": "observed_ms",
@@ -629,6 +655,77 @@ def _audit_indexed_samples(dataset_index: Path) -> IndexedSamples:
     return IndexedSamples(manifests, frozenset(repairs))
 
 
+def _noise_control_payload(sample: Any) -> dict[str, Any]:
+    payload = json.loads(sample.simulation.read_text(encoding="utf-8"))
+    control = payload.get("noise_control")
+    if not isinstance(control, dict) or control.get("kind") != "increased_noise":
+        raise ValueError(
+            f"{sample.sample_id} has no valid increased-noise control metadata"
+        )
+    for key in ("SNR_corr_target", "SNR_corr_measured"):
+        value = control.get(key)
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+            or float(value) <= 0.0
+        ):
+            raise ValueError(f"{sample.sample_id} has invalid noise_control.{key}")
+    return control
+
+
+def _assert_noise_control_sample(
+    sample: Any, expected_target: float | None = None
+) -> None:
+    if (sample.label_id, sample.label_name) != (0, "not_corrupted"):
+        raise ValueError(
+            f"{sample.sample_id} must retain label 0/not_corrupted"
+        )
+    if sample.corruptions:
+        raise ValueError(f"{sample.sample_id} must not contain a gain report")
+    control = _noise_control_payload(sample)
+    target = float(control["SNR_corr_target"])
+    measured = float(control["SNR_corr_measured"])
+    if expected_target is not None and target != float(expected_target):
+        raise ValueError(
+            f"{sample.sample_id} target {target:g} does not match {expected_target:g}"
+        )
+    if not math.isclose(measured, target, rel_tol=NOISE_CONTROL_REL_TOL):
+        raise ValueError(
+            f"{sample.sample_id} measured SNR_corr={measured:.12g} does not match "
+            f"target {target:.12g}"
+        )
+    suffix = f"_noise_snr_{_target_text(target)}"
+    if not sample.sample_id.endswith(suffix):
+        raise ValueError(
+            f"{sample.sample_id} does not match its noise-control target {target:g}"
+        )
+    _assert_square_pb_support(sample)
+    _assert_sample_pb_policy(sample)
+
+
+def _audit_noise_controls(dataset_index: Path) -> dict[str, Any]:
+    if not dataset_index.exists():
+        return {}
+    from scripts.preprocessing import load_dataset_manifest, load_sample_manifest
+
+    index = load_dataset_manifest(dataset_index, require_samples=False)
+    if index.labels != NOISE_CONTROL_LABELS:
+        raise RuntimeError(
+            f"Noise-control index has incompatible labels: {index.labels}"
+        )
+    manifests: dict[str, Any] = {}
+    for path in index.samples:
+        sample = load_sample_manifest(path)
+        if sample.sample_id in manifests:
+            raise RuntimeError(
+                f"Duplicate indexed noise-control sample ID: {sample.sample_id}"
+            )
+        _assert_noise_control_sample(sample)
+        manifests[sample.sample_id] = sample
+    return manifests
+
+
 def _migrate_dataset_labels(dataset_index: Path) -> None:
     if not dataset_index.exists():
         return
@@ -661,20 +758,22 @@ def _append_sample_to_dataset(
     dataset_index: Path,
     sample: Any,
     completed: set[str],
+    *,
+    labels: dict[str, int] = LABELS,
 ) -> None:
     """Append after the run's full audit without re-hashing every old sample."""
     from scripts.preprocessing import atomic_write_json, load_dataset_manifest
 
     if sample.sample_id in completed:
         raise ValueError(f"Dataset already contains sample_id {sample.sample_id!r}")
-    if LABELS.get(sample.label_name) != sample.label_id:
+    if labels.get(sample.label_name) != sample.label_id:
         raise ValueError(
             f"Sample {sample.sample_id!r} has incompatible label "
             f"{sample.label_name}={sample.label_id}"
         )
     if dataset_index.exists():
         index = load_dataset_manifest(dataset_index, require_samples=False)
-        if index.labels != LABELS:
+        if index.labels != labels:
             raise RuntimeError("Dataset label map changed after the initial audit")
         samples = list(index.samples)
     else:
@@ -689,7 +788,7 @@ def _append_sample_to_dataset(
         dataset_index,
         {
             "schema_version": 1,
-            "labels": LABELS,
+            "labels": labels,
             "samples": [
                 path.relative_to(dataset_index.parent).as_posix() for path in samples
             ]
@@ -702,6 +801,9 @@ def _recover_or_remove_sample(
     sample_dir: Path,
     dataset_index: Path,
     completed: set[str],
+    *,
+    labels: dict[str, int] = LABELS,
+    validator: Any | None = None,
 ) -> bool:
     if not sample_dir.exists():
         return False
@@ -715,8 +817,12 @@ def _recover_or_remove_sample(
         sample = load_sample_manifest(manifest_path)
         if sample.sample_id in completed:
             return True
+        if validator is not None:
+            validator(sample)
         cleanup_simulation_sample(sample_dir, dry_run=False)
-        _append_sample_to_dataset(dataset_index, sample, completed)
+        _append_sample_to_dataset(
+            dataset_index, sample, completed, labels=labels
+        )
         completed.add(sample.sample_id)
         print(f"Recovered completed sample: {sample.sample_id}")
         return True
@@ -765,6 +871,147 @@ def _assert_imaging_match(source_qa: dict[str, Any], result: Any) -> None:
         raise RuntimeError(f"Corrupted imaging settings differ from baseline: {differences}")
 
 
+def _rescale_visibility_delta(
+    V_ms: Path,
+    perturbed_ms: Path,
+    scale: float,
+    *,
+    chunk_rows: int = 4096,
+) -> None:
+    """Replace DATA with ``V + scale * (DATA - V)`` in bounded chunks."""
+    import numpy as np
+
+    if not math.isfinite(scale) or scale <= 0.0:
+        raise ValueError(f"Noise-control scale must be finite and positive: {scale!r}")
+    if isinstance(chunk_rows, bool) or not isinstance(chunk_rows, int) or chunk_rows <= 0:
+        raise ValueError("chunk_rows must be a positive integer")
+    try:
+        from casatools import table
+    except ImportError as exc:  # pragma: no cover - CASA supplies this module
+        raise RuntimeError("CASA casatools is required to normalize noise controls") from exc
+
+    reference = table()
+    perturbed = table()
+    reference_open = False
+    perturbed_open = False
+    try:
+        reference.open(str(V_ms), nomodify=True)
+        reference_open = True
+        perturbed.open(str(perturbed_ms), nomodify=False)
+        perturbed_open = True
+        if "DATA" not in reference.colnames() or "DATA" not in perturbed.colnames():
+            raise RuntimeError("Noise-control Measurement Sets must contain DATA")
+        total_rows = int(reference.nrows())
+        if int(perturbed.nrows()) != total_rows:
+            raise RuntimeError("Noise-control Measurement Sets have different row counts")
+        for start in range(0, total_rows, chunk_rows):
+            count = min(chunk_rows, total_rows - start)
+            V = np.asarray(
+                reference.getcol("DATA", startrow=start, nrow=count)
+            )
+            values = np.asarray(
+                perturbed.getcol("DATA", startrow=start, nrow=count)
+            )
+            if values.shape != V.shape:
+                raise RuntimeError(
+                    f"Noise-control DATA shapes differ: {V.shape} vs {values.shape}"
+                )
+            normalized = V + scale * (values - V)
+            perturbed.putcol(
+                "DATA",
+                normalized.astype(values.dtype, copy=False),
+                startrow=start,
+                nrow=count,
+            )
+    finally:
+        if perturbed_open:
+            perturbed.close()
+        if reference_open:
+            reference.close()
+
+
+def _apply_noise_control(
+    source: ThermalSource,
+    control: NoiseControl,
+    V_ms: Path,
+    observed_ms: Path,
+    sigma: float,
+    noise_model: str,
+    noise_parameters: dict[str, Any],
+    thermal_noise_seed: int,
+) -> dict[str, Any]:
+    """Add and normalize an independent Gaussian-derived visibility perturbation."""
+    from scripts.corruption import measure_corruption_metrics
+    from scripts.simulation import add_thermal_noise_inplace
+
+    extra_seed = _stable_seed(source.source_id, control.label_name)
+    if extra_seed == thermal_noise_seed:
+        raise RuntimeError("Extra-noise and baseline-noise seeds must be independent")
+    raw_noise = add_thermal_noise_inplace(
+        observed_ms,
+        noise_model=noise_model,
+        noise_parameters=noise_parameters,
+        seed=extra_seed,
+    )
+    raw_sigma = float(raw_noise["simplenoise_jy"])
+    if not math.isclose(raw_sigma, sigma, rel_tol=1e-10):
+        raise RuntimeError(
+            f"Extra-noise draw resolved sigma={raw_sigma:.12g}, expected {sigma:.12g}"
+        )
+    raw_metrics = measure_corruption_metrics(V_ms, observed_ms, sigma)
+    if not math.isfinite(raw_metrics.SNR_corr) or raw_metrics.SNR_corr <= 0.0:
+        raise RuntimeError("Extra-noise draw has no finite positive perturbation norm")
+
+    applied_scale = control.SNR_corr_target / raw_metrics.SNR_corr
+    _rescale_visibility_delta(V_ms, observed_ms, applied_scale)
+    measured = measure_corruption_metrics(V_ms, observed_ms, sigma)
+    if not math.isclose(
+        measured.SNR_corr,
+        control.SNR_corr_target,
+        rel_tol=NOISE_CONTROL_REL_TOL,
+    ):
+        correction = control.SNR_corr_target / measured.SNR_corr
+        if not math.isfinite(correction) or abs(correction - 1.0) > 1e-3:
+            raise RuntimeError(
+                "Stored extra-noise norm requires an unbounded corrective rescale: "
+                f"factor={correction:.12g}"
+            )
+        _rescale_visibility_delta(V_ms, observed_ms, correction)
+        applied_scale *= correction
+        measured = measure_corruption_metrics(V_ms, observed_ms, sigma)
+    relative_error = abs(measured.SNR_corr / control.SNR_corr_target - 1.0)
+    if relative_error > NOISE_CONTROL_REL_TOL:
+        raise RuntimeError(
+            f"Stored extra-noise SNR_corr={measured.SNR_corr:.12g} misses target "
+            f"{control.SNR_corr_target:.12g} by {relative_error:.3g} relative"
+        )
+
+    sigma_extra = (
+        sigma
+        * control.SNR_corr_target
+        / math.sqrt(2.0 * measured.valid_sample_count)
+    )
+    sigma_total = math.hypot(sigma, sigma_extra)
+    return {
+        "kind": "increased_noise",
+        "definition": "Y_D=V+n0+eta; SNR_corr=||eta/sigma0||_2,I",
+        "draw_policy": "independent Gaussian-derived draw normalized to fixed realized norm",
+        "SNR_corr_target": control.SNR_corr_target,
+        "SNR_corr_measured": measured.SNR_corr,
+        "SNR_corr_relative_error": relative_error,
+        "SNR_corr_relative_tolerance": NOISE_CONTROL_REL_TOL,
+        "reference_sigma_jy": sigma,
+        "valid_sample_count": measured.valid_sample_count,
+        "extra_noise_seed": extra_seed,
+        "baseline_noise_seed": thermal_noise_seed,
+        "raw_draw_SNR_corr": raw_metrics.SNR_corr,
+        "applied_scale": applied_scale,
+        "equivalent_extra_sigma_jy": sigma_extra,
+        "final_total_sigma_jy": sigma_total,
+        "extra_noise_request": raw_noise,
+    }
+
+
 def _finalize_sample(
     source: ThermalSource,
     variant: Variant | None,
@@ -784,6 +1031,7 @@ def _finalize_sample(
     sample_root: Path | None = None,
     provenance_root: Path | None = None,
     corruption_plot: Path | None = None,
+    noise_control: NoiseControl | None = None,
 ) -> Path:
     os.environ.setdefault("MPLBACKEND", "Agg")
     from scripts.corruption import (
@@ -796,9 +1044,15 @@ def _finalize_sample(
     )
     from scripts.imaging import BeamRegion, DefaultImagingConfig, image_ms
     from scripts.preprocessing import finalize_simulation_sample
-    from scripts.simulation import add_thermal_noise_inplace
+    from scripts.simulation import add_thermal_noise_inplace, initialize_weights
 
-    suffix = "not_corrupted" if variant is None else variant.label_name
+    if variant is not None and noise_control is not None:
+        raise ValueError("A sample cannot be both a gain and increased-noise variant")
+    suffix = (
+        noise_control.label_name
+        if noise_control is not None
+        else "not_corrupted" if variant is None else variant.label_name
+    )
     sample_id = _sample_id(source.source_id, suffix)
     final_root = _sample_dir(output, sample_id) if provenance_root is None else provenance_root
     root = final_root if sample_root is None else sample_root
@@ -877,12 +1131,28 @@ def _finalize_sample(
                 },
             ),
         )
+    noise_control_metadata = None
+    if noise_control is not None:
+        noise_control_metadata = _apply_noise_control(
+            source,
+            noise_control,
+            V_ms,
+            observed_ms,
+            sigma,
+            noise_model,
+            noise_parameters,
+            thermal_noise_seed,
+        )
     noise = add_thermal_noise_inplace(
         observed_ms,
         noise_model=noise_model,
         noise_parameters=noise_parameters,
         seed=thermal_noise_seed,
     )
+    if noise_control_metadata is not None:
+        noise["weight_initialization"] = initialize_weights(
+            observed_ms, noise_control_metadata["final_total_sigma_jy"]
+        )
     simulation_result = _write_branch_simulation_reports(
         source,
         sample_id=sample_id,
@@ -893,6 +1163,7 @@ def _finalize_sample(
         noise=noise,
         corruption_seed=corruption_seed,
         thermal_noise_seed=thermal_noise_seed,
+        noise_control=noise_control_metadata,
     )
     region = BeamRegion(
         min_radius_beams=source.metric_min_radius_beams,
@@ -918,14 +1189,20 @@ def _finalize_sample(
     finalized = finalize_simulation_sample(
         root,
         sample_id=sample_id,
-        label_id=LABELS[suffix],
-        label_name=suffix,
+        label_id=0 if noise_control is not None else LABELS[suffix],
+        label_name="not_corrupted" if noise_control is not None else suffix,
         imaging_result=imaging_result,
         simulation_result=simulation_result,
         corruption_reports=corruption_reports,
         dataset_index=dataset_index,
     )
-    if variant is not None:
+    if noise_control_metadata is not None:
+        print(
+            f"[{sample_id}] completed: extra-noise SNR_corr="
+            f"{noise_control_metadata['SNR_corr_measured']:.6g}, "
+            f"sigma_total={noise_control_metadata['final_total_sigma_jy']:.6g} Jy"
+        )
+    elif variant is not None:
         print(
             f"[{sample_id}] completed: eps_g={solution.eps_g:.6g}, "
             f"eps_vis={metrics.eps_vis:.6g}, SNR_corr={metrics.SNR_corr:.6g}"
@@ -1207,23 +1484,19 @@ def _repair_sample(
         raise
 
 
-def _source_manifests(dataset_index: Path, source_id: str) -> dict[str, Any]:
-    from scripts.preprocessing import load_dataset_manifest, load_sample_manifest
-
-    index = load_dataset_manifest(dataset_index, require_samples=False)
-    requested = {
-        _sample_id(source_id, "not_corrupted"),
-        *(_sample_id(source_id, variant.label_name) for variant in VARIANTS),
+def _source_manifests(
+    manifests: dict[str, Any], source_id: str, *, noise_controls: bool = False
+) -> dict[str, Any]:
+    requested = (
+        set(_requested_noise_controls(source_id))
+        if noise_controls
+        else set(_requested_samples(source_id))
+    )
+    return {
+        sample_id: sample
+        for sample_id, sample in manifests.items()
+        if sample_id in requested
     }
-    manifests = {
-        sample.sample_id: sample
-        for path in index.samples
-        if (sample := load_sample_manifest(path)).sample_id in requested
-    }
-    missing = requested - set(manifests)
-    if missing:
-        raise KeyError(f"Missing source manifests: {sorted(missing)}")
-    return manifests
 
 
 def _write_comparison_plots(
@@ -1231,27 +1504,37 @@ def _write_comparison_plots(
     family: str,
     manifests: dict[str, Any],
     output: Path,
-    shared_limits: dict[str, tuple[float, float]],
 ) -> dict[str, Any]:
     from scripts.imaging import BeamRegion, write_fits_comparison_plots
 
-    sample_ids = [_sample_id(source_id, "not_corrupted")]
+    baseline_id = _sample_id(source_id, "not_corrupted")
+    sample_ids = [baseline_id] if baseline_id in manifests else []
+    suffix_family = "noise" if family == "noise" else family
     sample_ids.extend(
-        _sample_id(source_id, f"{family}_snr_{_target_text(target)}")
+        sample_id
         for target in SNR_CORR_TARGETS
+        if (
+            sample_id := _sample_id(
+                source_id, f"{suffix_family}_snr_{_target_text(target)}"
+            )
+        )
+        in manifests
     )
+    if not sample_ids:
+        return {"panels": [], "recipes": {}}
     selected = [manifests[sample_id] for sample_id in sample_ids]
-    baseline_qa = json.loads(
+    reference_qa = json.loads(
         selected[0].imaging_qa.read_text(encoding="utf-8")
     )
-    region_payload = (baseline_qa.get("metrics") or {}).get("region") or {}
+    region_payload = (reference_qa.get("metrics") or {}).get("region") or {}
     region = BeamRegion(
         min_radius_beams=region_payload.get("min_radius_beams"),
         max_radius_beams=region_payload.get("max_radius_beams"),
     )
     plot_inputs = []
-    for index, (sample_id, manifest) in enumerate(zip(sample_ids, selected)):
-        target = None if index == 0 else SNR_CORR_TARGETS[index - 1]
+    for sample_id, manifest in zip(sample_ids, selected):
+        is_baseline = sample_id == baseline_id
+        target = None if is_baseline else float(sample_id.rsplit("_", 1)[1])
         title = (
             "baseline: SNR_corr=0"
             if target is None
@@ -1262,30 +1545,83 @@ def _write_comparison_plots(
         plot_inputs,
         output / "report_assets" / "images" / family,
         metric_region=region,
-        display_limits_mjy_per_beam=shared_limits,
     )
     for row in rows:
-        for channel in ("dirty", "clean", "residual"):
+        for channel in ("dirty", "clean", "residual", "psf"):
             row[channel] = str(Path(row[channel]).relative_to(output))
     return {"panels": rows, "recipes": recipes}
 
 
-def _shared_source_display_limits(
+def _status_rows(
     source_id: str,
-    manifests: dict[str, Any],
-) -> dict[str, tuple[float, float]]:
-    from scripts.imaging import shared_fits_display_limits
-
-    sample_ids = [_sample_id(source_id, "not_corrupted")]
-    sample_ids.extend(
-        _sample_id(source_id, variant.label_name) for variant in VARIANTS
-    )
-    return {
-        channel: shared_fits_display_limits(
-            [manifests[sample_id].products[channel] for sample_id in sample_ids]
-        )
-        for channel in ("dirty", "clean", "residual")
+    completed: set[str],
+    failures: Sequence[dict[str, Any]],
+    *,
+    family: str,
+    requested: bool = True,
+) -> list[dict[str, Any]]:
+    failed = {
+        item.get("sample_id")
+        for item in failures
+        if isinstance(item, dict) and item.get("source_id") == source_id
     }
+    rows = []
+    levels: Sequence[float | None] = (
+        (None, *SNR_CORR_TARGETS) if family != "noise" else SNR_CORR_TARGETS
+    )
+    for target in levels:
+        suffix = (
+            "not_corrupted"
+            if target is None
+            else f"{family}_snr_{_target_text(target)}"
+        )
+        sample_id = _sample_id(source_id, suffix)
+        status = (
+            "not_requested"
+            if not requested
+            else "available"
+            if sample_id in completed
+            else "failed"
+            if sample_id in failed
+            else "missing"
+        )
+        rows.append(
+            {
+                "sample_id": sample_id,
+                "SNR_corr_target": 0.0 if target is None else target,
+                "status": status,
+            }
+        )
+    return rows
+
+
+def _report_assets_exist(entry: dict[str, Any], output: Path) -> bool:
+    for key in ("amplitude_plots", "phase_plots", "noise_control_plots"):
+        for row in entry.get(key, []) or []:
+            for channel in ("dirty", "clean", "residual", "psf"):
+                value = row.get(channel)
+                if not isinstance(value, str) or not (output / value).is_file():
+                    return False
+    for rows in (entry.get("corruption_plots") or {}).values():
+        for row in rows:
+            value = row.get("path")
+            if not isinstance(value, str) or not (output / value).is_file():
+                return False
+    return True
+
+
+def _report_entry_is_current(
+    entry: dict[str, Any] | None,
+    output: Path,
+    main_status: dict[str, list[dict[str, Any]]],
+    noise_status: list[dict[str, Any]],
+) -> bool:
+    return bool(
+        entry
+        and entry.get("main_variant_status") == main_status
+        and entry.get("noise_control_status") == noise_status
+        and _report_assets_exist(entry, output)
+    )
 
 
 def _iterate_and_validate_dataset(
@@ -1339,6 +1675,53 @@ def _iterate_and_validate_dataset(
     }
 
 
+def _iterate_and_validate_noise_controls(
+    dataset_index: Path,
+    requested_source_ids: Sequence[str],
+) -> dict[str, Any]:
+    from scripts.preprocessing import (
+        load_dataset_manifest,
+        load_sample_manifest,
+        partition_for_sample,
+    )
+
+    index = load_dataset_manifest(dataset_index, require_samples=False)
+    if index.labels != NOISE_CONTROL_LABELS:
+        raise RuntimeError("Noise-control label map is incomplete or incompatible")
+    expected = {
+        sample_id
+        for source_id in requested_source_ids
+        for sample_id in _requested_noise_controls(source_id)
+    }
+    seen: set[str] = set()
+    counts = {"test": 0, "val": 0}
+    for path in index.samples:
+        sample = load_sample_manifest(path)
+        if sample.sample_id in seen:
+            raise RuntimeError(
+                f"Duplicate indexed noise-control sample ID: {sample.sample_id}"
+            )
+        seen.add(sample.sample_id)
+        _assert_noise_control_sample(sample)
+        partition = partition_for_sample(sample.sample_id)
+        if partition == "train":
+            raise RuntimeError(
+                f"Training sample entered noise-control index: {sample.sample_id}"
+            )
+        counts[partition] += 1
+    missing = expected - seen
+    if missing:
+        raise RuntimeError(
+            f"Noise-control index is missing {len(missing)} requested samples"
+        )
+    return {
+        "mode": "separate held-out noise-control index audit",
+        "sample_count": len(seen),
+        "requested_sample_count": len(expected),
+        "partition_counts": counts,
+    }
+
+
 def _thermal_exclusions(
     manifest: dict[str, Any],
     source_ids: Sequence[str],
@@ -1386,6 +1769,7 @@ def _new_report_manifest(
     from scripts.imaging import imaging_metric_definitions
 
     return {
+        "report_schema_version": REPORT_SCHEMA_VERSION,
         "title": "Constant-gain corruption dataset",
         "description": (
             "Every completed source in the fixed train, test, and validation partitions "
@@ -1406,6 +1790,15 @@ def _new_report_manifest(
             "labels": LABELS,
             "corruption_solint": CORRUPTION_SOLINT,
             "SNR_corr_relative_tolerance": SNR_CORR_REL_TOL,
+            "noise_control_SNR_corr_relative_tolerance": NOISE_CONTROL_REL_TOL,
+            "noise_control_levels": list(SNR_CORR_TARGETS),
+            "noise_control_default_partition": NOISE_CONTROL_DEFAULT_PARTITION,
+            "noise_control_index": NOISE_CONTROL_INDEX_NAME,
+            "noise_control_label": NOISE_CONTROL_LABELS,
+            "noise_control_policy": (
+                "held-out increased-noise controls only; label 0/not_corrupted; "
+                "fixed realized ||eta/sigma0||_2,I; never included in dataset.json"
+            ),
             "base_seed": BASE_SEED,
             "fixed_antenna_id": FIXED_ANTENNA_ID,
             "antenna_selection_policy": ANTENNA_SELECTION_POLICY,
@@ -1436,12 +1829,18 @@ def _new_report_manifest(
             ),
             "plotting": (
                 "scripts.imaging.casa_image_to_png; one shared color scale per "
-                "dirty/clean/residual channel across all variants"
+                "dirty/clean/residual/PSF channel within each comparison grid"
             ),
         },
         "sources": [],
         "failures": [],
         "dataset_iteration": None,
+        "noise_controls": {
+            "dataset_index": NOISE_CONTROL_INDEX_NAME,
+            "requested_source_ids": [],
+            "failures": [],
+            "dataset_iteration": None,
+        },
     }
 
 
@@ -1478,6 +1877,13 @@ def _resume_report_manifest(
         "labels",
         "dataset_pblimit",
         "primary_beam_mask_policy",
+        "noise_control_SNR_corr_relative_tolerance",
+        "noise_control_levels",
+        "noise_control_default_partition",
+        "noise_control_index",
+        "noise_control_label",
+        "noise_control_policy",
+        "plotting",
     }
     incompatible = {
         key: (configuration.get(key), expected)
@@ -1502,12 +1908,28 @@ def _resume_report_manifest(
         )
 
     configuration.update(expected_configuration)
+    report["report_schema_version"] = REPORT_SCHEMA_VERSION
+    source_policy_changed = (
+        legacy
+        or old_source_ids != list(source_ids)
+        or report.get("source_partition_counts")
+        != _source_partition_counts(source_ids)
+        or report.get("excluded_sources") != list(excluded_sources)
+    )
     report["source_ids"] = list(source_ids)
     report["source_partition_counts"] = _source_partition_counts(source_ids)
     report["excluded_sources"] = list(excluded_sources)
-    report["dataset_iteration"] = None
+    if source_policy_changed:
+        report["dataset_iteration"] = None
     if legacy:
         report["sources"] = []
+    controls = report.setdefault("noise_controls", {})
+    if controls.get("dataset_index", NOISE_CONTROL_INDEX_NAME) != NOISE_CONTROL_INDEX_NAME:
+        raise RuntimeError("Existing report uses a different noise-control index")
+    controls.setdefault("dataset_index", NOISE_CONTROL_INDEX_NAME)
+    controls.setdefault("requested_source_ids", [])
+    controls.setdefault("failures", [])
+    controls.setdefault("dataset_iteration", None)
     return legacy
 
 
@@ -1533,10 +1955,63 @@ def _pending_samples(
     }
 
 
+def _requested_noise_controls(source_id: str) -> dict[str, NoiseControl]:
+    return {
+        _sample_id(source_id, control.label_name): control
+        for control in NOISE_CONTROLS
+    }
+
+
+def _select_noise_control_sources(
+    source_ids: Sequence[str],
+    *,
+    enabled: bool,
+    explicit_source_ids: Sequence[str] | None,
+) -> tuple[str, ...]:
+    from scripts.preprocessing import partition_for_sample
+
+    available = set(source_ids)
+    if explicit_source_ids:
+        selected = tuple(explicit_source_ids)
+        if len(selected) != len(set(selected)):
+            raise ValueError("Noise-control source selection contains duplicate IDs")
+        missing = sorted(set(selected) - available)
+        if missing:
+            raise ValueError(
+                f"Noise-control sources have no completed thermal entry: {missing}"
+            )
+        training = [
+            source_id
+            for source_id in selected
+            if partition_for_sample(source_id) == "train"
+        ]
+        if training:
+            raise ValueError(
+                f"Training sources cannot be noise controls: {training}"
+            )
+        return selected
+    if not enabled:
+        return ()
+    return tuple(
+        source_id
+        for source_id in source_ids
+        if partition_for_sample(source_id) == NOISE_CONTROL_DEFAULT_PARTITION
+    )
+
+
+def _noise_control_source_id(sample_id: str) -> str:
+    marker = "_noise_snr_"
+    if marker not in sample_id:
+        raise ValueError(f"Invalid noise-control sample ID: {sample_id!r}")
+    return sample_id.split(marker, 1)[0]
+
+
 def run_experiment(
     *,
     source_run: str | Path | None = None,
     output_dir: str | Path | None = None,
+    generate_noise_controls: bool = False,
+    noise_control_source_ids: Sequence[str] | None = None,
 ) -> Path:
     from scripts.preprocessing import partition_for_sample
     from scripts.reporting import QuartoReporter
@@ -1552,6 +2027,11 @@ def run_experiment(
         _thermal_source(thermal_dir, thermal_manifest, source_id)
         for source_id in source_ids
     ]
+    active_noise_sources = _select_noise_control_sources(
+        source_ids,
+        enabled=generate_noise_controls,
+        explicit_source_ids=noise_control_source_ids,
+    )
     excluded_sources = _thermal_exclusions(
         thermal_manifest,
         source_ids,
@@ -1570,33 +2050,110 @@ def run_experiment(
         shutil.copy2(REPORT_TEMPLATE, report_qmd)
 
     dataset_index = output / "dataset.json"
+    noise_control_index = output / NOISE_CONTROL_INDEX_NAME
     _recover_repair_transactions(output)
     indexed = _audit_indexed_samples(dataset_index)
+    main_manifests = dict(indexed.manifests)
     completed = set(indexed.manifests)
     pb_repairs = set(indexed.pb_repairs)
+    noise_manifests = _audit_noise_controls(noise_control_index)
+    completed_noise = set(noise_manifests)
     if pb_repairs:
         print(f"Detected {len(pb_repairs)} indexed samples requiring PB repair")
 
+    requested_by_source = {
+        source.source_id: _requested_samples(source.source_id)
+        for source in sources
+    }
+    noise_requested_by_source = {
+        source_id: _requested_noise_controls(source_id)
+        for source_id in active_noise_sources
+    }
+    recovered_main = False
+    for source_id, requested in requested_by_source.items():
+        for sample_id in requested:
+            if sample_id not in completed and _recover_or_remove_sample(
+                    _sample_dir(output, sample_id), dataset_index, completed
+            ):
+                recovered_main = True
+    if recovered_main:
+        indexed = _audit_indexed_samples(dataset_index)
+        main_manifests = dict(indexed.manifests)
+        completed = set(main_manifests)
+        pb_repairs = set(indexed.pb_repairs)
+    recovered_noise = False
+    for source_id, requested in noise_requested_by_source.items():
+        for sample_id, control in requested.items():
+            if sample_id not in completed_noise and _recover_or_remove_sample(
+                _sample_dir(output, sample_id),
+                noise_control_index,
+                completed_noise,
+                labels=NOISE_CONTROL_LABELS,
+                validator=lambda sample, target=control.SNR_corr_target: (
+                    _assert_noise_control_sample(sample, target)
+                ),
+            ):
+                recovered_noise = True
+    if recovered_noise:
+        noise_manifests = _audit_noise_controls(noise_control_index)
+        completed_noise = set(noise_manifests)
+
     report_json = output / "report.json"
+    previous_report_text = None
     if report_json.exists():
-        report = json.loads(report_json.read_text(encoding="utf-8"))
+        previous_report_text = report_json.read_text(encoding="utf-8")
+        report = json.loads(previous_report_text)
         _resume_report_manifest(
             report, thermal_dir, source_ids, excluded_sources
         )
     else:
         report = _new_report_manifest(thermal_dir, source_ids, excluded_sources)
-    _migrate_dataset_labels(dataset_index)
-    _atomic_write_json(report_json, report)
-    reporter = QuartoReporter(report_qmd, every=REPORT_EVERY_SOURCES)
-    requested_by_source = {
-        source.source_id: _requested_samples(source.source_id)
-        for source in sources
+    controls_report = report["noise_controls"]
+    stored_requested = controls_report.get("requested_source_ids")
+    if not isinstance(stored_requested, list) or len(stored_requested) != len(
+        set(stored_requested)
+    ):
+        raise RuntimeError("Report has invalid requested noise-control sources")
+    indexed_noise_sources = {
+        _noise_control_source_id(sample_id) for sample_id in completed_noise
     }
+    requested_noise_sources = tuple(
+        source_id
+        for source_id in source_ids
+        if source_id
+        in (set(stored_requested) | set(active_noise_sources) | indexed_noise_sources)
+    )
+    if stored_requested != list(requested_noise_sources):
+        controls_report["dataset_iteration"] = None
+    controls_report["requested_source_ids"] = list(requested_noise_sources)
+    _migrate_dataset_labels(dataset_index)
+    serialized_report = json.dumps(report, indent=2, sort_keys=True, allow_nan=False) + "\n"
+    report_changed = serialized_report != previous_report_text
+    if report_changed:
+        _atomic_write_json(report_json, report)
+    reporter: QuartoReporter | None = None
+
+    def report_sample_completed() -> None:
+        nonlocal reporter, report_changed
+        if reporter is None:
+            reporter = QuartoReporter(report_qmd, every=REPORT_EVERY_SOURCES)
+        reporter.sample_completed()
+        report_changed = True
+
     pending_sources = [
         source
         for source in sources
-        if _pending_samples(
-            requested_by_source[source.source_id], completed, pb_repairs
+        if (
+            _pending_samples(
+                requested_by_source[source.source_id], completed, pb_repairs
+            )
+            or {
+                sample_id: control
+                for sample_id, control in noise_requested_by_source.get(
+                    source.source_id, {}
+                ).items()
+                if sample_id not in completed_noise
+            }
         )
     ]
     if pending_sources:
@@ -1611,11 +2168,6 @@ def run_experiment(
         for source_number, source in enumerate(sources, start=1):
             print(f"[{source_number}/{len(sources)}] source {source.source_id}")
             requested = requested_by_source[source.source_id]
-            for sample_id in requested:
-                if sample_id not in completed:
-                    _recover_or_remove_sample(
-                        _sample_dir(output, sample_id), dataset_index, completed
-                    )
             report["failures"] = [
                 item
                 for item in report.get("failures", [])
@@ -1624,23 +2176,27 @@ def run_experiment(
             ]
 
             pending = _pending_samples(requested, completed, pb_repairs)
+            requested_noise = noise_requested_by_source.get(source.source_id, {})
+            pending_noise = {
+                sample_id: control
+                for sample_id, control in requested_noise.items()
+                if sample_id not in completed_noise
+            }
             source_changed = False
-            source_has_report = any(
-                item.get("id") == source.source_id
-                for item in report.get("sources", [])
-            )
-            if pending:
-                report["dataset_iteration"] = None
-                report["sources"] = [
-                    item
-                    for item in report.get("sources", [])
-                    if item.get("id") != source.source_id
-                ]
+            if pending or pending_noise:
+                if pending:
+                    report["dataset_iteration"] = None
+                if pending_noise:
+                    controls_report["dataset_iteration"] = None
                 _atomic_write_json(report_json, report)
                 V_ms = _prepare_V_ms(source, output)
-                antenna_choices = _unflagged_antenna_choices(V_ms)
                 noise_model, noise_parameters, sigma = _noise_request(source)
                 thermal_noise_seed = _stable_seed(source.source_id, "thermal_noise")
+                antenna_choices = (
+                    _unflagged_antenna_choices(V_ms)
+                    if any(variant is not None for variant in pending.values())
+                    else ()
+                )
                 from scripts.corruption import (
                     ConstantGainSpec,
                     measure_constant_gain_norms,
@@ -1696,7 +2252,7 @@ def run_experiment(
                                 )
                             norms = norms_by_antenna[antenna_id]
                         if is_repair:
-                            _repair_sample(
+                            repaired_path = _repair_sample(
                                 source,
                                 variant,
                                 antenna_id,
@@ -1711,6 +2267,11 @@ def run_experiment(
                                 thermal_noise_seed,
                                 output,
                                 indexed.manifests[sample_id],
+                            )
+                            from scripts.preprocessing import load_sample_manifest
+
+                            main_manifests[sample_id] = load_sample_manifest(
+                                repaired_path
                             )
                             pb_repairs.discard(sample_id)
                         else:
@@ -1738,6 +2299,7 @@ def run_experiment(
                             _append_sample_to_dataset(
                                 dataset_index, created, completed
                             )
+                            main_manifests[sample_id] = created
                         completed.add(sample_id)
                         source_changed = True
                     except Exception as exc:
@@ -1753,41 +2315,134 @@ def run_experiment(
                             _safe_remove_partial(path, output / "samples")
                         _atomic_write_json(report_json, report)
                         print(f"[{sample_id}] FAILED: {type(exc).__name__}: {exc}")
+                for sample_id, control in pending_noise.items():
+                    path = _sample_dir(output, sample_id)
+                    controls_report["failures"] = [
+                        item
+                        for item in controls_report.get("failures", [])
+                        if item.get("sample_id") != sample_id
+                    ]
+                    try:
+                        finalized_path = _finalize_sample(
+                            source,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            V_ms,
+                            sigma,
+                            None,
+                            noise_model,
+                            noise_parameters,
+                            thermal_noise_seed,
+                            output,
+                            None,
+                            noise_control=control,
+                        )
+                        from scripts.preprocessing import load_sample_manifest
 
-            source_repairs = set(requested) & pb_repairs
-            if (
-                set(requested) <= completed
-                and not source_repairs
-                and (source_changed or not source_has_report)
+                        created = load_sample_manifest(finalized_path)
+                        _assert_noise_control_sample(
+                            created, control.SNR_corr_target
+                        )
+                        _append_sample_to_dataset(
+                            noise_control_index,
+                            created,
+                            completed_noise,
+                            labels=NOISE_CONTROL_LABELS,
+                        )
+                        completed_noise.add(sample_id)
+                        noise_manifests[sample_id] = created
+                        source_changed = True
+                    except Exception as exc:
+                        traceback.print_exc()
+                        controls_report.setdefault("failures", []).append(
+                            {
+                                "source_id": source.source_id,
+                                "sample_id": sample_id,
+                                "error": f"{type(exc).__name__}: {exc}",
+                            }
+                        )
+                        if path.exists():
+                            _safe_remove_partial(path, output / "samples")
+                        _atomic_write_json(report_json, report)
+                        print(
+                            f"[{sample_id}] FAILED: {type(exc).__name__}: {exc}"
+                        )
+
+            main_status = {
+                family: _status_rows(
+                    source.source_id,
+                    completed,
+                    report.get("failures", []),
+                    family=family,
+                )
+                for family in ("amp", "phase")
+            }
+            noise_was_requested = source.source_id in requested_noise_sources
+            noise_status = _status_rows(
+                source.source_id,
+                completed_noise,
+                controls_report.get("failures", []),
+                family="noise",
+                requested=noise_was_requested,
+            )
+            existing_entry = next(
+                (
+                    item
+                    for item in report.get("sources", [])
+                    if item.get("id") == source.source_id
+                ),
+                None,
+            )
+            if source_changed or not _report_entry_is_current(
+                existing_entry, output, main_status, noise_status
             ):
-                manifests = _source_manifests(dataset_index, source.source_id)
-                shared_limits = _shared_source_display_limits(
-                    source.source_id, manifests
+                manifests = _source_manifests(
+                    main_manifests, source.source_id
+                )
+                source_noise_manifests = _source_manifests(
+                    noise_manifests,
+                    source.source_id,
+                    noise_controls=True,
                 )
                 plots = {
                     family: _write_comparison_plots(
-                        source.source_id, family, manifests, output, shared_limits
+                        source.source_id, family, manifests, output
                     )
                     for family in ("amp", "phase")
                 }
-                corruption_plots = {
-                    family: [
-                        {
-                            "SNR_corr_target": target,
-                            "path": str(
-                                _corruption_plot_path(
-                                    output,
-                                    _sample_id(
-                                        source.source_id,
-                                        f"{family}_snr_{_target_text(target)}",
-                                    ),
-                                ).relative_to(output)
-                            ),
-                        }
-                        for target in SNR_CORR_TARGETS
-                    ]
-                    for family in plots
-                }
+                if noise_was_requested or source_noise_manifests:
+                    noise_plot_manifests = dict(source_noise_manifests)
+                    baseline_id = _sample_id(source.source_id, "not_corrupted")
+                    if baseline_id in manifests:
+                        noise_plot_manifests[baseline_id] = manifests[baseline_id]
+                    noise_plots = _write_comparison_plots(
+                        source.source_id,
+                        "noise",
+                        noise_plot_manifests,
+                        output,
+                    )
+                else:
+                    noise_plots = {"panels": [], "recipes": {}}
+                corruption_plots = {}
+                for family in ("amp", "phase"):
+                    rows = []
+                    for target in SNR_CORR_TARGETS:
+                        sample_id = _sample_id(
+                            source.source_id,
+                            f"{family}_snr_{_target_text(target)}",
+                        )
+                        path = _corruption_plot_path(output, sample_id)
+                        if sample_id in completed and path.is_file():
+                            rows.append(
+                                {
+                                    "SNR_corr_target": target,
+                                    "path": str(path.relative_to(output)),
+                                }
+                            )
+                    corruption_plots[family] = rows
                 source_entry = {
                     "id": source.source_id,
                     "partition": partition_for_sample(source.source_id),
@@ -1800,6 +2455,11 @@ def run_experiment(
                     "phase_plots": plots["phase"]["panels"],
                     "amplitude_plot_recipe": plots["amp"]["recipes"],
                     "phase_plot_recipe": plots["phase"]["recipes"],
+                    "noise_control_requested": noise_was_requested,
+                    "noise_control_plots": noise_plots["panels"],
+                    "noise_control_plot_recipe": noise_plots["recipes"],
+                    "main_variant_status": main_status,
+                    "noise_control_status": noise_status,
                     "corruption_plots": corruption_plots,
                 }
                 report["sources"] = [
@@ -1810,8 +2470,9 @@ def run_experiment(
                 report["sources"].append(source_entry)
                 report["sources"].sort(key=lambda item: source_order[item["id"]])
                 _atomic_write_json(report_json, report)
-                reporter.sample_completed()
-            _cleanup_V_work(source, output)
+                report_sample_completed()
+            if pending or pending_noise:
+                _cleanup_V_work(source, output)
     finally:
         if (
             dataset_index.exists()
@@ -1819,11 +2480,34 @@ def run_experiment(
             and not pb_repairs
             and not report.get("failures")
         ):
-            report["dataset_iteration"] = _iterate_and_validate_dataset(
-                dataset_index, source_ids
+            iteration = _iterate_and_validate_dataset(dataset_index, source_ids)
+            if report.get("dataset_iteration") != iteration:
+                report["dataset_iteration"] = iteration
+                _atomic_write_json(report_json, report)
+                report_changed = True
+        requested_noise_samples = {
+            sample_id
+            for source_id in requested_noise_sources
+            for sample_id in _requested_noise_controls(source_id)
+        }
+        if (
+            requested_noise_sources
+            and noise_control_index.exists()
+            and requested_noise_samples <= completed_noise
+            and not controls_report.get("failures")
+        ):
+            iteration = _iterate_and_validate_noise_controls(
+                noise_control_index, requested_noise_sources
             )
-            _atomic_write_json(report_json, report)
-        reporter.finish()
+            if controls_report.get("dataset_iteration") != iteration:
+                controls_report["dataset_iteration"] = iteration
+                _atomic_write_json(report_json, report)
+                report_changed = True
+        if report_changed:
+            if reporter is None:
+                reporter = QuartoReporter(report_qmd, every=REPORT_EVERY_SOURCES)
+                reporter.sample_completed()
+            reporter.finish()
 
     if report.get("failures"):
         raise RuntimeError(
@@ -1835,7 +2519,28 @@ def run_experiment(
         raise RuntimeError(f"Dataset is missing {len(missing_samples)} expected samples")
     if pb_repairs:
         raise RuntimeError(f"Dataset still has {len(pb_repairs)} samples requiring PB repair")
+    active_noise_samples = {
+        sample_id
+        for source_id in active_noise_sources
+        for sample_id in _requested_noise_controls(source_id)
+    }
+    active_noise_failures = [
+        item
+        for item in controls_report.get("failures", [])
+        if item.get("source_id") in set(active_noise_sources)
+    ]
+    if active_noise_failures:
+        raise RuntimeError(
+            f"Dataset v1 has {len(active_noise_failures)} failed active noise controls"
+        )
+    missing_noise = active_noise_samples - completed_noise
+    if missing_noise:
+        raise RuntimeError(
+            f"Noise-control index is missing {len(missing_noise)} active samples"
+        )
     print(f"Dataset: {dataset_index}")
+    if noise_control_index.exists():
+        print(f"Noise controls: {noise_control_index} ({len(completed_noise)} samples)")
     print(f"Report: {output / 'report.html'}")
     print(f"Samples: {len(completed)} across {len(source_ids)} sources")
     return output
@@ -1851,6 +2556,20 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--output-dir",
         help="New or resumable dataset-v1 experiment directory",
     )
+    parser.add_argument(
+        "--noise-controls",
+        action="store_true",
+        help="Generate increased-noise controls for all completed validation sources",
+    )
+    parser.add_argument(
+        "--noise-control-source",
+        action="append",
+        dest="noise_control_source_ids",
+        help=(
+            "Generate controls for one completed validation/test source; repeat for "
+            "multiple sources (implies --noise-controls)"
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -1859,6 +2578,10 @@ def main(argv: Sequence[str] | None = None) -> Path:
     return run_experiment(
         source_run=arguments.source_run,
         output_dir=arguments.output_dir,
+        generate_noise_controls=(
+            arguments.noise_controls or bool(arguments.noise_control_source_ids)
+        ),
+        noise_control_source_ids=arguments.noise_control_source_ids,
     )
 
 

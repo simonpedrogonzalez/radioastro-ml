@@ -92,6 +92,45 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual(level["detection_recall"], 0.0)
         self.assertIsNone(level["type_accuracy_among_detected"])
 
+    def test_increased_noise_controls_report_false_positive_rate(self):
+        sample_ids = ["a", "b", "c", "d"]
+        batch = {
+            "sample_id": sample_ids,
+            "label": [0, 0, 0, 0],
+            "label_metadata": [
+                {
+                    "corruption_snr_target": 20.0,
+                    "sample_kind": "increased_noise",
+                }
+            ]
+            * 4,
+        }
+        result = evaluate(
+            [batch], dict(zip(sample_ids, [0, 1, 2, 0], strict=True))
+        )
+
+        self.assertEqual(result["evaluation_kind"], "increased_noise_controls")
+        level = result["by_noise_snr_target"]["20"]
+        self.assertEqual(level["sample_count"], 4)
+        self.assertEqual(level["false_positive_rate"], 0.5)
+        self.assertEqual(level["correct_rejection_rate"], 0.5)
+        self.assertNotIn("detection_recall", level)
+
+    def test_evaluation_rejects_mixed_gain_and_noise_controls(self):
+        batch = {
+            "sample_id": ["gain", "control"],
+            "label": [1, 0],
+            "label_metadata": [
+                {"corruption_snr_target": 10.0, "sample_kind": "gain"},
+                {
+                    "corruption_snr_target": 10.0,
+                    "sample_kind": "increased_noise",
+                },
+            ],
+        }
+        with self.assertRaisesRegex(ValueError, "Cannot pool"):
+            evaluate([batch], {"gain": 1, "control": 0})
+
 
 if __name__ == "__main__":
     unittest.main()

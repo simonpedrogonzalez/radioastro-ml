@@ -497,17 +497,17 @@ class PlotTests(unittest.TestCase):
             (
                 "baseline",
                 "rho_corr=0",
-                {name: Path(f"baseline-{name}.fits.gz") for name in ("dirty", "clean", "residual")},
+                {name: Path(f"baseline-{name}.fits.gz") for name in ("dirty", "clean", "residual", "psf")},
             ),
             (
                 "variant",
                 "rho_corr=10",
-                {name: Path(f"variant-{name}.fits.gz") for name in ("dirty", "clean", "residual")},
+                {name: Path(f"variant-{name}.fits.gz") for name in ("dirty", "clean", "residual", "psf")},
             ),
         ]
         with tempfile.TemporaryDirectory() as temporary, patch(
             "scripts.imaging.plot_utils.shared_fits_display_limits",
-            side_effect=[(-1.0, 1.0), (-2.0, 2.0), (-3.0, 3.0)],
+            side_effect=[(-1.0, 1.0), (-2.0, 2.0), (-3.0, 3.0), (0.0, 1.0)],
         ), patch(
             "scripts.imaging.plot_utils.casa_image_to_png", return_value={"colormap": "inferno"}
         ) as render:
@@ -516,10 +516,15 @@ class PlotTests(unittest.TestCase):
             )
 
         self.assertEqual(len(rows), 2)
-        self.assertEqual(render.call_count, 6)
+        self.assertEqual(render.call_count, 8)
         self.assertEqual(
             recipes["limits_mjy_per_beam"],
-            {"dirty": [-1.0, 1.0], "clean": [-2.0, 2.0], "residual": [-3.0, 3.0]},
+            {
+                "dirty": [-1.0, 1.0],
+                "clean": [-2.0, 2.0],
+                "residual": [-3.0, 3.0],
+                "psf": [0.0, 1.0],
+            },
         )
         dirty_call = render.call_args_list[0]
         residual_call = render.call_args_list[2]

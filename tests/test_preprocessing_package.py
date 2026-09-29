@@ -46,16 +46,31 @@ class LabelTests(unittest.TestCase):
 
         self.assertEqual(
             assign_label([], "constant_antenna_type"),
-            AssignedLabel(0, "none", 0.0, 0.0),
+            AssignedLabel(0, "none", 0.0, 0.0, "baseline"),
         )
         self.assertEqual(
             assign_label([amp], "constant_antenna_type"),
-            AssignedLabel(1, "amp", 30.25, 30.0),
+            AssignedLabel(1, "amp", 30.25, 30.0, "gain"),
         )
         self.assertEqual(
             assign_label([phase], "constant_antenna_type"),
-            AssignedLabel(2, "phase", 9.75, 10.0),
+            AssignedLabel(2, "phase", 9.75, 10.0, "gain"),
         )
+        noise_control = {
+            "kind": "increased_noise",
+            "SNR_corr_target": 20.0,
+            "SNR_corr_measured": 19.99999,
+        }
+        self.assertEqual(
+            assign_label(
+                [], "constant_antenna_type", noise_control=noise_control
+            ),
+            AssignedLabel(0, "none", 19.99999, 20.0, "increased_noise"),
+        )
+        with self.assertRaisesRegex(ValueError, "cannot also have"):
+            assign_label(
+                [amp], "constant_antenna_type", noise_control=noise_control
+            )
 
         invalid = [
             ([amp, phase], "zero or one"),
@@ -427,7 +442,11 @@ class FitsDatasetTests(unittest.TestCase):
             self.assertEqual((item["label"], item["label_name"]), (0, "baseline"))
             self.assertEqual(
                 item["label_metadata"],
-                {"corruption_snr": None, "corruption_snr_target": None},
+                {
+                    "corruption_snr": None,
+                    "corruption_snr_target": None,
+                    "sample_kind": "gain",
+                },
             )
             self.assertEqual(tuple(item["image"].shape), (4, 4, 4))
             self.assertTrue(torch.all(item["image"][0] == 1))
@@ -449,13 +468,69 @@ class FitsDatasetTests(unittest.TestCase):
             )
             self.assertEqual(
                 derived_item["label_metadata"],
-                {"corruption_snr": 30.5, "corruption_snr_target": 30.0},
+                {
+                    "corruption_snr": 30.5,
+                    "corruption_snr_target": 30.0,
+                    "sample_kind": "gain",
+                },
             )
             derived_batch = next(iter(make_simulation_dataloader(derived)))
             self.assertEqual(derived_batch["label"].tolist(), [2])
             self.assertEqual(derived_batch["label_name"], ["phase"])
             self.assertEqual(
                 derived_batch["label_metadata"], [derived_item["label_metadata"]]
+            )
+
+            simulation_json.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 2,
+                        "noise_control": {
+                            "kind": "increased_noise",
+                            "SNR_corr_target": 20.0,
+                            "SNR_corr_measured": 20.00001,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            manifest_payload = json.loads(
+                manifest.path.read_text(encoding="utf-8")
+            )
+            manifest_payload["sample_id"] = "0005+383_noise_snr_20"
+            manifest_payload["label"] = {"id": 0, "name": "not_corrupted"}
+            manifest_payload["metadata"]["corruptions"] = []
+            manifest.path.write_text(
+                json.dumps(manifest_payload), encoding="utf-8"
+            )
+            (root / "noise.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "labels": {"not_corrupted": 0},
+                        "samples": ["sample/sample.json"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            control_dataset = FitsSimulationDataset(
+                root,
+                partition="train",
+                index="noise.json",
+                validate=False,
+                load_metadata=False,
+                label_criterion="constant_antenna_type",
+            )
+            control = control_dataset[0]
+            self.assertEqual((control["label"], control["label_name"]), (0, "none"))
+            self.assertIsNone(control["metadata"])
+            self.assertEqual(
+                control["label_metadata"],
+                {
+                    "corruption_snr": 20.00001,
+                    "corruption_snr_target": 20.0,
+                    "sample_kind": "increased_noise",
+                },
             )
 
 

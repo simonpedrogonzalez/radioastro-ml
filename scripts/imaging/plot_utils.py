@@ -112,7 +112,11 @@ def casa_image_to_png(
         finite = np.isfinite(values)
         if not np.any(finite):
             raise RuntimeError(f"No finite pixels in {image_path}")
-        display = values * 1e3
+        bunit = str(header.get("BUNIT", "")).strip().casefold()
+        is_dimensionless = bunit in {"1", "dimensionless"}
+        value_multiplier = 1.0 if is_dimensionless else 1e3
+        display_unit = "dimensionless" if is_dimensionless else "mJy/beam"
+        display = values * value_multiplier
         finite_values = display[finite]
         if display_limits_mjy_per_beam is not None:
             if len(display_limits_mjy_per_beam) != 2:
@@ -140,7 +144,7 @@ def casa_image_to_png(
         axis.set_ylabel("Dec")
         axis.set_title(title or image_path.name)
         colorbar = plt.colorbar(artist, ax=axis, fraction=0.046, pad=0.04)
-        colorbar.set_label("mJy/beam")
+        colorbar.set_label(display_unit)
         bmaj, bmin, bpa = _fits_beam_geometry(header, fallback_beam)
         if mask_path is not None:
             temporary = tempfile.NamedTemporaryFile(
@@ -243,8 +247,8 @@ def casa_image_to_png(
             "source_plane": (
                 "retained FITS image" if source_is_fits else "squeezed CASA image"
             ),
-            "display_unit": "mJy/beam",
-            "value_multiplier": 1000.0,
+            "display_unit": display_unit,
+            "value_multiplier": value_multiplier,
             "vmin": vmin,
             "vmax": vmax,
             "robust_percentile": robust_percentile,
@@ -256,7 +260,7 @@ def casa_image_to_png(
             "dpi": 180,
             "title": title or image_path.name,
             "axis_labels": ["RA", "Dec"],
-            "colorbar_label": "mJy/beam",
+            "colorbar_label": display_unit,
             "beam": {
                 "draw": draw_beam,
                 "major_deg": bmaj,
@@ -291,6 +295,7 @@ def shared_fits_display_limits(
     *,
     symmetric: bool = True,
     robust_percentile: float = 99.5,
+    value_multiplier: float = 1e3,
 ) -> tuple[float, float]:
     """Calculate one mJy/beam color scale shared by retained FITS variants."""
     try:
@@ -310,7 +315,7 @@ def shared_fits_display_limits(
             raise RuntimeError(
                 f"Unexpected image dimensionality {values.ndim} for {image_path}"
             )
-        selected = values[np.isfinite(values)] * 1e3
+        selected = values[np.isfinite(values)] * value_multiplier
         if selected.size:
             finite_values.append(selected.reshape(-1))
     if not finite_values:
@@ -343,23 +348,23 @@ def write_fits_comparison_plots(
 ) -> tuple[list[dict[str, object]], dict[str, object]]:
     """Plot retained variants through ``casa_image_to_png`` with shared scales.
 
-    Each tuple is ``(sample_key, title, {dirty, clean, residual})``. All
+    Each tuple is ``(sample_key, title, {dirty, clean, residual, psf})``. All
     variants share one color range per image channel; residual plots also show
     the exact metric annulus. Every panel retains its own WCS axes, colorbar,
     and synthesized-beam glyph from the canonical imaging plotter.
     """
-    required = ("dirty", "clean", "residual")
+    required = ("dirty", "clean", "residual", "psf")
     if not samples:
         raise ValueError("samples must not be empty")
     output_dir.mkdir(parents=True, exist_ok=True)
     if display_limits_mjy_per_beam is None:
-        limits = {
-            channel: shared_fits_display_limits(
+        limits = {}
+        for channel in required:
+            limits[channel] = shared_fits_display_limits(
                 [Path(products[channel]) for _, _, products in samples],
                 robust_percentile=robust_percentile,
+                value_multiplier=1.0 if channel == "psf" else 1e3,
             )
-            for channel in required
-        }
     else:
         missing = set(required) - set(display_limits_mjy_per_beam)
         if missing:
@@ -371,6 +376,12 @@ def write_fits_comparison_plots(
     rows: list[dict[str, object]] = []
     recipes: dict[str, object] = {
         "shared_by": "image channel across all variants of one source",
+        "display_units": {
+            "dirty": "mJy/beam",
+            "clean": "mJy/beam",
+            "residual": "mJy/beam",
+            "psf": "dimensionless",
+        },
         "limits_mjy_per_beam": {
             channel: list(channel_limits)
             for channel, channel_limits in limits.items()

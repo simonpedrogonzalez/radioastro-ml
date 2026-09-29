@@ -180,6 +180,63 @@ class FullDatasetConfigurationTests(unittest.TestCase):
     def test_cli_no_longer_selects_one_source(self):
         arguments = experiment._parse_args([])
         self.assertFalse(hasattr(arguments, "source_id"))
+        self.assertFalse(arguments.noise_controls)
+        self.assertIsNone(arguments.noise_control_source_ids)
+
+    def test_noise_control_scope_defaults_to_validation_and_rejects_training(self):
+        source_ids = (TRAIN_IDS[0], TEST_IDS[0], VAL_IDS[0])
+        self.assertEqual(
+            experiment._select_noise_control_sources(
+                source_ids, enabled=True, explicit_source_ids=None
+            ),
+            (VAL_IDS[0],),
+        )
+        self.assertEqual(
+            experiment._select_noise_control_sources(
+                source_ids,
+                enabled=True,
+                explicit_source_ids=(TEST_IDS[0],),
+            ),
+            (TEST_IDS[0],),
+        )
+        with self.assertRaisesRegex(ValueError, "Training"):
+            experiment._select_noise_control_sources(
+                source_ids,
+                enabled=True,
+                explicit_source_ids=(TRAIN_IDS[0],),
+            )
+
+    def test_noise_control_draw_is_normalized_and_records_total_sigma(self):
+        source = SimpleNamespace(source_id=VAL_IDS[0])
+        control = experiment.NoiseControl(20.0, "noise_snr_20")
+        raw = SimpleNamespace(SNR_corr=1000.0, valid_sample_count=200)
+        measured = SimpleNamespace(SNR_corr=20.00001, valid_sample_count=200)
+        with patch(
+            "scripts.simulation.add_thermal_noise_inplace",
+            return_value={"simplenoise_jy": 2.0, "seed": 123},
+        ), patch(
+            "scripts.corruption.measure_corruption_metrics",
+            side_effect=[raw, measured],
+        ), patch.object(experiment, "_rescale_visibility_delta") as rescale:
+            metadata = experiment._apply_noise_control(
+                source,
+                control,
+                Path("/V.ms"),
+                Path("/D.ms"),
+                2.0,
+                "simplenoise",
+                {},
+                experiment._stable_seed(VAL_IDS[0], "thermal_noise"),
+            )
+
+        rescale.assert_called_once_with(Path("/V.ms"), Path("/D.ms"), 0.02)
+        self.assertEqual(metadata["kind"], "increased_noise")
+        self.assertEqual(metadata["valid_sample_count"], 200)
+        self.assertAlmostEqual(metadata["equivalent_extra_sigma_jy"], 2.0)
+        self.assertAlmostEqual(metadata["final_total_sigma_jy"], 2.0 * 2**0.5)
+        self.assertNotEqual(
+            metadata["extra_noise_seed"], metadata["baseline_noise_seed"]
+        )
 
     def test_source_ids_to_process_selects_and_validates_ids(self):
         self.assertIsNone(experiment.SOURCE_IDS_TO_PROCESS)
@@ -418,6 +475,7 @@ class FullDatasetConfigurationTests(unittest.TestCase):
             measure_constant_gain_norms=lambda spec: object(),
         )
         manifest = lambda source_run, ids, excluded: {
+            "report_schema_version": experiment.REPORT_SCHEMA_VERSION,
             "source_run": str(source_run),
             "source_ids": list(ids),
             "source_partition_counts": experiment._source_partition_counts(ids),
@@ -425,6 +483,12 @@ class FullDatasetConfigurationTests(unittest.TestCase):
             "sources": [],
             "failures": [],
             "dataset_iteration": None,
+            "noise_controls": {
+                "dataset_index": experiment.NOISE_CONTROL_INDEX_NAME,
+                "requested_source_ids": [],
+                "failures": [],
+                "dataset_iteration": None,
+            },
         }
         with tempfile.TemporaryDirectory() as temporary, patch.dict(
             sys.modules, {"scripts.corruption": fake_corruption}
@@ -441,6 +505,7 @@ class FullDatasetConfigurationTests(unittest.TestCase):
             _audit_indexed_samples=Mock(
                 return_value=experiment.IndexedSamples({}, frozenset())
             ),
+            _audit_noise_controls=Mock(return_value={}),
             _recover_or_remove_sample=Mock(return_value=False),
             _unflagged_antenna_choices=Mock(
                 return_value=((0, "ea01"), (1, "ea02"))
@@ -451,9 +516,9 @@ class FullDatasetConfigurationTests(unittest.TestCase):
             _finalize_sample=finalized,
             _assert_square_pb_support=Mock(),
             _assert_sample_pb_policy=Mock(),
+            _assert_noise_control_sample=Mock(),
             _append_sample_to_dataset=Mock(),
             _source_manifests=Mock(return_value={}),
-            _shared_source_display_limits=Mock(return_value={}),
             _write_comparison_plots=Mock(return_value={"panels": [], "recipes": {}}),
             _cleanup_V_work=Mock(),
             FIXED_ANTENNA_ID=None,
@@ -462,12 +527,18 @@ class FullDatasetConfigurationTests(unittest.TestCase):
             "scripts.preprocessing.load_sample_manifest",
             return_value=SimpleNamespace(),
         ):
-            output = experiment.run_experiment(output_dir=temporary)
+            output = experiment.run_experiment(
+                output_dir=temporary, generate_noise_controls=True
+            )
             report = json.loads(
                 (output / "report.json").read_text(encoding="utf-8")
             )
 
-        self.assertEqual(finalized.call_count, len(source_ids) * len(experiment.LABELS))
+        self.assertEqual(
+            finalized.call_count,
+            len(source_ids) * len(experiment.LABELS)
+            + len(experiment.NOISE_CONTROLS),
+        )
         self.assertEqual(
             select_antenna.call_count,
             len(source_ids) * len(experiment.VARIANTS),
@@ -488,6 +559,15 @@ class FullDatasetConfigurationTests(unittest.TestCase):
             [(item["id"], item["partition"]) for item in report["sources"]],
             [(TRAIN_IDS[0], "train"), (TEST_IDS[0], "test"), (VAL_IDS[0], "val")],
         )
+        self.assertEqual(
+            report["noise_controls"]["requested_source_ids"], [VAL_IDS[0]]
+        )
+        control_calls = [
+            call
+            for call in finalized.call_args_list
+            if call.kwargs.get("noise_control") is not None
+        ]
+        self.assertEqual(len(control_calls), len(experiment.NOISE_CONTROLS))
 
 
 if __name__ == "__main__":

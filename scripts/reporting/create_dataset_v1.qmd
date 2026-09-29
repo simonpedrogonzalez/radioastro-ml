@@ -45,6 +45,8 @@ HERE = Path.cwd()
 report = json.loads((HERE / "report.json").read_text(encoding="utf-8"))
 dataset_path = HERE / report.get("dataset_index", "dataset.json")
 dataset = json.loads(dataset_path.read_text(encoding="utf-8")) if dataset_path.exists() else {"samples": []}
+noise_report = report.get("noise_controls") or {}
+noise_dataset_path = HERE / noise_report.get("dataset_index", "dataset_noise_controls.json")
 
 
 def load_json(path):
@@ -56,22 +58,30 @@ def load_json(path):
 
 def sample_records():
     records = {}
-    for relative in dataset.get("samples", []):
-        manifest_path = (dataset_path.parent / relative).resolve()
-        manifest = load_json(manifest_path)
-        metadata = manifest.get("metadata") or {}
-        qa = load_json(manifest_path.parent / metadata.get("imaging_qa", ""))
-        corruptions = metadata.get("corruptions") or []
-        corruption = {}
-        if corruptions:
-            corruption = load_json(
-                manifest_path.parent / corruptions[0].get("corruption", "")
+    for index_path, index in (
+        (dataset_path, dataset),
+        (noise_dataset_path, load_json(noise_dataset_path)),
+    ):
+        for relative in index.get("samples", []):
+            manifest_path = (index_path.parent / relative).resolve()
+            manifest = load_json(manifest_path)
+            metadata = manifest.get("metadata") or {}
+            qa = load_json(manifest_path.parent / metadata.get("imaging_qa", ""))
+            simulation = load_json(
+                manifest_path.parent / metadata.get("simulation", "")
             )
-        records[manifest.get("sample_id")] = {
-            "manifest": manifest,
-            "qa": qa,
-            "corruption": corruption,
-        }
+            corruptions = metadata.get("corruptions") or []
+            corruption = {}
+            if corruptions:
+                corruption = load_json(
+                    manifest_path.parent / corruptions[0].get("corruption", "")
+                )
+            records[manifest.get("sample_id")] = {
+                "manifest": manifest,
+                "qa": qa,
+                "simulation": simulation,
+                "corruption": corruption,
+            }
     return records
 
 
@@ -103,7 +113,7 @@ def equations(definitions):
     return '<div class="equations">' + "".join(items) + "</div>"
 
 
-def metric_row(source_id, suffix, level):
+def metric_row(source_id, suffix, level, status):
     record = records.get(f"{source_id}_{suffix}", {})
     qa_metrics = (record.get("qa", {}).get("metrics") or {})
     residual = qa_metrics.get("residual") or {}
@@ -120,6 +130,7 @@ def metric_row(source_id, suffix, level):
     if physical is None:
         physical = solution.get("phi_deg")
     values = (
+        status,
         level,
         antenna,
         qa_metrics.get("clean_peak_jy_per_beam"),
@@ -137,14 +148,16 @@ def metric_row(source_id, suffix, level):
     return "<tr>" + "".join(f"<td>{show(value)}</td>" for value in values) + "</tr>"
 
 
-def metrics_table(source_id, family):
-    rows = [metric_row(source_id, "not_corrupted", 0)]
-    for target in report["configuration"]["SNR_corr_targets"]:
+def metrics_table(source_id, family, status_rows):
+    rows = []
+    for status_row in status_rows:
+        target = status_row.get("SNR_corr_target")
         text = str(int(target)) if float(target).is_integer() else f"{target:g}"
-        rows.append(metric_row(source_id, f"{family}_snr_{text}", text))
+        suffix = "not_corrupted" if float(target) == 0 else f"{family}_snr_{text}"
+        rows.append(metric_row(source_id, suffix, text, status_row.get("status")))
     physical = "Amplitude gain" if family == "amp" else "Phase offset (deg)"
     headings = (
-        "SNR_corr_target", "Antenna", "clean peak (Jy/beam)", "sigma_R (Jy/beam)",
+        "Status", "SNR_corr_target", "Antenna", "clean peak (Jy/beam)", "sigma_R (Jy/beam)",
         "rms_R (Jy/beam)", "max=|R|_max/sigma_R",
         "p99=P99(|R|)/sigma_R", "p995=P99.5(|R|)/sigma_R",
         "DR=clean_peak/sigma_R", "eps_g=|g-1|",
@@ -160,8 +173,44 @@ def metrics_table(source_id, family):
     )
 
 
+def noise_metrics_table(source_id, status_rows):
+    rows = []
+    for status_row in status_rows:
+        sample_id = status_row.get("sample_id")
+        record = records.get(sample_id, {})
+        qa_metrics = (record.get("qa", {}).get("metrics") or {})
+        residual = qa_metrics.get("residual") or {}
+        control = (record.get("simulation", {}).get("noise_control") or {})
+        manifest_label = (record.get("manifest", {}).get("label") or {})
+        values = (
+            status_row.get("status"),
+            status_row.get("SNR_corr_target"),
+            control.get("SNR_corr_measured"),
+            "0 (none)" if manifest_label.get("id") == 0 else None,
+            qa_metrics.get("clean_peak_jy_per_beam"),
+            residual.get("scaled_mad_jy_per_beam"),
+            residual.get("rms_jy_per_beam"),
+            residual.get("peak_over_scaled_mad"),
+            residual.get("p99_over_scaled_mad"),
+            residual.get("p99_5_over_scaled_mad"),
+            qa_metrics.get("dynamic_range_scaled_mad"),
+        )
+        rows.append("<tr>" + "".join(f"<td>{show(value)}</td>" for value in values) + "</tr>")
+    headings = (
+        "Status", "SNR_corr target", "SNR_corr measured", "True label",
+        "clean peak (Jy/beam)", "sigma_R (Jy/beam)", "rms_R (Jy/beam)",
+        "max=|R|_max/sigma_R", "p99=P99(|R|)/sigma_R",
+        "p995=P99.5(|R|)/sigma_R", "DR=clean_peak/sigma_R",
+    )
+    return (
+        '<table class="metrics"><thead><tr>'
+        + "".join(f"<th>{esc(item)}</th>" for item in headings)
+        + "</tr></thead><tbody>" + "".join(rows) + "</tbody></table>"
+    )
+
+
 def image_comparison(rows):
-    channels = ("dirty", "clean", "residual")
+    channels = ("dirty", "clean", "residual", "psf")
     columns = max(1, len(rows))
     minimum_width = 5 + 10 * columns
     cells = [
@@ -215,7 +264,10 @@ print(
     + "<br>"
 )
 print(f"Completed sources: {len(report.get('sources', []))} / {len(report.get('source_ids', []))}<br>")
-print(f"Retained dataset samples: {iteration.get('sample_count', len(dataset.get('samples', [])))}<br>")
+print(f"Retained main dataset samples: {iteration.get('sample_count', len(dataset.get('samples', [])))}<br>")
+noise_dataset = load_json(noise_dataset_path)
+noise_iteration = noise_report.get("dataset_iteration") or {}
+print(f"Retained increased-noise controls: {noise_iteration.get('sample_count', len(noise_dataset.get('samples', [])))}<br>")
 print(f"Intermediate CASA products retained: {report['configuration'].get('keep_intermediate_products')}<br>")
 print(
     "Exported CASA mask pixels: "
@@ -226,6 +278,8 @@ print(f"Final dataset imaging pblimit: <strong>{show(report['configuration'].get
 print(f"Reusable thermal source run: <span class='muted'>{esc(report.get('source_run'))}</span>")
 if report.get("failures"):
     print("<div class='failure'>" + esc(report["failures"]) + "</div>")
+if noise_report.get("failures"):
+    print("<div class='failure'>Noise-control failures: " + esc(noise_report["failures"]) + "</div>")
 if report.get("excluded_sources"):
     excluded = "; ".join(
         f"{item.get('id')} ({item.get('partition')}): {item.get('error')}"
@@ -238,11 +292,7 @@ for source in report.get("sources", []):
     source_id = source["id"]
     baseline = records.get(f"{source_id}_not_corrupted", {})
     baseline_metrics = (baseline.get("qa", {}).get("metrics") or {})
-    simulation_manifest = baseline.get("manifest", {}).get("metadata") or {}
-    simulation = {}
-    if simulation_manifest:
-        manifest_path = HERE / "samples" / f"{source_id}_not_corrupted"
-        simulation = load_json(manifest_path / simulation_manifest.get("simulation", ""))
+    simulation = baseline.get("simulation", {})
     noise = simulation.get("noise") or {}
     print(f"<h2>{esc(source_id)} <span class='muted'>[{esc(source.get('partition'))}]</span></h2>")
     print('<div class="summary">')
@@ -260,8 +310,15 @@ for source in report.get("sources", []):
         ("phase", "Phase corruption", "phase_plots"),
     ):
         print(f"<h3>{title}</h3>")
-        print(metrics_table(source_id, family))
+        print(metrics_table(source_id, family, (source.get("main_variant_status") or {}).get(family, [])))
         print(image_comparison(source.get(image_key, [])))
         print("<h3>Configured, sampled, and applied gain</h3>")
         print(corruption_comparison((source.get("corruption_plots") or {}).get(family, [])))
+    print("<h3>Increased-noise controls (D)</h3>")
+    if source.get("noise_control_requested"):
+        print("<p class='muted'>Independent extra noise with fixed realized visibility norm; true gain-error label is 0 (none). The baseline is reused as a visual reference and is not duplicated in the control index.</p>")
+        print(noise_metrics_table(source_id, source.get("noise_control_status", [])))
+        print(image_comparison(source.get("noise_control_plots", [])))
+    else:
+        print("<p class='muted'>Not requested for this source.</p>")
 ```
