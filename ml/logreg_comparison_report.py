@@ -1,4 +1,4 @@
-"""Compare saved QA, parity-logistic, and optional parity-CNN validation predictions."""
+"""Compare saved QA, parity-logistic, and optional parity-CNN predictions."""
 
 import argparse
 import csv
@@ -6,16 +6,54 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-from ml.evaluate import evaluate
+import numpy as np
+
+from ml.report import (
+    _comparison_lines,
+    _metric_lines,
+    _plot_confusion_matrices,
+    _plot_strength,
+)
+from ml.task_evaluation import evaluate_task
 from scripts.reporting import QuartoReporter, export_detached_report
+
+
+LABELS = (0, 1, 2)
+PROBABILITY_COLUMNS = ("probability_none", "probability_amp", "probability_phase")
 
 
 def validation_rows(run):
     with (run / "predictions.csv").open(newline="") as stream:
-        rows = [row for row in csv.DictReader(stream) if row["split"] == "val"]
+        rows = [
+            row for row in csv.DictReader(stream)
+            if row["split"] in {"val", "validation"}
+        ]
     if not rows:
         raise ValueError(f"No validation predictions in {run}")
+    required = {*PROBABILITY_COLUMNS, "sample_kind", "corruption_snr_target"}
+    missing = required - rows[0].keys()
+    if missing:
+        raise ValueError(f"{run} cannot be re-evaluated; missing columns {sorted(missing)}")
     return {row["sample_id"]: row for row in rows}
+
+
+def _evaluate(rows, ids):
+    return evaluate_task(
+        [int(rows[key]["true_class"]) for key in ids],
+        np.asarray([
+            [float(rows[key][column]) for column in PROBABILITY_COLUMNS]
+            for key in ids
+        ]),
+        LABELS,
+        [
+            {
+                "corruption_snr_target": float(rows[key]["corruption_snr_target"]),
+                "sample_kind": rows[key]["sample_kind"],
+            }
+            for key in ids
+        ],
+        clean_label=0,
+    )
 
 
 def main():
@@ -27,84 +65,52 @@ def main():
     parser.add_argument("--export", type=Path, required=True)
     args = parser.parse_args()
 
-    runs = {"Four QA metrics": validation_rows(args.baseline),
-            "Two parity metrics": validation_rows(args.parity)}
+    runs = {
+        "Four QA metrics": validation_rows(args.baseline),
+        "Two parity metrics": validation_rows(args.parity),
+    }
     if args.cnn:
         config = json.loads((args.cnn / "config.json").read_text())
         if config["input_mode"] != "parity":
             raise ValueError("The CNN must use parity input")
         runs[f'Parity CNN (seed {config["seed"]})'] = validation_rows(args.cnn)
     baseline = runs["Four QA metrics"]
-    identity = lambda rows: {key: (row["true_class"], row["source_id"],
-                                    row["corruption_snr_target"]) for key, row in rows.items()}
+
+    def identity(rows):
+        return {
+            key: (
+                row["true_class"], row["source_id"],
+                row["corruption_snr_target"], row["sample_kind"],
+            )
+            for key, row in rows.items()
+        }
+
     if any(identity(baseline) != identity(rows) for rows in runs.values()):
-        raise ValueError("The runs do not have identical validation samples, labels, and levels")
-
+        raise ValueError("Runs do not have identical validation cohorts")
     ids = sorted(baseline)
-    batch = {"sample_id": ids,
-             "label": [int(baseline[key]["true_class"]) for key in ids],
-             "label_metadata": [{"corruption_snr_target": float(baseline[key]["corruption_snr_target"])}
-                                for key in ids]}
-    metrics = {name: evaluate([batch], {key: int(rows[key]["predicted_class"]) for key in ids})
-               for name, rows in runs.items()}
-    levels = ("10", "30", "50", "100")
+    metrics = {name: _evaluate(rows, ids) for name, rows in runs.items()}
 
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    output = args.output.resolve() / (datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
-                                      + "_model_comparison")
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    output = args.output.resolve() / f"{stamp}_model_comparison"
     output.mkdir(parents=True, exist_ok=False)
-    figure, axes = plt.subplots(1, 2, figsize=(10, 3.8), constrained_layout=True)
-    for name, result in metrics.items():
-        grouped = result["by_corruption_snr_target"]
-        axes[0].plot([int(level) for level in levels],
-                     [grouped[level]["detection_recall"] for level in levels], marker="o", label=name)
-        axes[1].plot([int(level) for level in levels],
-                     [grouped[level]["type_accuracy_among_detected"] for level in levels],
-                     marker="o", label=name)
-    for axis, title in zip(axes, ("Detected as corrupted", "Correct type among detections")):
-        axis.set(title=title, xlabel="Target SNR", ylabel="Fraction", ylim=(-0.02, 1.02))
-        axis.set_xticks([int(level) for level in levels])
-        axis.grid(alpha=0.25)
-    axes[0].legend(frameon=False)
-    figure.savefig(output / "by_snr.png", dpi=160)
-    plt.close(figure)
+    _plot_strength(metrics, output / "by_snr.png")
+    _plot_confusion_matrices(metrics, output / "confusion_matrices.png")
 
-    def cell(level, result, metric):
-        values = result["by_corruption_snr_target"][level]
-        total = values["sample_count"]
-        detected = round(values["detection_recall"] * total)
-        if metric == "detection_recall":
-            return f'{values[metric]:.3f} ({detected}/{total})'
-        correct = round(values["corruption_type_accuracy"] * total)
-        score = values["type_accuracy_among_detected"]
-        return f"{score:.3f} ({correct}/{detected})" if score is not None else "—"
-
-    title = ("Four-metric vs parity logistic regression vs parity CNN" if args.cnn
-             else "Four-metric vs parity logistic regression")
-    lines = ["---", f'title: "{title}"',
-             "format:", "  html:", "    page-layout: full", "    embed-resources: true", "---", "",
-             "## Overall validation", "",
-             "| Model | Samples | Accuracy | Macro precision | Macro recall | Macro F1 |",
-             "| --- | ---: | ---: | ---: | ---: | ---: |"]
+    title = (
+        "Four-metric vs parity logistic regression vs parity CNN"
+        if args.cnn else "Four-metric vs parity logistic regression"
+    )
+    lines = [
+        "---", f'title: "{title}"', "format:", "  html:",
+        "    page-layout: full", "    embed-resources: true", "---", "",
+        "## Overall validation", "", *_comparison_lines(metrics), "",
+        "![Confusion matrices](confusion_matrices.png)", "",
+        "## Metrics by corruption strength", "",
+        "![Five metrics for all three evaluation views](by_snr.png)", "",
+        "## Model details", "",
+    ]
     for name, result in metrics.items():
-        lines.append(f'| {name} | {result["sample_count"]} | {result["accuracy"]:.3f} | '
-                     f'{result["macro_precision"]:.3f} | {result["macro_recall"]:.3f} | '
-                     f'{result["macro_f1"]:.3f} |')
-    short_names = ("QA", "Parity logreg", "Parity CNN")[:len(runs)]
-    headings = [value for name in short_names for value in
-                (f"{name} detected", f"{name} correct type / detected")]
-    lines += ["", "## By target SNR", "",
-              "| Target SNR | " + " | ".join(headings) + " |",
-              "| ---: " + "| ---: " * len(headings) + "|"]
-    for level in levels:
-        values = [value for result in metrics.values() for value in
-                  (cell(level, result, "detection_recall"),
-                   cell(level, result, "type_accuracy_among_detected"))]
-        lines.append(f'| {level} | ' + ' | '.join(values) + ' |')
-    lines += ["", "![Detection and correct type by target SNR](by_snr.png)", ""]
+        lines += _metric_lines(name, result)
     qmd = output / "report.qmd"
     qmd.write_text("\n".join(lines), encoding="utf-8")
     QuartoReporter(qmd).finish()

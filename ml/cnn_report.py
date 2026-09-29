@@ -3,8 +3,12 @@
 import csv
 import json
 
-from ml.evaluate import _summary
-from ml.report import _metric_lines, _plot_severity
+from ml.report import (
+    _comparison_lines,
+    _metric_lines,
+    _plot_confusion_matrices,
+    _plot_strength,
+)
 from scripts.reporting import QuartoReporter
 
 
@@ -22,7 +26,7 @@ def write_run(output, config, history, results, rows, audits, baselines):
         writer.writeheader()
         writer.writerows(rows)
     figure, axes = plt.subplots(1, 2, figsize=(10, 4), constrained_layout=True)
-    for axis, metric in zip(axes, ("loss", "balanced_accuracy"), strict=True):
+    for axis, metric in zip(axes, ("loss", "macro_recall"), strict=True):
         for split in ("train", "val"):
             axis.plot([h["epoch"] for h in history], [h[f"{split}_{metric}"] for h in history], label=split)
         axis.axvline(config["training"]["best_epoch"], color="grey", linestyle=":", label="selected epoch")
@@ -31,7 +35,11 @@ def write_run(output, config, history, results, rows, audits, baselines):
         axis.grid(alpha=.2)
     figure.savefig(output / "learning.png", dpi=160)
     plt.close(figure)
-    _plot_severity(results["val"], output / "severity.png")
+    compared = {"ResNet-18": results["val"], **{
+        name: baseline["validation"] for name, baseline in baselines.items()
+    }}
+    _plot_strength(compared, output / "severity.png")
+    _plot_confusion_matrices(compared, output / "confusion_matrices.png")
     lines = [
         "---", 'title: "Square-only ResNet-18 experiment"', "format:", "  html:",
         "    embed-resources: true", "---", "",
@@ -48,24 +56,20 @@ def write_run(output, config, history, results, rows, audits, baselines):
         lines.append(f"| {name} | {audit['retained_samples']} / {audit['retained_sources']} | "
                      f"{audit['retained_classes']} | {audit['excluded_samples']} / {audit['excluded_sources']} | {audit['excluded_classes']} |")
     lines += ["", "## Results", "",
-              "At positive SNR, detection counts predictions of amp or phase among all corrupted samples. Type correctness is conditional on detection. Clean false alarms are shown separately.", ""]
+              "Detection is clean versus any corruption. Error identification is conditional on binary detection. Each positive-strength cohort includes the clean baselines.", ""]
     for name, metrics in results.items():
         lines += _metric_lines(name, metrics)
     lines += ["## Diagnostic plots", "", "![Learning curves](learning.png)", "",
               "Training curves use augmented minibatches during optimization; validation uses deterministic inputs. Final training scores above evaluate the selected checkpoint without augmentation.", "",
-              "![Validation detection and conditional type correctness by SNR](severity.png)", "",
+              "![Validation metrics by corruption strength](severity.png)", "",
+              "![Validation confusion matrices](confusion_matrices.png)", "",
               "## Matched square-only logreg baselines", "",
               "Same retained train/validation samples; unchanged StandardScaler + balanced logistic regression (C=1, lbfgs, max_iter=1000). Historical whole-population scores are not comparable.", ""]
+    lines += _comparison_lines(compared) + [""]
     for name, baseline in baselines.items():
         lines += _metric_lines(name, baseline["validation"])
         lines += ["Features: " + ", ".join(f"`{f}`" for f in baseline["features"]), ""]
-    lines += ["## Per-source results", "", "| Split | Source | Samples | Accuracy | Balanced accuracy | Macro F1 |",
-              "| --- | --- | ---: | ---: | ---: | ---: |"]
-    for split, source in sorted({(r["split"], r["source_id"]) for r in rows}):
-        selected = [r for r in rows if (r["split"], r["source_id"]) == (split, source)]
-        m = _summary([r["true_class"] for r in selected], [r["predicted_class"] for r in selected])
-        lines.append(f"| {split} | {source} | {len(selected)} | {m['accuracy']:.4f} | {m['balanced_accuracy']:.4f} | {m['macro_f1']:.4f} |")
-    lines += ["", "## Excluded samples", "", "| Split | Source | Sample | Reason |", "| --- | --- | --- | --- |"]
+    lines += ["## Excluded samples", "", "| Split | Source | Sample | Reason |", "| --- | --- | --- | --- |"]
     for split, audit in audits.items():
         for row in audit["excluded"]:
             lines.append(f"| {split} | {row['source_id']} | {row['sample_id']} | {row['reason']} |")

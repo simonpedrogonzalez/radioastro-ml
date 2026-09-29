@@ -17,6 +17,7 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 
+from ml.task_evaluation import evaluate_task
 from scripts.preprocessing import (
     FitsSimulationDataset,
     make_simulation_dataloader,
@@ -48,7 +49,7 @@ class FeatureSet:
     y: np.ndarray
     sample_ids: tuple[str, ...]
     source_ids: tuple[str, ...]
-    label_metadata: tuple[dict[str, float | None], ...]
+    label_metadata: tuple[dict[str, Any], ...]
 
 
 def _nested(value: Any, keys: tuple[str, ...], *, context: str) -> Any:
@@ -68,7 +69,7 @@ def features_from_dataloader(
     labels: list[int] = []
     sample_ids: list[str] = []
     source_ids: list[str] = []
-    label_metadata: list[dict[str, float | None]] = []
+    label_metadata: list[dict[str, Any]] = []
     for batch in dataloader:
         batch_labels = np.asarray(batch["label"]).tolist()
         for sample_id, label, qa, metadata in zip(
@@ -169,6 +170,7 @@ def _prediction_rows(
             "probability_phase": float(probability[2]),
             "corruption_snr": metadata["corruption_snr"],
             "corruption_snr_target": metadata["corruption_snr_target"],
+            "sample_kind": metadata["sample_kind"],
             **{
                 name: float(value)
                 for name, value in zip(FEATURE_NAMES, vector, strict=True)
@@ -205,15 +207,20 @@ def main(argv: list[str] | None = None) -> int:
     validation_features = features_from_dataloader(validation_loader)
     model = train(train_features.X, train_features.y)
 
-    from ml.evaluate import evaluate
     from ml.report import write_run
 
-    validation_predictions = model.predict(validation_features.X)
     validation_probabilities = model.predict_proba(validation_features.X)
-    validation_by_id = dict(
-        zip(validation_features.sample_ids, validation_predictions, strict=True)
-    )
-    results = {"validation": evaluate(validation_loader, validation_by_id)}
+    labels = tuple(model[-1].classes_)
+    validation_predictions = np.asarray(labels)[validation_probabilities.argmax(axis=1)]
+    results = {
+        "validation": evaluate_task(
+            validation_features.y,
+            validation_probabilities,
+            labels,
+            validation_features.label_metadata,
+            clean_label=0,
+        )
+    }
     rows = _prediction_rows(
         "validation",
         validation_features,
@@ -228,10 +235,15 @@ def main(argv: list[str] | None = None) -> int:
     if arguments.evaluate_test:
         test_loader = _loader(dataset_path, "test")
         test_features = features_from_dataloader(test_loader)
-        test_predictions = model.predict(test_features.X)
         test_probabilities = model.predict_proba(test_features.X)
-        test_by_id = dict(zip(test_features.sample_ids, test_predictions, strict=True))
-        results["test"] = evaluate(test_loader, test_by_id)
+        test_predictions = np.asarray(labels)[test_probabilities.argmax(axis=1)]
+        results["test"] = evaluate_task(
+            test_features.y,
+            test_probabilities,
+            labels,
+            test_features.label_metadata,
+            clean_label=0,
+        )
         rows.extend(
             _prediction_rows(
                 "test", test_features, test_predictions, test_probabilities
@@ -262,12 +274,14 @@ def main(argv: list[str] | None = None) -> int:
         split_counts=counts,
         versions=versions,
     )
-    validation = results["validation"]
+    validation = results["validation"]["overall"]["main"]
     print(run_dir)
     print(
-        f"validation: accuracy={validation['accuracy']:.4f}, "
-        f"balanced_accuracy={validation['balanced_accuracy']:.4f}, "
-        f"macro_f1={validation['macro_f1']:.4f}"
+        "validation: "
+        + ", ".join(
+            f"{metric}={validation[metric]:.4f}"
+            for metric in ("precision", "recall", "f1", "auroc", "auprc")
+        )
     )
     return 0
 

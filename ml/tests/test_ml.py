@@ -2,9 +2,13 @@ from __future__ import annotations
 
 import math
 import unittest
+from pathlib import Path
 
-from ml.evaluate import evaluate
+import numpy as np
+
+from ml.evaluate import evaluate_classification
 from ml.logreg import FEATURE_NAMES, features_from_dataloader
+from ml.task_evaluation import evaluate_task
 
 
 def _qa(values: list[float]) -> dict:
@@ -52,61 +56,84 @@ class FeatureTests(unittest.TestCase):
 
 
 class EvaluationTests(unittest.TestCase):
-    def test_overall_and_severity_metrics(self):
-        sample_ids = [
-            "0005+383_none",
-            "0005+383_amp_10",
-            "0005+383_phase_10",
-            "0005+383_amp_30",
-            "0005+383_phase_30",
-        ]
-        batch = {
-            "sample_id": sample_ids,
-            "label": [0, 1, 2, 1, 2],
-            "label_metadata": [
-                {"corruption_snr_target": level}
-                for level in (0.0, 10.0, 10.0, 30.0, 30.0)
-            ],
-        }
-        predictions = dict(zip(sample_ids, [1, 1, 0, 2, 2], strict=True))
-        result = evaluate([batch], predictions)
+    def test_generic_evaluator_is_label_and_class_count_agnostic(self):
+        for labels in ((30, 10), ("z", "x", "y"), (9, 4, 7, 2)):
+            truth = np.repeat(labels, 2)
+            probabilities = np.full((len(truth), len(labels)), 0.1 / (len(labels) - 1))
+            for row, label in enumerate(truth):
+                probabilities[row, labels.index(label)] = 0.9
+            result = evaluate_classification(truth, probabilities, labels)
+            self.assertEqual(result["labels"], list(labels))
+            self.assertEqual(result["confusion_matrix"], (np.eye(len(labels), dtype=int) * 2).tolist())
+            self.assertTrue(all(result["macro"][metric] == 1 for metric in
+                                ("precision", "recall", "f1", "auroc", "auprc")))
 
-        self.assertAlmostEqual(result["accuracy"], 0.4)
-        self.assertAlmostEqual(result["balanced_accuracy"], 1 / 3)
-        self.assertEqual(
-            result["confusion_matrix"], [[0, 1, 0], [0, 1, 1], [1, 0, 1]]
+    def test_evaluator_line_limit_and_no_task_semantics(self):
+        path = Path(__file__).parents[1] / "evaluate.py"
+        source = path.read_text()
+        self.assertLessEqual(len(source.splitlines()), 200)
+        for forbidden in ("sample_kind", "corruption", "clean_label", "target_snr"):
+            self.assertNotIn(forbidden, source)
+
+    def test_overall_and_strength_views(self):
+        truth = np.asarray([0, 1, 2, 1, 2])
+        probabilities = np.asarray([
+            [.1, .8, .1], [.1, .8, .1], [.8, .1, .1],
+            [.1, .2, .7], [.1, .2, .7],
+        ])
+        metadata = [
+            {"corruption_snr_target": level, "sample_kind": kind}
+            for level, kind in (
+                (0, "baseline"), (10, "gain"), (10, "gain"),
+                (30, "gain"), (30, "gain"),
+            )
+        ]
+        result = evaluate_task(
+            truth, probabilities, (0, 1, 2), metadata, clean_label=0
         )
-        levels = result["by_corruption_snr_target"]
-        self.assertEqual(levels["0"]["false_positive_rate"], 1.0)
-        self.assertEqual(levels["10"]["detection_recall"], 0.5)
-        self.assertEqual(levels["10"]["corruption_type_accuracy"], 0.5)
-        self.assertEqual(levels["10"]["type_accuracy_among_detected"], 1.0)
-        self.assertEqual(levels["30"]["detection_recall"], 1.0)
-        self.assertEqual(levels["30"]["corruption_type_accuracy"], 0.5)
-        self.assertEqual(levels["30"]["type_accuracy_among_detected"], 0.5)
+
+        self.assertEqual(result["evaluation_kind"], "classification")
+        self.assertEqual(result["overall"]["main"]["confusion_matrix"],
+                         [[0, 1, 0], [0, 1, 1], [1, 0, 1]])
+        detection = result["overall"]["detection"]
+        self.assertAlmostEqual(detection["precision"], .75)
+        self.assertAlmostEqual(detection["recall"], .75)
+        error = result["overall"]["error_identification"]
+        self.assertEqual(error["detected_corruptions"], 3)
+        self.assertAlmostEqual(error["detection_coverage"], .75)
+        self.assertAlmostEqual(error["precision"], .75)
+        self.assertEqual(set(result["by_corruption_snr_target"]), {"10", "30"})
+        for views in result["by_corruption_snr_target"].values():
+            self.assertEqual(views["main"]["sample_count"], 3)
+            self.assertEqual([v["support"] for v in views["main"]["per_class"].values()], [1, 1, 1])
 
     def test_type_is_undefined_when_no_corruption_is_detected(self):
-        batch = {"sample_id": ["a", "b"], "label": [1, 2],
-                 "label_metadata": [{"corruption_snr_target": 10.0}] * 2}
-        level = evaluate([batch], {"a": 0, "b": 0})["by_corruption_snr_target"]["10"]
-        self.assertEqual(level["detection_recall"], 0.0)
-        self.assertIsNone(level["type_accuracy_among_detected"])
+        truth = [0, 1, 2]
+        probabilities = [[.9, .05, .05], [.8, .1, .1], [.7, .1, .2]]
+        metadata = [
+            {"corruption_snr_target": level, "sample_kind": kind}
+            for level, kind in ((0, "baseline"), (10, "gain"), (10, "gain"))
+        ]
+        error = evaluate_task(
+            truth, probabilities, (0, 1, 2), metadata, clean_label=0
+        )["overall"]["error_identification"]
+        self.assertEqual(error["detection_coverage"], 0.0)
+        self.assertTrue(all(error[metric] is None for metric in
+                            ("precision", "recall", "f1", "auroc", "auprc")))
 
     def test_increased_noise_controls_report_false_positive_rate(self):
-        sample_ids = ["a", "b", "c", "d"]
-        batch = {
-            "sample_id": sample_ids,
-            "label": [0, 0, 0, 0],
-            "label_metadata": [
+        result = evaluate_task(
+            [0, 0, 0, 0],
+            [[.8, .1, .1], [.1, .8, .1], [.1, .1, .8], [.8, .1, .1]],
+            (0, 1, 2),
+            [
                 {
                     "corruption_snr_target": 20.0,
                     "sample_kind": "increased_noise",
                 }
             ]
             * 4,
-        }
-        result = evaluate(
-            [batch], dict(zip(sample_ids, [0, 1, 2, 0], strict=True))
+            clean_label=0,
         )
 
         self.assertEqual(result["evaluation_kind"], "increased_noise_controls")
@@ -114,22 +141,30 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual(level["sample_count"], 4)
         self.assertEqual(level["false_positive_rate"], 0.5)
         self.assertEqual(level["correct_rejection_rate"], 0.5)
-        self.assertNotIn("detection_recall", level)
+        self.assertEqual(level["predicted_counts"], {"0": 2, "1": 1, "2": 1})
+        self.assertNotIn("auroc", level)
 
     def test_evaluation_rejects_mixed_gain_and_noise_controls(self):
-        batch = {
-            "sample_id": ["gain", "control"],
-            "label": [1, 0],
-            "label_metadata": [
+        metadata = [
                 {"corruption_snr_target": 10.0, "sample_kind": "gain"},
                 {
                     "corruption_snr_target": 10.0,
                     "sample_kind": "increased_noise",
                 },
-            ],
-        }
+            ]
         with self.assertRaisesRegex(ValueError, "Cannot pool"):
-            evaluate([batch], {"gain": 1, "control": 0})
+            evaluate_task(
+                [1, 0], [[.1, .8, .1], [.8, .1, .1]], (0, 1, 2),
+                metadata, clean_label=0,
+            )
+
+    def test_invalid_probabilities_fail_clearly(self):
+        with self.assertRaisesRegex(ValueError, "shape"):
+            evaluate_classification(["a"], [[1, 0]], ("a", "b", "c"))
+        with self.assertRaisesRegex(ValueError, "sum"):
+            evaluate_classification(["a"], [[.2, .2]], ("a", "b"))
+        with self.assertRaisesRegex(ValueError, "absent"):
+            evaluate_classification(["c"], [[.5, .5]], ("a", "b"))
 
 
 if __name__ == "__main__":

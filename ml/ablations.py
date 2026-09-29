@@ -14,7 +14,12 @@ import numpy as np
 
 from ml import cnn
 from ml.logreg import FEATURE_NAMES, features_from_dataloader, train as train_logreg
-from ml.report import _conditional_type, _metric_lines
+from ml.report import (
+    _comparison_lines,
+    _metric_lines,
+    _plot_confusion_matrices,
+    _plot_strength,
+)
 from scripts.preprocessing import source_dataset_id
 from scripts.reporting import QuartoReporter
 
@@ -44,12 +49,16 @@ def read_run(path, splits, dataset_hash, mode, seed, head_only=False):
     actual = {(r["split"], r["sample_id"]): (int(r["true_class"]), float(r["corruption_snr_target"])) for r in rows}
     if actual != expected or len(rows) != len(expected):
         raise ValueError(f"Sample/label/level mismatch with current train/val cohort: {path}")
-    results = json.loads((path / "results.json").read_text())
-    if set(results) != {"train", "val"}:
-        raise ValueError(f"Expected train/val only: {path}")
+    by_key = {(row["split"], row["sample_id"]): row for row in rows}
+    probabilities = np.asarray([
+        [float(by_key[("val", sample_id)][f"probability_{label}"])
+         for label in ("none", "amp", "phase")]
+        for sample_id in splits["val"].batch["sample_id"]
+    ])
+    validation = cnn.score(splits["val"], probabilities)
     history = json.loads((path / "history.json").read_text())
     return dict(group="parity_head_only" if head_only else f"{mode}_finetuned", seed=seed,
-                path=str(path.resolve()), validation=results["val"],
+                path=str(path.resolve()), validation=validation,
                 training_seconds=sum(h["seconds"] for h in history),
                 trainable_parameters=max(h["trainable_parameters"] for h in history))
 
@@ -96,7 +105,8 @@ def scalar_baselines(splits, output):
             "scale": cnn.PREPROCESSING["scale"]}, indent=2) + "\n")
         entries.append(dict(group=name, seed=None, path=str(path.resolve()), validation=results["val"],
                             training_seconds=seconds, trainable_parameters=int(model[-1].coef_.size + model[-1].intercept_.size)))
-        print(f"{name}: val BA={results['val']['balanced_accuracy']:.4f}, F1={results['val']['macro_f1']:.4f}", flush=True)
+        main = results["val"]["overall"]["main"]
+        print(f"{name}: val macro recall={main['recall']:.4f}, F1={main['f1']:.4f}", flush=True)
     return entries
 
 
@@ -118,8 +128,9 @@ def source_comparisons(entries):
             counts[i, 0, truth] += 1
             counts[i, 1, truth] += int(row["predicted_class"]) == truth
         observed = np.mean(counts[:, 1].sum(0) / counts[:, 0].sum(0))
-        if not np.isclose(observed, entry["validation"]["balanced_accuracy"]):
-            raise ValueError("Saved predictions disagree with reported balanced accuracy")
+        reported = entry["validation"]["overall"]["main"]["recall"]
+        if not np.isclose(observed, reported):
+            raise ValueError("Saved predictions disagree with reported macro recall")
         sampled = counts[draws].sum(axis=1)
         distributions.setdefault(entry["group"], []).append(np.mean(sampled[:, 1] / sampled[:, 0], axis=1))
     comparisons = []
@@ -127,64 +138,36 @@ def source_comparisons(entries):
                  ("parity_logreg", "parity_finetuned"), ("qa4_parity_logreg", "parity_finetuned"),
                  ("qa4_parity_logreg", "parity_logreg")):
         delta = np.mean(distributions[a], axis=0) - np.mean(distributions[b], axis=0)
-        mean = lambda g: np.mean([e["validation"]["balanced_accuracy"] for e in entries if e["group"] == g])
+        mean = lambda g: np.mean([
+            e["validation"]["overall"]["main"]["recall"]
+            for e in entries if e["group"] == g
+        ])
         comparisons.append(dict(comparison=f"{a} minus {b}", difference=float(mean(a)-mean(b)),
                                 source_bootstrap_95_interval=np.quantile(delta, [.025, .975]).tolist()))
     return comparisons
 
 
 def write_summary(output, entries, provenance):
-    import matplotlib
-
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
     comparisons = source_comparisons(entries)
     (output / "summary.json").write_text(json.dumps({"provenance": provenance, "experiments": entries,
         "source_comparisons": comparisons, "bootstrap": {"seed": 2026, "replicates": 5000, "unit": "validation source"}}, indent=2) + "\n")
-    groups = {name: [e for e in entries if e["group"] == name] for name in dict.fromkeys(e["group"] for e in entries)}
-    figure, axis = plt.subplots(figsize=(8, 5), constrained_layout=True)
+    run_results = {
+        entry["group"] + (f" / seed {entry['seed']}" if entry["seed"] is not None else ""):
+        entry["validation"] for entry in entries
+    }
+    _plot_strength(run_results, output / "severity.png")
+    _plot_confusion_matrices(run_results, output / "confusion_matrices.png")
     tr, va = provenance["cohorts"]["train"], provenance["cohorts"]["val"]
     lines = ["---", 'title: "CNN ablations: square sources"', "format:", "  html:", "    embed-resources: true", "---", "",
              f"Train: {tr['retained_samples']} samples / {tr['retained_sources']} sources. "
              f"Validation: {va['retained_samples']} samples / {va['retained_sources']} sources. Test not evaluated. "
              "All results use the same eligible samples, labels and target levels; circular sources remain excluded.", "",
-             "## Comparison", "", "CNN spreads below are sample standard deviations over seeds42/43/44, not confidence intervals over new sources. Logistic models are deterministic fits.", "",
-             "| Experiment | Fits | Balanced accuracy (mean ± SD) | Macro F1 (mean ± SD) | Clean FPR | SNR10 detection | SNR10 correct type among detections |",
-             "| --- | ---: | ---: | ---: | ---: | ---: | ---: |"]
-    for i, (name, group) in enumerate(groups.items()):
-        ba = [e["validation"]["balanced_accuracy"] for e in group]
-        f1 = [e["validation"]["macro_f1"] for e in group]
-        std = lambda x: np.std(x, ddof=1) if len(x) > 1 else 0.
-        mean_level = lambda level, metric: np.mean([e["validation"]["by_corruption_snr_target"][level][metric] for e in group])
-        conditional = lambda level: np.mean([_conditional_type(e["validation"]["by_corruption_snr_target"][level]) for e in group])
-        axis.errorbar(np.mean(ba), i, xerr=std(ba), fmt="o", color="black", capsize=4)
-        axis.scatter(ba, [i]*len(ba), s=28, alpha=.6)
-        lines.append(f"| {name} | {len(group)} | {np.mean(ba):.4f} ± {std(ba):.4f} | "
-                     f"{np.mean(f1):.4f} ± {std(f1):.4f} | {mean_level('0', 'false_positive_rate'):.4f} | "
-                     f"{mean_level('10', 'detection_recall'):.4f} | {conditional('10'):.4f} |")
-    axis.set(yticks=range(len(groups)), yticklabels=list(groups), xlabel="Validation balanced accuracy", xlim=(0, 1))
-    axis.invert_yaxis()
-    axis.grid(axis="x", alpha=.2)
-    figure.savefig(output / "comparison.png", dpi=160)
-    plt.close(figure)
-    figure, axes = plt.subplots(1, 2, figsize=(11, 4), constrained_layout=True)
-    levels = ["10", "30", "50", "100"]
-    for axis, metric in zip(axes, ("detection_recall", "type_accuracy_among_detected"), strict=True):
-        for name, group in groups.items():
-            values = [np.mean([_conditional_type(e["validation"]["by_corruption_snr_target"][s])
-                               if metric == "type_accuracy_among_detected"
-                               else e["validation"]["by_corruption_snr_target"][s][metric]
-                               for e in group]) for s in levels]
-            axis.plot([int(s) for s in levels], values, marker="o", label=name)
-        axis.set(xlabel="Target SNR", ylabel=metric.replace("_", " "), ylim=(-.02, 1.02), xticks=[int(s) for s in levels])
-        axis.grid(alpha=.2)
-    axes[1].legend(fontsize=7)
-    figure.savefig(output / "severity.png", dpi=160)
-    plt.close(figure)
-    lines += ["", "![Every seed and mean ± SD](comparison.png)", "", "![Detection and conditional type correctness, averaged across seeds](severity.png)", "",
+             "## Comparison", "", "Each trained seed is shown separately; bold values are tied column maxima.", "",
+             *_comparison_lines(run_results), "",
+             "![Confusion matrices](confusion_matrices.png)", "",
+             "![Metrics by corruption strength](severity.png)", "",
               "## Paired source comparisons", "",
-              "Balanced-accuracy differences with descriptive 95% percentile intervals from 5,000 paired source resamples (seed2026). "
+              "Macro-recall differences with descriptive 95% percentile intervals from 5,000 paired source resamples (seed2026). "
               "Each source keeps all variants; seed results are averaged within each draw. Models/seeds are fixed. "
               "These intervals do not account for validation-based model selection or new training data.", "",
               "| Comparison | Difference | Source-bootstrap interval |", "| --- | ---: | --- |",

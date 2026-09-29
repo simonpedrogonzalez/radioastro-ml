@@ -3,119 +3,164 @@
 from __future__ import annotations
 
 import csv
+import json
 import pickle
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from ml.evaluate import METRICS
 from scripts.reporting import QuartoReporter
 
 
 CLASS_NAMES = {0: "none", 1: "amp", 2: "phase"}
 
 
-def _metric_lines(name: str, metrics: dict[str, Any]) -> list[str]:
-    return [
-        f"### {name}",
-        "",
-        (
-            "| Samples | Accuracy | Balanced accuracy | Macro precision | "
-            "Macro recall | Macro F1 |"
-        ),
-        "| ---: | ---: | ---: | ---: | ---: | ---: |",
-        "| "
-        + " | ".join(
-            [
-                str(metrics["sample_count"]),
-                f'{metrics["accuracy"]:.4f}',
-                f'{metrics["balanced_accuracy"]:.4f}',
-                f'{metrics["macro_precision"]:.4f}',
-                f'{metrics["macro_recall"]:.4f}',
-                f'{metrics["macro_f1"]:.4f}',
-            ]
-        )
-        + " |",
-        "",
-        "Confusion matrix (rows=true, columns=predicted; classes 0/1/2):",
-        "",
-        "```text",
-        *[" ".join(str(value) for value in row) for row in metrics["confusion_matrix"]],
-        "```",
-        "",
-        "| Class | Precision | Recall | F1 | Support |",
-        "| ---: | ---: | ---: | ---: | ---: |",
-        *[
-            f'| {label} | {values["precision"]:.4f} | '
-            f'{values["recall"]:.4f} | {values["f1"]:.4f} | '
-            f'{values["support"]} |'
-            for label, values in metrics["per_class"].items()
-        ],
-        "",
-        *_severity_lines(metrics),
-        "",
-    ]
+def _format_metric(value: float | None, *, bold: bool = False) -> str:
+    if value is None:
+        return "—"
+    rendered = f"{value:.4f}"
+    return f"**{rendered}**" if bold else rendered
 
 
-def _conditional_type(values: dict[str, Any]) -> float | None:
-    if "type_accuracy_among_detected" in values:
-        return values["type_accuracy_among_detected"]
-    detected = values.get("detection_recall")
-    return values["corruption_type_accuracy"] / detected if detected else None
-
-
-def _severity_lines(metrics: dict[str, Any]) -> list[str]:
-    levels = metrics["by_corruption_snr_target"]
-    clean = levels.get("0")
-
-    def row(level: str, values: dict[str, Any]) -> str:
-        total = values["sample_count"]
-        detected = round(values["detection_recall"] * total)
-        correct = round(values["corruption_type_accuracy"] * total)
-        conditional = _conditional_type(values)
-        type_score = f"{conditional:.4f} ({correct}/{detected})" if conditional is not None else "—"
-        return (f'| {level} | {total} | {values["detection_recall"]:.4f} '
-                f'({detected}/{total}) | {type_score} |')
-
+def _comparison_lines(results: dict[str, dict[str, Any]]) -> list[str]:
+    main = {name: result["overall"]["main"] for name, result in results.items()}
+    defined = {
+        metric: [value[metric] for value in main.values() if value[metric] is not None]
+        for metric in METRICS
+    }
+    maxima = {metric: max(values) if values else None for metric, values in defined.items()}
     lines = [
-        "| Target SNR | Samples | Detected as corrupted | Correct type among detections |",
-        "| ---: | ---: | ---: | ---: |",
-        *[
-            row(level, values)
-            for level, values in levels.items() if values.get("detection_recall") is not None
-        ],
+        "| Model | " + " | ".join(metric.upper() for metric in METRICS) + " |",
+        "| --- | " + " | ".join("---:" for _ in METRICS) + " |",
     ]
-    if clean is not None:
-        lines += ["", f'Clean false alarms (SNR 0): '
-                         f'{round(clean["false_positive_rate"] * clean["sample_count"])}'
-                         f'/{clean["sample_count"]} ({clean["false_positive_rate"]:.4f}).']
-    lines += ["", "Detection uses all corrupted samples at that level; type correctness "
-                  "uses only those detected. If none are detected, type correctness is undefined (—)."]
+    for name, values in main.items():
+        cells = [
+            _format_metric(
+                values[metric],
+                bold=(len(main) > 1 and maxima[metric] is not None
+                      and values[metric] == maxima[metric]),
+            )
+            for metric in METRICS
+        ]
+        lines.append(f"| {name} | " + " | ".join(cells) + " |")
     return lines
 
 
-def _plot_severity(metrics: dict[str, Any], destination: Path) -> None:
+def _metric_lines(name: str, result: dict[str, Any]) -> list[str]:
+    if result["evaluation_kind"] == "increased_noise_controls":
+        lines = [f"### {name}", "", "| Noise target | Samples | Correct rejection | FPR | Predicted counts |", "| ---: | ---: | ---: | ---: | --- |"]
+        for level, values in result["by_noise_snr_target"].items():
+            counts = ", ".join(
+                f"{label}: {count}" for label, count in values["predicted_counts"].items()
+            )
+            lines.append(
+                f'| {level} | {values["sample_count"]} | '
+                f'{values["correct_rejection_rate"]:.4f} | '
+                f'{values["false_positive_rate"]:.4f} | {counts} |'
+            )
+        return [*lines, ""]
+    views = result["overall"]
+    main = views["main"]
+    lines = [
+        f"### {name}",
+        "",
+        "| View | Samples | " + " | ".join(metric.upper() for metric in METRICS) + " |",
+        "| --- | ---: | " + " | ".join("---:" for _ in METRICS) + " |",
+    ]
+    for label, key in (("Main (macro)", "main"), ("Detection", "detection"),
+                       ("Error identification (macro)", "error_identification")):
+        values = views[key]
+        lines.append(
+            f'| {label} | {values["sample_count"]} | '
+            + " | ".join(_format_metric(values[metric]) for metric in METRICS)
+            + " |"
+        )
+    error = views["error_identification"]
+    lines += [
+        "",
+        f'Error-identification coverage: {error["detected_corruptions"]}/'
+        f'{error["eligible_corruptions"]} '
+        f'({_format_metric(error["detection_coverage"])}).',
+        "",
+        "| Class | Precision | Recall | F1 | AUROC | AUPRC | Support |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for label in main["labels"]:
+        values = main["per_class"][str(label)]
+        lines.append(
+            f"| {label} | "
+            + " | ".join(_format_metric(values[metric]) for metric in METRICS)
+            + f' | {values["support"]} |'
+        )
+    return [*lines, ""]
+
+
+def _plot_strength(
+    results: dict[str, dict[str, Any]], destination: Path
+) -> None:
     import matplotlib
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    levels = [
-        (float(level), values)
-        for level, values in metrics["by_corruption_snr_target"].items()
-        if values.get("detection_recall") is not None
-    ]
-    levels.sort()
-    x = [level for level, _ in levels]
-    detection = [values["detection_recall"] for _, values in levels]
-    correct_type = [_conditional_type(values) for _, values in levels]
+    view_names = (("main", "Main"), ("detection", "Detection"),
+                  ("error_identification", "Error identification"))
+    figure, axes = plt.subplots(3, 5, figsize=(16, 9), sharex=True, sharey=True,
+                               constrained_layout=True)
+    for row, (view, title) in enumerate(view_names):
+        for column, metric in enumerate(METRICS):
+            axis = axes[row, column]
+            for name, result in results.items():
+                levels = sorted(
+                    (float(level), values[view][metric])
+                    for level, values in result["by_corruption_snr_target"].items()
+                )
+                axis.plot([level for level, _ in levels],
+                          [value for _, value in levels], marker="o", label=name)
+            if row == 0:
+                axis.set_title(metric.upper())
+            if column == 0:
+                axis.set_ylabel(title)
+            if row == 2:
+                axis.set_xlabel("Target corruption SNR")
+            axis.set_ylim(-0.02, 1.02)
+            axis.grid(alpha=0.25)
+    handles, labels = axes[0, 0].get_legend_handles_labels()
+    figure.legend(handles, labels, loc="outside upper center", ncol=max(1, len(labels)),
+                  frameon=False)
+    figure.savefig(destination, dpi=160)
+    plt.close(figure)
 
-    figure, axis = plt.subplots(figsize=(6.4, 4.0), constrained_layout=True)
-    axis.plot(x, detection, marker="o", linewidth=2, label="detected as corrupted")
-    axis.plot(x, correct_type, marker="o", linewidth=2, label="correct type among detections")
-    axis.set(xlabel="Target corruption SNR", ylabel="Fraction", ylim=(-0.02, 1.02))
-    axis.set_xticks(x)
-    axis.grid(alpha=0.25)
-    axis.legend(frameon=False)
+
+def _plot_confusion_matrices(
+    results: dict[str, dict[str, Any]], destination: Path
+) -> None:
+    import matplotlib
+    import numpy as np
+    from sklearn.metrics import ConfusionMatrixDisplay
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    models = list(results)
+    mains = [results[name]["overall"]["main"] for name in models]
+    totals = {main["sample_count"] for main in mains}
+    labels = {tuple(main["labels"]) for main in mains}
+    if len(totals) != 1 or len(labels) != 1:
+        raise ValueError("Confusion-matrix comparison requires identical cohorts and labels")
+    figure, axes = plt.subplots(1, len(models), figsize=(5 * len(models), 4.4),
+                               constrained_layout=True, squeeze=False)
+    displays = []
+    for axis, name, main in zip(axes[0], models, mains, strict=True):
+        display = ConfusionMatrixDisplay(
+            np.asarray(main["confusion_matrix"]), display_labels=main["labels"]
+        )
+        display.plot(ax=axis, colorbar=False, values_format="d",
+                     im_kw={"vmin": 0, "vmax": main["sample_count"]})
+        axis.set_title(name)
+        displays.append(display)
+    figure.colorbar(displays[-1].im_, ax=list(axes[0]), label="Samples", shrink=0.8)
     figure.savefig(destination, dpi=160)
     plt.close(figure)
 
@@ -242,10 +287,17 @@ def write_run(
         writer = csv.DictWriter(handle, fieldnames=list(prediction_rows[0]))
         writer.writeheader()
         writer.writerows(prediction_rows)
+    (run_dir / "results.json").write_text(
+        json.dumps(results, indent=2) + "\n", encoding="utf-8"
+    )
     severity_plot = run_dir / "severity_performance.png"
+    confusion_plot = run_dir / "confusion_matrix.png"
     scatter_plot = run_dir / "feature_scatter.png"
     importance_plot = run_dir / "feature_importance.png"
-    _plot_severity(results["validation"], severity_plot)
+    _plot_strength({"Logistic regression": results["validation"]}, severity_plot)
+    _plot_confusion_matrices(
+        {"Logistic regression": results["validation"]}, confusion_plot
+    )
     scatter_features = _plot_feature_scatter(
         model, prediction_rows, feature_names, scatter_plot
     )
@@ -316,11 +368,16 @@ def write_run(
             "",
             "## Diagnostic plots",
             "",
+            "### Confusion matrix",
+            "",
+            "![Validation confusion matrix](confusion_matrix.png)",
+            "",
             "### Performance by corruption level",
             "",
             (
-                "Detection uses all corrupted samples; type correctness uses only "
-                "the ones detected as corrupted."
+                "Each strength cohort contains the clean baselines and every error "
+                "class at that strength. Error identification is conditional on "
+                "binary detection."
             ),
             "",
             "![Performance by corruption level](severity_performance.png)",
@@ -358,4 +415,10 @@ def write_run(
     return run_dir
 
 
-__all__ = ["write_run"]
+__all__ = [
+    "_comparison_lines",
+    "_metric_lines",
+    "_plot_confusion_matrices",
+    "_plot_strength",
+    "write_run",
+]

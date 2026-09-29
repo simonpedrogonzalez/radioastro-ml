@@ -104,7 +104,11 @@ class FreezingTests(unittest.TestCase):
         model.fc = nn.Linear(512, 3)
         before = {k: v.clone() for k, v in model.state_dict().items()}
         batch = {"label": torch.tensor([0, 1, 2]), "sample_id": ["clean", "amp", "phase"],
-                 "label_metadata": [{"corruption_snr_target": s} for s in (0, 10, 10)]}
+                 "label_metadata": [
+                     {"corruption_snr_target": 0, "sample_kind": "baseline"},
+                     {"corruption_snr_target": 10, "sample_kind": "gain"},
+                     {"corruption_snr_target": 10, "sample_kind": "gain"},
+                 ]}
         split = Split(torch.randn(3, 3, 64, 64), batch, {})
         history, settings = train(model, split, split, "cpu", warmup_epochs=1, finetune_epochs=1, head_only=True)
         self.assertEqual([h["stage"] for h in history], ["head", "head_continued"])

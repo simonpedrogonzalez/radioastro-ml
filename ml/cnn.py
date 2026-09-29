@@ -16,13 +16,14 @@ import torch
 from astropy.io import fits
 from astropy.wcs import FITSFixedWarning
 from scipy.ndimage import binary_propagation
+from sklearn.metrics import recall_score
 from torch import nn
 from torch.nn import functional as F
 from torch.utils.data import DataLoader, TensorDataset
 from torchvision.models import ResNet18_Weights, resnet18
 
-from ml.evaluate import _summary, evaluate
 from ml.logreg import FEATURE_NAMES, features_from_dataloader, train as train_logreg
+from ml.task_evaluation import evaluate_task
 from scripts.preprocessing import FitsSimulationDataset, source_dataset_id
 
 
@@ -204,8 +205,13 @@ def predict(model, split, device):
 
 
 def score(split, probabilities):
-    return evaluate([split.batch], dict(zip(split.batch["sample_id"],
-                                           probabilities.argmax(1), strict=True)))
+    return evaluate_task(
+        split.batch["label"].numpy(),
+        probabilities,
+        (0, 1, 2),
+        split.batch["label_metadata"],
+        clean_label=0,
+    )
 
 
 def train(model, training, validation, device, *, warmup_epochs=5, finetune_epochs=15, head_only=False):
@@ -241,14 +247,18 @@ def train(model, training, validation, device, *, warmup_epochs=5, finetune_epoc
                 guesses.extend(logits.detach().argmax(1).cpu().tolist())
             probabilities = predict(model, validation, device)
             metrics = score(validation, probabilities)
-            key = (metrics["balanced_accuracy"], metrics["macro_f1"])
+            main_metrics = metrics["overall"]["main"]
+            key = (main_metrics["recall"], main_metrics["f1"])
             val_y = validation.batch["label"].numpy()
             val_weights = weights.numpy()[val_y]
             val_loss = float(np.average(-np.log(np.maximum(probabilities[np.arange(len(val_y)), val_y], 1e-30)), weights=val_weights))
             stage_name = "head_continued" if stage == "finetune" and head_only else stage
             row = {"epoch": len(history) + 1, "stage": stage_name, "train_loss": loss_sum / weight_sum,
-                   "val_loss": val_loss, "train_balanced_accuracy": _summary(truths, guesses)["balanced_accuracy"],
-                   "val_balanced_accuracy": key[0], "val_macro_f1": key[1],
+                   "val_loss": val_loss,
+                   "train_macro_recall": float(recall_score(
+                       truths, guesses, labels=(0, 1, 2), average="macro", zero_division=0
+                   )),
+                   "val_macro_recall": key[0], "val_macro_f1": key[1],
                    "seconds": time.perf_counter() - start,
                    "trainable_parameters": sum(p.numel() for p in model.parameters() if p.requires_grad)}
             history.append(row)
@@ -259,8 +269,8 @@ def train(model, training, validation, device, *, warmup_epochs=5, finetune_epoc
             else:
                 stale += 1
             print(f"Epoch {row['epoch']}/{warmup_epochs + finetune_epochs} ({stage_name}): "
-                  f"train loss={row['train_loss']:.4f}, BA={row['train_balanced_accuracy']:.4f}; "
-                  f"val loss={val_loss:.4f}, BA={key[0]:.4f}, F1={key[1]:.4f}; "
+                  f"train loss={row['train_loss']:.4f}, macro recall={row['train_macro_recall']:.4f}; "
+                  f"val loss={val_loss:.4f}, macro recall={key[0]:.4f}, F1={key[1]:.4f}; "
                   f"best={best_epoch}, patience={stale}/5, {row['seconds']:.1f}s", flush=True)
             if stage == "finetune" and stale >= 5:
                 break
@@ -269,7 +279,8 @@ def train(model, training, validation, device, *, warmup_epochs=5, finetune_epoc
                      "warmup_epochs": warmup_epochs, "finetune_max_epochs": finetune_epochs,
                      "optimizer": "AdamW: head warmup 1e-3; second-stage head 3e-4; wd=1e-4"
                                   + ("; backbone frozen" if head_only else "; second-stage block 1e-4"),
-                     "batch_size": 16, "patience": 5, "selection": "val balanced accuracy, then macro F1, then earlier epoch"}
+                     "batch_size": 16, "patience": 5,
+                     "selection": "val macro recall, then macro F1, then earlier epoch"}
 
 
 def matched_baselines(training, validation):
