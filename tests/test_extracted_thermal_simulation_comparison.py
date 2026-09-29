@@ -184,6 +184,27 @@ class ExperimentDriverTests(unittest.TestCase):
         self.assertEqual(experiment.IMAGING_IMSIZE, (256, 256))
         self.assertEqual(manifest["configuration"]["fits_invalid_policy"], "fill")
 
+    def test_disk_preflight_selection_only_contains_genuinely_pending_inputs(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary)
+            samples = [
+                output / "complete.ms",
+                output / "failed-with-partial.ms",
+                output / "pending.ms",
+            ]
+            partial = output / "failed-with-partial"
+            partial.mkdir()
+            (partial / "work").write_text("partial", encoding="utf-8")
+
+            pending = experiment._pending_samples(
+                samples,
+                {"complete": {"id": "complete"}},
+                {"failed-with-partial": {"id": "failed-with-partial"}},
+                output,
+            )
+
+        self.assertEqual(pending, [samples[-1]])
+
     def test_legacy_manifest_cannot_be_resumed_into_new_region_policy(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

@@ -19,7 +19,8 @@ h3 { font-size: 1rem; margin: 0.8rem 0 0.25rem; }
 .metrics th:first-child, .metrics td:first-child { text-align: left; }
 .equations { background: #f7f7f7; border-left: 3px solid #777; font-size: 0.75rem; margin: 0.35rem 0 0.7rem; padding: 0.45rem 0.7rem; }
 .equation { display: inline-block; margin: 0.12rem 1.1rem 0.12rem 0; }
-.plot-grid { display: grid; gap: 0.35rem; grid-template-columns: 5rem repeat(5, minmax(0, 1fr)); margin: 0.35rem 0 0.9rem; width: 100%; }
+.plot-scroll { margin: 0.35rem 0 0.9rem; overflow-x: auto; width: 100%; }
+.plot-grid { display: grid; gap: 0.35rem; width: 100%; }
 .plot-heading, .plot-row-label { align-items: center; display: flex; font-size: 0.68rem; font-weight: 600; justify-content: center; text-align: center; }
 .plot-cell img { display: block; height: auto; width: 100%; }
 .corruption-grid { display: grid; gap: 0.6rem; grid-template-columns: repeat(4, minmax(0, 1fr)); margin: 0.35rem 0 1rem; }
@@ -161,7 +162,13 @@ def metrics_table(source_id, family):
 
 def image_comparison(rows):
     channels = ("dirty", "clean", "residual")
-    cells = ['<div class="plot-grid">', '<div></div>']
+    columns = max(1, len(rows))
+    minimum_width = 5 + 10 * columns
+    cells = [
+        '<div class="plot-scroll">',
+        f'<div class="plot-grid" style="grid-template-columns: 5rem repeat({columns}, minmax(10rem, 1fr)); min-width: {minimum_width}rem">',
+        '<div></div>',
+    ]
     for row in rows:
         cells.append(f'<div class="plot-heading">{esc(row.get("title"))}</div>')
     for channel in channels:
@@ -173,7 +180,7 @@ def image_comparison(rows):
                 f'<a class="plot-cell" href="{path}" target="_blank">'
                 f'<img src="{path}" alt="{title}"></a>'
             )
-    cells.append("</div>")
+    cells.extend(("</div>", "</div>"))
     return "".join(cells)
 
 
@@ -215,6 +222,7 @@ print(
     f"<strong>{esc(report['configuration'].get('fits_invalid_policy'))}</strong> with "
     f"{show(report['configuration'].get('fits_fill_value'))} Jy/beam<br>"
 )
+print(f"Final dataset imaging pblimit: <strong>{show(report['configuration'].get('dataset_pblimit'))}</strong><br>")
 print(f"Reusable thermal source run: <span class='muted'>{esc(report.get('source_run'))}</span>")
 if report.get("failures"):
     print("<div class='failure'>" + esc(report["failures"]) + "</div>")

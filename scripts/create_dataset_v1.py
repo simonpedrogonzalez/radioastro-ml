@@ -23,6 +23,8 @@ import random
 import shutil
 import sys
 import traceback
+import warnings
+from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -34,9 +36,14 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 EXPERIMENTS_ROOT = ROOT / "collect" / "experiments"
-THERMAL_RUN_GLOB = "extracted_thermal_simulation_comparison_*"
+DATASET_DIR = EXPERIMENTS_ROOT / "dataset_v1_20260921_all_psf"
+THERMAL_DIR = (
+    EXPERIMENTS_ROOT / "extracted_thermal_simulation_comparison_20260909T005739"
+)
+DATASET_PBLIMIT = -0.1
 REPORT_TEMPLATE = ROOT / "scripts" / "reporting" / "create_dataset_v1.qmd"
-SNR_CORR_TARGETS = (10.0, 30.0, 50.0, 100.0)
+LEGACY_SNR_CORR_TARGETS = (10.0, 30.0, 50.0, 100.0)
+SNR_CORR_TARGETS = (5.0, 10.0, 15.0, 20.0, 30.0, 40.0, 50.0, 100.0)
 CORRUPTION_SOLINT = "10m"
 SNR_CORR_REL_TOL = 0.01
 BASE_SEED = 20260914
@@ -99,6 +106,12 @@ class Variant:
     label_name: str
 
 
+@dataclass(frozen=True)
+class IndexedSamples:
+    manifests: dict[str, Any]
+    pb_repairs: frozenset[str]
+
+
 def _target_text(value: float) -> str:
     return str(int(value)) if float(value).is_integer() else format(value, "g")
 
@@ -108,9 +121,27 @@ VARIANTS = tuple(
     for family in ("amp", "phase")
     for target in SNR_CORR_TARGETS
 )
-LABELS = {
+LEGACY_LABELS = {
     "not_corrupted": 0,
-    **{variant.label_name: index for index, variant in enumerate(VARIANTS, start=1)},
+    "amp_snr_10": 1,
+    "amp_snr_30": 2,
+    "amp_snr_50": 3,
+    "amp_snr_100": 4,
+    "phase_snr_10": 5,
+    "phase_snr_30": 6,
+    "phase_snr_50": 7,
+    "phase_snr_100": 8,
+}
+LABELS = {
+    **LEGACY_LABELS,
+    "amp_snr_5": 9,
+    "amp_snr_15": 10,
+    "amp_snr_20": 11,
+    "amp_snr_40": 12,
+    "phase_snr_5": 13,
+    "phase_snr_15": 14,
+    "phase_snr_20": 15,
+    "phase_snr_40": 16,
 }
 
 
@@ -193,11 +224,11 @@ def find_thermal_run(
     source_run: str | Path | None = None,
 ) -> tuple[Path, dict[str, Any], tuple[str, ...]]:
     requested_ids = _configured_source_ids()
-
-    if source_run is not None:
-        candidates = [Path(source_run).expanduser().resolve()]
-    else:
-        candidates = sorted(EXPERIMENTS_ROOT.glob(THERMAL_RUN_GLOB), reverse=True)
+    candidates = [
+        Path(source_run).expanduser().resolve()
+        if source_run is not None
+        else THERMAL_DIR.resolve()
+    ]
     failures = []
     usable = []
     for candidate in candidates:
@@ -230,6 +261,39 @@ def find_thermal_run(
     raise RuntimeError(
         "No reusable thermal experiment contains completed partition sources:\n"
         + "\n".join(f"  - {failure}" for failure in failures)
+    )
+
+
+def _ensure_thermal_entries(thermal_dir: Path) -> None:
+    """Run the established precursor only when canonical partition inputs are new."""
+    from scripts import compare_extracted_thermal_simulations as precursor
+
+    requested = set(_configured_source_ids())
+    canonical = [
+        path for path in precursor.find_samples() if path.stem in requested
+    ]
+    manifest_path = thermal_dir / "report.json"
+    manifest = (
+        json.loads(manifest_path.read_text(encoding="utf-8"))
+        if manifest_path.is_file()
+        else {}
+    )
+    recorded = {
+        item.get("id")
+        for collection in (manifest.get("samples", []), manifest.get("failures", []))
+        for item in collection
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    }
+    pending = [path for path in canonical if path.stem not in recorded]
+    if not pending:
+        return
+    print(
+        f"Preparing {len(pending)} new thermal precursor entr"
+        f"{'y' if len(pending) == 1 else 'ies'} in {thermal_dir}"
+    )
+    precursor.main(
+        thermal_dir,
+        sample_ids=[path.stem for path in canonical],
     )
 
 
@@ -389,6 +453,7 @@ def _write_branch_simulation_reports(
     sample_dir: Path,
     V_ms: Path,
     observed_ms: Path,
+    provenance_observed_ms: Path | None,
     noise: dict[str, object],
     corruption_seed: int | None,
     thermal_noise_seed: int,
@@ -414,6 +479,9 @@ def _write_branch_simulation_reports(
     if corruption_seed is not None:
         stages[1]["seed"] = corruption_seed
     payload = _simulation_payload(source)
+    recorded_observed_ms = (
+        observed_ms if provenance_observed_ms is None else provenance_observed_ms
+    )
     for obsolete in ("component_list", "operations", "created_paths"):
         payload.pop(obsolete, None)
     payload.update(
@@ -422,7 +490,7 @@ def _write_branch_simulation_reports(
             "sample_id": sample_id,
             "created_at": datetime.now(timezone.utc).isoformat(),
             "input_ms": str(V_ms),
-            "output_ms": str(observed_ms),
+            "output_ms": str(recorded_observed_ms),
             "input_visibility": {
                 "role": "V",
                 "description": "noiseless uncorrupted predicted sky visibility",
@@ -438,7 +506,7 @@ def _write_branch_simulation_reports(
             "generated_artifacts": [
                 {
                     "role": "observed_ms",
-                    "path": str(observed_ms),
+                    "path": str(recorded_observed_ms),
                     "lifecycle": "temporary",
                 }
             ],
@@ -457,13 +525,177 @@ def _write_branch_simulation_reports(
     )
 
 
-def _existing_sample_ids(dataset_index: Path) -> set[str]:
+def _has_border_connected_common_zeros(sample: Any) -> bool:
+    """Recognize the old filled CASA PB mask and reject ambiguous zero holes."""
+    import numpy as np
+
+    from scripts.preprocessing import validate_fits_products
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        planes = validate_fits_products(sample.products)
+    common_zero = np.logical_and.reduce(
+        [planes[name].values == 0.0 for name in ("dirty", "clean", "residual")]
+    )
+    height, width = common_zero.shape
+    centre_rows = {(height - 1) // 2, height // 2}
+    centre_columns = {(width - 1) // 2, width // 2}
+    if any(common_zero[row, column] for row in centre_rows for column in centre_columns):
+        raise ValueError(f"{sample.sample_id} has shared exact-zero pixels at image centre")
+
+    connected = np.zeros_like(common_zero, dtype=bool)
+    border = np.zeros_like(common_zero, dtype=bool)
+    border[0, :] = True
+    border[-1, :] = True
+    border[:, 0] = True
+    border[:, -1] = True
+    pending = deque(
+        (int(row), int(column))
+        for row, column in np.argwhere(common_zero & border)
+    )
+    for row, column in pending:
+        connected[row, column] = True
+    while pending:
+        row, column = pending.popleft()
+        for adjacent_row, adjacent_column in (
+            (row - 1, column),
+            (row + 1, column),
+            (row, column - 1),
+            (row, column + 1),
+        ):
+            if (
+                0 <= adjacent_row < height
+                and 0 <= adjacent_column < width
+                and common_zero[adjacent_row, adjacent_column]
+                and not connected[adjacent_row, adjacent_column]
+            ):
+                connected[adjacent_row, adjacent_column] = True
+                pending.append((adjacent_row, adjacent_column))
+    interior_holes = common_zero & ~connected
+    if bool(np.any(interior_holes)):
+        raise ValueError(
+            f"{sample.sample_id} has {int(np.count_nonzero(interior_holes))} "
+            "ambiguous shared exact-zero interior pixels"
+        )
+    return bool(np.any(connected))
+
+
+def _assert_square_pb_support(sample: Any) -> None:
+    if _has_border_connected_common_zeros(sample):
+        raise ValueError(f"{sample.sample_id} still has a border-connected PB mask")
+
+
+def _assert_sample_pb_policy(sample: Any) -> None:
+    qa = json.loads(sample.imaging_qa.read_text(encoding="utf-8"))
+    actual = (qa.get("effective_imaging_parameters") or {}).get("pblimit")
+    if actual != DATASET_PBLIMIT:
+        raise ValueError(
+            f"{sample.sample_id} records pblimit={actual!r}, expected {DATASET_PBLIMIT}"
+        )
+
+
+def _audit_indexed_samples(dataset_index: Path) -> IndexedSamples:
     if not dataset_index.exists():
-        return set()
+        return IndexedSamples({}, frozenset())
     from scripts.preprocessing import load_dataset_manifest, load_sample_manifest
 
-    index = load_dataset_manifest(dataset_index)
-    return {load_sample_manifest(path).sample_id for path in index.samples}
+    index = load_dataset_manifest(dataset_index, require_samples=False)
+    unknown_labels = set(index.labels) - set(LABELS)
+    incompatible = {
+        name: (label_id, LABELS.get(name))
+        for name, label_id in index.labels.items()
+        if name in LABELS and label_id != LABELS[name]
+    }
+    if unknown_labels or incompatible:
+        raise RuntimeError(
+            "Existing dataset has incompatible labels: "
+            f"unknown={sorted(unknown_labels)}, changed={incompatible}"
+        )
+    manifests: dict[str, Any] = {}
+    repairs: set[str] = set()
+    for path in index.samples:
+        sample = load_sample_manifest(path)
+        if sample.sample_id in manifests:
+            raise RuntimeError(f"Duplicate indexed sample ID: {sample.sample_id}")
+        expected_label = LABELS.get(sample.label_name)
+        if expected_label != sample.label_id:
+            raise RuntimeError(
+                f"{sample.sample_id} label {sample.label_name}={sample.label_id} "
+                f"does not match {expected_label}"
+            )
+        manifests[sample.sample_id] = sample
+        if _has_border_connected_common_zeros(sample):
+            repairs.add(sample.sample_id)
+    return IndexedSamples(manifests, frozenset(repairs))
+
+
+def _migrate_dataset_labels(dataset_index: Path) -> None:
+    if not dataset_index.exists():
+        return
+    from scripts.preprocessing import atomic_write_json, load_dataset_manifest
+
+    index = load_dataset_manifest(dataset_index, require_samples=False)
+    incompatible = {
+        name: (label_id, LABELS.get(name))
+        for name, label_id in index.labels.items()
+        if LABELS.get(name) != label_id
+    }
+    if incompatible:
+        raise RuntimeError(f"Existing dataset labels are incompatible: {incompatible}")
+    if index.labels == LABELS:
+        return
+    atomic_write_json(
+        dataset_index,
+        {
+            "schema_version": index.schema_version,
+            "labels": LABELS,
+            "samples": [
+                path.relative_to(dataset_index.parent).as_posix()
+                for path in index.samples
+            ],
+        },
+    )
+
+
+def _append_sample_to_dataset(
+    dataset_index: Path,
+    sample: Any,
+    completed: set[str],
+) -> None:
+    """Append after the run's full audit without re-hashing every old sample."""
+    from scripts.preprocessing import atomic_write_json, load_dataset_manifest
+
+    if sample.sample_id in completed:
+        raise ValueError(f"Dataset already contains sample_id {sample.sample_id!r}")
+    if LABELS.get(sample.label_name) != sample.label_id:
+        raise ValueError(
+            f"Sample {sample.sample_id!r} has incompatible label "
+            f"{sample.label_name}={sample.label_id}"
+        )
+    if dataset_index.exists():
+        index = load_dataset_manifest(dataset_index, require_samples=False)
+        if index.labels != LABELS:
+            raise RuntimeError("Dataset label map changed after the initial audit")
+        samples = list(index.samples)
+    else:
+        samples = []
+    if sample.path in samples:
+        raise ValueError(f"Dataset already references {sample.path}")
+    try:
+        relative = sample.path.relative_to(dataset_index.parent).as_posix()
+    except ValueError as exc:
+        raise ValueError(f"Sample manifest is outside the dataset: {sample.path}") from exc
+    atomic_write_json(
+        dataset_index,
+        {
+            "schema_version": 1,
+            "labels": LABELS,
+            "samples": [
+                path.relative_to(dataset_index.parent).as_posix() for path in samples
+            ]
+            + [relative],
+        },
+    )
 
 
 def _recover_or_remove_sample(
@@ -476,7 +708,6 @@ def _recover_or_remove_sample(
     manifest_path = sample_dir / "sample.json"
     try:
         from scripts.preprocessing import (
-            add_sample_to_dataset,
             cleanup_simulation_sample,
             load_sample_manifest,
         )
@@ -485,7 +716,7 @@ def _recover_or_remove_sample(
         if sample.sample_id in completed:
             return True
         cleanup_simulation_sample(sample_dir, dry_run=False)
-        add_sample_to_dataset(dataset_index, manifest_path)
+        _append_sample_to_dataset(dataset_index, sample, completed)
         completed.add(sample.sample_id)
         print(f"Recovered completed sample: {sample.sample_id}")
         return True
@@ -548,7 +779,11 @@ def _finalize_sample(
     noise_parameters: dict[str, Any],
     thermal_noise_seed: int,
     output: Path,
-    dataset_index: Path,
+    dataset_index: Path | None,
+    *,
+    sample_root: Path | None = None,
+    provenance_root: Path | None = None,
+    corruption_plot: Path | None = None,
 ) -> Path:
     os.environ.setdefault("MPLBACKEND", "Agg")
     from scripts.corruption import (
@@ -565,9 +800,11 @@ def _finalize_sample(
 
     suffix = "not_corrupted" if variant is None else variant.label_name
     sample_id = _sample_id(source.source_id, suffix)
-    root = _sample_dir(output, sample_id)
+    final_root = _sample_dir(output, sample_id) if provenance_root is None else provenance_root
+    root = final_root if sample_root is None else sample_root
     root.mkdir(parents=True)
     observed_ms = root / f"{source.source_id}.ms"
+    recorded_observed_ms = final_root / f"{source.source_id}.ms"
     print(f"[{sample_id}] copying noiseless V")
     shutil.copytree(V_ms, observed_ms)
 
@@ -601,7 +838,11 @@ def _finalize_sample(
             str(observed_ms),
             str(gain_table),
             seed=corruption_seed,
-            diagnostic_plot=_corruption_plot_path(output, sample_id),
+            diagnostic_plot=(
+                _corruption_plot_path(output, sample_id)
+                if corruption_plot is None
+                else corruption_plot
+            ),
         )
         corruption.apply_corrtable(
             str(observed_ms),
@@ -648,6 +889,7 @@ def _finalize_sample(
         sample_dir=root,
         V_ms=V_ms,
         observed_ms=observed_ms,
+        provenance_observed_ms=recorded_observed_ms,
         noise=noise,
         corruption_seed=corruption_seed,
         thermal_noise_seed=thermal_noise_seed,
@@ -665,6 +907,7 @@ def _finalize_sample(
         keep_intermediate_products=False,
         fits_invalid_policy="fill",
         fits_fill_value=0.0,
+        pblimit=DATASET_PBLIMIT,
     )
     source_qa = json.loads(
         (source.simulation_result_dir / "qa.json").read_text(encoding="utf-8")
@@ -688,6 +931,280 @@ def _finalize_sample(
             f"eps_vis={metrics.eps_vis:.6g}, SNR_corr={metrics.SNR_corr:.6g}"
         )
     return finalized.manifest.path
+
+
+def _repair_root(output: Path) -> Path:
+    return output / "repair_transactions"
+
+
+def _repair_paths(output: Path, sample_id: str) -> dict[str, Path]:
+    if sample_id in {"", ".", ".."} or Path(sample_id).name != sample_id:
+        raise ValueError(f"Unsafe repair sample ID: {sample_id!r}")
+    transaction = _repair_root(output) / sample_id
+    return {
+        "transaction": transaction,
+        "state": transaction / "state.json",
+        "staged": transaction / "staged",
+        "backup": transaction / "backup",
+        "failed": transaction / "failed_replacement",
+        "plot": transaction / "corruption.png",
+        "live": _sample_dir(output, sample_id),
+        "final_plot": _corruption_plot_path(output, sample_id),
+    }
+
+
+def _write_repair_state(paths: dict[str, Path], sample_id: str, status: str) -> None:
+    _atomic_write_json(
+        paths["state"],
+        {
+            "schema_version": 1,
+            "sample_id": sample_id,
+            "status": status,
+            "live_sample": str(paths["live"]),
+            "backup_sample": str(paths["backup"]),
+        },
+    )
+
+
+def _load_valid_replacement(path: Path, sample_id: str) -> Any:
+    from scripts.preprocessing import load_sample_manifest
+
+    sample = load_sample_manifest(path / "sample.json")
+    if sample.sample_id != sample_id:
+        raise RuntimeError(
+            f"Repair replacement has sample ID {sample.sample_id!r}, expected {sample_id!r}"
+        )
+    _assert_square_pb_support(sample)
+    _assert_sample_pb_policy(sample)
+    return sample
+
+
+def _restore_repair_backup(
+    paths: dict[str, Path], sample_id: str, cause: Exception
+) -> None:
+    live = paths["live"]
+    backup = paths["backup"]
+    failed = paths["failed"]
+    if live.exists():
+        if failed.exists():
+            raise RuntimeError(
+                f"Cannot preserve failed replacement for {sample_id}; {failed} exists"
+            ) from cause
+        os.replace(live, failed)
+    if backup.exists():
+        os.replace(backup, live)
+    _write_repair_state(paths, sample_id, "rolled_back")
+
+
+def _finish_repair_transaction(output: Path, sample_id: str) -> Path:
+    """Complete or safely roll back one prepared same-path sample replacement."""
+    paths = _repair_paths(output, sample_id)
+    live = paths["live"]
+    staged = paths["staged"]
+    backup = paths["backup"]
+    try:
+        if staged.exists() and not backup.exists():
+            _load_valid_replacement(staged, sample_id)
+            if not live.is_dir():
+                raise RuntimeError(f"Cannot back up missing live sample: {live}")
+            os.replace(live, backup)
+            _write_repair_state(paths, sample_id, "old_moved")
+        if staged.exists() and not live.exists():
+            os.replace(staged, live)
+        replacement = _load_valid_replacement(live, sample_id)
+        if not backup.is_dir():
+            raise RuntimeError(f"Repair transaction has no recoverable backup: {backup}")
+        if paths["plot"].is_file():
+            paths["final_plot"].parent.mkdir(parents=True, exist_ok=True)
+            os.replace(paths["plot"], paths["final_plot"])
+        _write_repair_state(paths, sample_id, "committed")
+        return replacement.path
+    except Exception as exc:
+        if backup.exists():
+            _restore_repair_backup(paths, sample_id, exc)
+        raise
+
+
+def _recover_repair_transactions(output: Path) -> None:
+    root = _repair_root(output)
+    if not root.exists():
+        return
+    if root.is_symlink() or not root.is_dir():
+        raise RuntimeError(f"Invalid repair transaction root: {root}")
+    for transaction in sorted(path for path in root.iterdir() if path.is_dir()):
+        sample_id = transaction.name
+        paths = _repair_paths(output, sample_id)
+        state = (
+            json.loads(paths["state"].read_text(encoding="utf-8"))
+            if paths["state"].is_file()
+            else {}
+        )
+        status = state.get("status")
+        if status == "committed":
+            _finish_repair_transaction(output, sample_id)
+            continue
+        if status == "rolled_back":
+            if not paths["live"].is_dir():
+                raise RuntimeError(f"Rolled-back repair has no live sample: {sample_id}")
+            continue
+        if paths["backup"].exists() or status in {"prepared", "old_moved"}:
+            print(f"Recovering interrupted PB repair: {sample_id}")
+            _finish_repair_transaction(output, sample_id)
+            continue
+        if not paths["live"].is_dir():
+            raise RuntimeError(
+                f"Uncommitted repair staging exists while live sample is missing: {sample_id}"
+            )
+        print(f"Discarding uncommitted PB-repair staging: {sample_id}")
+        shutil.rmtree(transaction)
+
+
+def _same_value(old: Any, new: Any) -> bool:
+    if isinstance(old, (int, float)) and not isinstance(old, bool):
+        return isinstance(new, (int, float)) and math.isclose(
+            float(old), float(new), rel_tol=1e-10, abs_tol=0.0
+        )
+    return old == new
+
+
+def _assert_repair_equivalent(old: Any, new: Any) -> None:
+    if (old.sample_id, old.label_id, old.label_name) != (
+        new.sample_id,
+        new.label_id,
+        new.label_name,
+    ):
+        raise RuntimeError("PB repair changed the sample identity or label")
+    old_simulation = json.loads(old.simulation.read_text(encoding="utf-8"))
+    new_simulation = json.loads(new.simulation.read_text(encoding="utf-8"))
+    for location, old_value, new_value in (
+        (
+            "noise.seed",
+            (old_simulation.get("noise") or {}).get("seed"),
+            (new_simulation.get("noise") or {}).get("seed"),
+        ),
+        (
+            "shared_noise.seed",
+            (old_simulation.get("shared_noise") or {}).get("seed"),
+            (new_simulation.get("shared_noise") or {}).get("seed"),
+        ),
+    ):
+        if old_value != new_value:
+            raise RuntimeError(f"PB repair changed {location}: {old_value!r} != {new_value!r}")
+    if len(old.corruptions) != len(new.corruptions):
+        raise RuntimeError("PB repair changed the corruption-report count")
+    for old_reference, new_reference in zip(old.corruptions, new.corruptions):
+        old_report = json.loads(old_reference.corruption.read_text(encoding="utf-8"))
+        new_report = json.loads(new_reference.corruption.read_text(encoding="utf-8"))
+        comparisons = []
+        for section, keys in (
+            (
+                "context",
+                (
+                    "antenna_id",
+                    "antenna_name",
+                    "antenna_selection_seed",
+                    "error_direction_seed",
+                    "seed",
+                ),
+            ),
+            (
+                "solution",
+                (
+                    "SNR_corr_target",
+                    "SNR_corr_expected",
+                    "antenna_id",
+                    "corruption_type",
+                    "sign",
+                    "g_amp",
+                    "phi_deg",
+                    "eps_g",
+                    "eps_vis_expected",
+                ),
+            ),
+            ("metrics", ("SNR_corr", "eps_vis")),
+        ):
+            old_section = old_report.get(section) or {}
+            new_section = new_report.get(section) or {}
+            comparisons.extend(
+                (f"{section}.{key}", old_section.get(key), new_section.get(key))
+                for key in keys
+            )
+        changed = {
+            name: (old_value, new_value)
+            for name, old_value, new_value in comparisons
+            if not _same_value(old_value, new_value)
+        }
+        if changed:
+            raise RuntimeError(f"PB repair changed corruption provenance: {changed}")
+
+
+def _repair_sample(
+    source: ThermalSource,
+    variant: Variant | None,
+    antenna_id: int | None,
+    antenna_name: str | None,
+    antenna_selection_seed: int | None,
+    error_direction_seed: int | None,
+    V_ms: Path,
+    sigma: float,
+    norms: Any | None,
+    noise_model: str,
+    noise_parameters: dict[str, Any],
+    thermal_noise_seed: int,
+    output: Path,
+    old: Any,
+) -> Path:
+    sample_id = old.sample_id
+    paths = _repair_paths(output, sample_id)
+    if paths["transaction"].exists():
+        state = (
+            json.loads(paths["state"].read_text(encoding="utf-8"))
+            if paths["state"].is_file()
+            else {}
+        )
+        if state.get("status") == "rolled_back" and paths["live"].is_dir():
+            shutil.rmtree(paths["transaction"])
+        else:
+            _recover_repair_transactions(output)
+    paths["transaction"].mkdir(parents=True, exist_ok=False)
+    try:
+        staged_manifest = _finalize_sample(
+            source,
+            variant,
+            antenna_id,
+            antenna_name,
+            antenna_selection_seed,
+            error_direction_seed,
+            V_ms,
+            sigma,
+            norms,
+            noise_model,
+            noise_parameters,
+            thermal_noise_seed,
+            output,
+            None,
+            sample_root=paths["staged"],
+            provenance_root=paths["live"],
+            corruption_plot=paths["plot"],
+        )
+        from scripts.preprocessing import load_sample_manifest
+
+        replacement = load_sample_manifest(staged_manifest)
+        _assert_square_pb_support(replacement)
+        _assert_sample_pb_policy(replacement)
+        _assert_repair_equivalent(old, replacement)
+        _write_repair_state(paths, sample_id, "prepared")
+        return _finish_repair_transaction(output, sample_id)
+    except Exception:
+        if paths["transaction"].exists() and not paths["backup"].exists():
+            state = (
+                json.loads(paths["state"].read_text(encoding="utf-8"))
+                if paths["state"].is_file()
+                else {}
+            )
+            if state.get("status") != "rolled_back":
+                shutil.rmtree(paths["transaction"])
+        raise
 
 
 def _source_manifests(dataset_index: Path, source_id: str) -> dict[str, Any]:
@@ -780,21 +1297,30 @@ def _iterate_and_validate_dataset(
         load_sample_manifest,
         partition_for_sample,
         source_dataset_id,
-        validate_fits_products,
     )
 
-    index = load_dataset_manifest(dataset_index)
+    index = load_dataset_manifest(dataset_index, require_samples=False)
+    if index.labels != LABELS:
+        raise RuntimeError(f"Dataset label map is incomplete or incompatible: {index.labels}")
     label_counts = {name: 0 for name in LABELS}
     partition_counts = {name: 0 for name in PARTITION_NAMES}
     shapes: set[tuple[int, int]] = set()
     expected_sources = set(source_ids)
+    seen_ids: set[str] = set()
     for path in index.samples:
         sample = load_sample_manifest(path)
+        if sample.sample_id in seen_ids:
+            raise RuntimeError(f"Duplicate indexed sample ID: {sample.sample_id}")
+        seen_ids.add(sample.sample_id)
         source_id = source_dataset_id(sample.sample_id)
         if source_id not in expected_sources:
             raise RuntimeError(f"Unexpected source entered dataset v1: {source_id}")
-        planes = validate_fits_products(sample.products)
-        shapes.add(planes["dirty"].shape)
+        if LABELS.get(sample.label_name) != sample.label_id:
+            raise RuntimeError(f"Incorrect stable label for {sample.sample_id}")
+        _assert_square_pb_support(sample)
+        from scripts.preprocessing import load_fits_plane
+
+        shapes.add(load_fits_plane(sample.products["dirty"]).shape)
         label_counts[sample.label_name] += 1
         partition_counts[partition_for_sample(sample.sample_id)] += 1
     expected_count = len(source_ids) * len(LABELS)
@@ -895,6 +1421,11 @@ def _new_report_manifest(
             "keep_intermediate_products": False,
             "fits_invalid_policy": "fill",
             "fits_fill_value": 0.0,
+            "dataset_pblimit": DATASET_PBLIMIT,
+            "primary_beam_mask_policy": (
+                "final retained dataset imaging uses negative pblimit to suppress the "
+                "output T/F PB mask; precursor flux calibration remains unchanged"
+            ),
             "simulation_policy": (
                 "reconstruct noiseless V; corrupt and measure Delta_V; then add the "
                 "same requested thermal-noise realization to every branch"
@@ -914,6 +1445,94 @@ def _new_report_manifest(
     }
 
 
+def _resume_report_manifest(
+    report: dict[str, Any],
+    thermal_dir: Path,
+    source_ids: Sequence[str],
+    excluded_sources: Sequence[dict[str, Any]],
+) -> bool:
+    """Validate a known dataset policy and migrate only its four-level form."""
+    if Path(report.get("source_run", "")).resolve() != thermal_dir:
+        raise RuntimeError("Existing dataset run uses a different thermal source run")
+    old_source_ids = report.get("source_ids")
+    if not isinstance(old_source_ids, list) or len(old_source_ids) != len(set(old_source_ids)):
+        raise RuntimeError("Existing dataset report has invalid source_ids")
+    if not set(old_source_ids) <= set(source_ids):
+        raise RuntimeError("Existing dataset source set is not a subset of the thermal run")
+
+    expected_configuration = _new_report_manifest(
+        thermal_dir, source_ids, excluded_sources
+    )["configuration"]
+    configuration = report.get("configuration") or {}
+    levels = tuple(configuration.get("SNR_corr_targets") or ())
+    labels = configuration.get("labels")
+    legacy = levels == LEGACY_SNR_CORR_TARGETS and labels == LEGACY_LABELS
+    current = levels == SNR_CORR_TARGETS and labels == LABELS
+    if not (legacy or current):
+        raise RuntimeError(
+            "Existing dataset levels/labels are not the known four-level policy or "
+            "the current eight-level policy"
+        )
+    migration_keys = {
+        "SNR_corr_targets",
+        "labels",
+        "dataset_pblimit",
+        "primary_beam_mask_policy",
+    }
+    incompatible = {
+        key: (configuration.get(key), expected)
+        for key, expected in expected_configuration.items()
+        if key not in migration_keys and configuration.get(key) != expected
+    }
+    if incompatible:
+        raise RuntimeError(f"Existing dataset configuration is incompatible: {incompatible}")
+
+    from scripts.preprocessing import partition_for_sample
+
+    changed_partitions = {
+        item.get("id"): (item.get("partition"), partition_for_sample(item.get("id")))
+        for item in report.get("sources", [])
+        if isinstance(item, dict)
+        and isinstance(item.get("id"), str)
+        and item.get("partition") != partition_for_sample(item.get("id"))
+    }
+    if changed_partitions:
+        raise RuntimeError(
+            f"Existing source partitions changed unexpectedly: {changed_partitions}"
+        )
+
+    configuration.update(expected_configuration)
+    report["source_ids"] = list(source_ids)
+    report["source_partition_counts"] = _source_partition_counts(source_ids)
+    report["excluded_sources"] = list(excluded_sources)
+    report["dataset_iteration"] = None
+    if legacy:
+        report["sources"] = []
+    return legacy
+
+
+def _requested_samples(source_id: str) -> dict[str, Variant | None]:
+    return {
+        _sample_id(
+            source_id,
+            "not_corrupted" if variant is None else variant.label_name,
+        ): variant
+        for variant in (None, *VARIANTS)
+    }
+
+
+def _pending_samples(
+    requested: dict[str, Variant | None],
+    completed: set[str],
+    pb_repairs: set[str],
+) -> dict[str, Variant | None]:
+    return {
+        sample_id: variant
+        for sample_id, variant in requested.items()
+        if sample_id not in completed or sample_id in pb_repairs
+    }
+
+
 def run_experiment(
     *,
     source_run: str | Path | None = None,
@@ -922,6 +1541,12 @@ def run_experiment(
     from scripts.preprocessing import partition_for_sample
     from scripts.reporting import QuartoReporter
 
+    selected_thermal_dir = (
+        Path(source_run).expanduser().resolve()
+        if source_run is not None
+        else THERMAL_DIR.resolve()
+    )
+    _ensure_thermal_entries(selected_thermal_dir)
     thermal_dir, thermal_manifest, source_ids = find_thermal_run(source_run)
     sources = [
         _thermal_source(thermal_dir, thermal_manifest, source_id)
@@ -933,68 +1558,49 @@ def run_experiment(
         requested_ids=_configured_source_ids(),
     )
     if output_dir is None:
-        timestamp = datetime.now().strftime("%Y%m%dT%H%M%S")
-        output = EXPERIMENTS_ROOT / f"dataset_v1_{timestamp}"
+        output = DATASET_DIR.resolve()
     else:
         output = Path(output_dir).expanduser().resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
     output.mkdir(parents=True, exist_ok=True)
     (output / "samples").mkdir(exist_ok=True)
-    _check_disk_space(sources, output)
 
     report_qmd = output / "report.qmd"
     if not report_qmd.exists():
         shutil.copy2(REPORT_TEMPLATE, report_qmd)
+
+    dataset_index = output / "dataset.json"
+    _recover_repair_transactions(output)
+    indexed = _audit_indexed_samples(dataset_index)
+    completed = set(indexed.manifests)
+    pb_repairs = set(indexed.pb_repairs)
+    if pb_repairs:
+        print(f"Detected {len(pb_repairs)} indexed samples requiring PB repair")
+
     report_json = output / "report.json"
     if report_json.exists():
         report = json.loads(report_json.read_text(encoding="utf-8"))
-        if Path(report.get("source_run", "")).resolve() != thermal_dir:
-            raise RuntimeError("Existing dataset run uses a different thermal source run")
-        if report.get("source_ids") != list(source_ids):
-            raise RuntimeError("Existing dataset run uses a different source set")
-        existing_policy = (report.get("configuration") or {}).get(
-            "antenna_selection_policy"
+        _resume_report_manifest(
+            report, thermal_dir, source_ids, excluded_sources
         )
-        if existing_policy != ANTENNA_SELECTION_POLICY:
-            raise RuntimeError(
-                "Existing dataset run uses a different antenna-selection policy; "
-                "use a new --output-dir"
-            )
-        existing_sign_policy = (report.get("configuration") or {}).get(
-            "constant_error_sign_policy"
-        )
-        if existing_sign_policy != CONSTANT_ERROR_SIGN_POLICY:
-            raise RuntimeError(
-                "Existing dataset run uses a different error-direction policy; "
-                "use a new --output-dir"
-            )
     else:
         report = _new_report_manifest(thermal_dir, source_ids, excluded_sources)
-        _atomic_write_json(report_json, report)
-    report.setdefault("configuration", {}).update(
-        fixed_antenna_id=FIXED_ANTENNA_ID,
-        antenna_selection_policy=ANTENNA_SELECTION_POLICY,
-        fixed_error_sign=FIXED_ERROR_SIGN,
-        constant_error_sign_policy=CONSTANT_ERROR_SIGN_POLICY,
-        fits_invalid_policy="fill",
-        fits_fill_value=0.0,
-    )
+    _migrate_dataset_labels(dataset_index)
     _atomic_write_json(report_json, report)
-
-    dataset_index = output / "dataset.json"
-    completed = _existing_sample_ids(dataset_index)
     reporter = QuartoReporter(report_qmd, every=REPORT_EVERY_SOURCES)
-    variants = (None, *VARIANTS)
     requested_by_source = {
-        source.source_id: {
-            _sample_id(
-                source.source_id,
-                "not_corrupted" if variant is None else variant.label_name,
-            ): variant
-            for variant in variants
-        }
+        source.source_id: _requested_samples(source.source_id)
         for source in sources
     }
+    pending_sources = [
+        source
+        for source in sources
+        if _pending_samples(
+            requested_by_source[source.source_id], completed, pb_repairs
+        )
+    ]
+    if pending_sources:
+        _check_disk_space(pending_sources, output)
     expected_samples = {
         sample_id
         for requested in requested_by_source.values()
@@ -1014,14 +1620,23 @@ def run_experiment(
                 item
                 for item in report.get("failures", [])
                 if item.get("sample_id") not in completed
+                or item.get("sample_id") in pb_repairs
             ]
 
-            pending = {
-                sample_id: variant
-                for sample_id, variant in requested.items()
-                if sample_id not in completed
-            }
+            pending = _pending_samples(requested, completed, pb_repairs)
+            source_changed = False
+            source_has_report = any(
+                item.get("id") == source.source_id
+                for item in report.get("sources", [])
+            )
             if pending:
+                report["dataset_iteration"] = None
+                report["sources"] = [
+                    item
+                    for item in report.get("sources", [])
+                    if item.get("id") != source.source_id
+                ]
+                _atomic_write_json(report_json, report)
                 V_ms = _prepare_V_ms(source, output)
                 antenna_choices = _unflagged_antenna_choices(V_ms)
                 noise_model, noise_parameters, sigma = _noise_request(source)
@@ -1034,6 +1649,7 @@ def run_experiment(
                 norms_by_antenna: dict[int, Any] = {}
                 for sample_id, variant in pending.items():
                     path = _sample_dir(output, sample_id)
+                    is_repair = sample_id in pb_repairs
                     report["failures"] = [
                         item
                         for item in report.get("failures", [])
@@ -1079,23 +1695,51 @@ def run_experiment(
                                     )
                                 )
                             norms = norms_by_antenna[antenna_id]
-                        _finalize_sample(
-                            source,
-                            variant,
-                            antenna_id,
-                            antenna_name,
-                            antenna_selection_seed,
-                            error_direction_seed,
-                            V_ms,
-                            sigma,
-                            norms,
-                            noise_model,
-                            noise_parameters,
-                            thermal_noise_seed,
-                            output,
-                            dataset_index,
-                        )
+                        if is_repair:
+                            _repair_sample(
+                                source,
+                                variant,
+                                antenna_id,
+                                antenna_name,
+                                antenna_selection_seed,
+                                error_direction_seed,
+                                V_ms,
+                                sigma,
+                                norms,
+                                noise_model,
+                                noise_parameters,
+                                thermal_noise_seed,
+                                output,
+                                indexed.manifests[sample_id],
+                            )
+                            pb_repairs.discard(sample_id)
+                        else:
+                            finalized_path = _finalize_sample(
+                                source,
+                                variant,
+                                antenna_id,
+                                antenna_name,
+                                antenna_selection_seed,
+                                error_direction_seed,
+                                V_ms,
+                                sigma,
+                                norms,
+                                noise_model,
+                                noise_parameters,
+                                thermal_noise_seed,
+                                output,
+                                None,
+                            )
+                            from scripts.preprocessing import load_sample_manifest
+
+                            created = load_sample_manifest(finalized_path)
+                            _assert_square_pb_support(created)
+                            _assert_sample_pb_policy(created)
+                            _append_sample_to_dataset(
+                                dataset_index, created, completed
+                            )
                         completed.add(sample_id)
+                        source_changed = True
                     except Exception as exc:
                         traceback.print_exc()
                         report["failures"].append(
@@ -1105,12 +1749,17 @@ def run_experiment(
                                 "error": f"{type(exc).__name__}: {exc}",
                             }
                         )
-                        if path.exists():
+                        if not is_repair and path.exists():
                             _safe_remove_partial(path, output / "samples")
                         _atomic_write_json(report_json, report)
                         print(f"[{sample_id}] FAILED: {type(exc).__name__}: {exc}")
 
-            if set(requested) <= completed:
+            source_repairs = set(requested) & pb_repairs
+            if (
+                set(requested) <= completed
+                and not source_repairs
+                and (source_changed or not source_has_report)
+            ):
                 manifests = _source_manifests(dataset_index, source.source_id)
                 shared_limits = _shared_source_display_limits(
                     source.source_id, manifests
@@ -1167,6 +1816,7 @@ def run_experiment(
         if (
             dataset_index.exists()
             and expected_samples <= completed
+            and not pb_repairs
             and not report.get("failures")
         ):
             report["dataset_iteration"] = _iterate_and_validate_dataset(
@@ -1183,6 +1833,8 @@ def run_experiment(
     missing_samples = expected_samples - completed
     if missing_samples:
         raise RuntimeError(f"Dataset is missing {len(missing_samples)} expected samples")
+    if pb_repairs:
+        raise RuntimeError(f"Dataset still has {len(pb_repairs)} samples requiring PB repair")
     print(f"Dataset: {dataset_index}")
     print(f"Report: {output / 'report.html'}")
     print(f"Samples: {len(completed)} across {len(source_ids)} sources")

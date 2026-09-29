@@ -82,10 +82,75 @@ class FullDatasetConfigurationTests(unittest.TestCase):
             experiment._source_partition_counts(source_ids),
             {"train": 1, "test": 1, "val": 1},
         )
-        self.assertEqual(len(experiment.LABELS), 9)
+        self.assertEqual(len(experiment.LABELS), 17)
         self.assertEqual(
             set(experiment.LABELS),
             {"not_corrupted", *(v.label_name for v in experiment.VARIANTS)},
+        )
+        self.assertEqual(
+            {name: experiment.LABELS[name] for name in experiment.LEGACY_LABELS},
+            experiment.LEGACY_LABELS,
+        )
+        self.assertEqual(
+            {
+                name: experiment.LABELS[name]
+                for name in (
+                    "amp_snr_5",
+                    "amp_snr_15",
+                    "amp_snr_20",
+                    "amp_snr_40",
+                    "phase_snr_5",
+                    "phase_snr_15",
+                    "phase_snr_20",
+                    "phase_snr_40",
+                )
+            },
+            {
+                "amp_snr_5": 9,
+                "amp_snr_15": 10,
+                "amp_snr_20": 11,
+                "amp_snr_40": 12,
+                "phase_snr_5": 13,
+                "phase_snr_15": 14,
+                "phase_snr_20": 15,
+                "phase_snr_40": 16,
+            },
+        )
+
+    def test_partially_complete_source_selects_only_missing_ids(self):
+        source_id = TRAIN_IDS[0]
+        requested = experiment._requested_samples(source_id)
+        missing = {
+            f"{source_id}_amp_snr_15",
+            f"{source_id}_phase_snr_40",
+        }
+        completed = set(requested) - missing
+
+        self.assertEqual(
+            set(experiment._pending_samples(requested, completed, set())),
+            missing,
+        )
+        repair = f"{source_id}_amp_snr_10"
+        self.assertEqual(
+            set(experiment._pending_samples(requested, completed, {repair})),
+            missing | {repair},
+        )
+
+    def test_incremental_index_append_installs_full_stable_label_map(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            sample = SimpleNamespace(
+                sample_id="source_amp_snr_5",
+                label_name="amp_snr_5",
+                label_id=9,
+                path=root / "samples/source_amp_snr_5/sample.json",
+            )
+            experiment._append_sample_to_dataset(root / "dataset.json", sample, set())
+            payload = json.loads((root / "dataset.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(payload["labels"], experiment.LABELS)
+        self.assertEqual(
+            payload["samples"], ["samples/source_amp_snr_5/sample.json"]
         )
 
     def test_missing_thermal_sources_are_explicit_exclusions(self):
@@ -132,6 +197,190 @@ class FullDatasetConfigurationTests(unittest.TestCase):
         self.assertIn('physical = solution.get("phi_deg")', template)
         self.assertIn('"Amplitude gain"', template)
         self.assertIn('"Phase offset (deg)"', template)
+        self.assertIn("overflow-x: auto", template)
+        self.assertIn("repeat({columns}", template)
+
+    def test_known_four_level_report_migrates_but_policy_changes_fail(self):
+        source_ids = (TRAIN_IDS[0], TRAIN_IDS[1])
+        expected = {
+            "SNR_corr_targets": list(experiment.SNR_CORR_TARGETS),
+            "labels": dict(experiment.LABELS),
+            "base_seed": experiment.BASE_SEED,
+            "antenna_selection_policy": experiment.ANTENNA_SELECTION_POLICY,
+        }
+        report = {
+            "source_run": "/thermal",
+            "source_ids": [source_ids[0]],
+            "source_partition_counts": {"train": 1, "test": 0, "val": 0},
+            "excluded_sources": [],
+            "configuration": {
+                **expected,
+                "SNR_corr_targets": list(experiment.LEGACY_SNR_CORR_TARGETS),
+                "labels": dict(experiment.LEGACY_LABELS),
+            },
+            "sources": [{"id": source_ids[0], "partition": "train"}],
+            "dataset_iteration": {"sample_count": 9},
+        }
+        with patch.object(
+            experiment,
+            "_new_report_manifest",
+            return_value={"configuration": expected},
+        ):
+            migrated = experiment._resume_report_manifest(
+                report, Path("/thermal"), source_ids, []
+            )
+        self.assertTrue(migrated)
+        self.assertEqual(report["configuration"], expected)
+        self.assertEqual(report["source_ids"], list(source_ids))
+        self.assertEqual(report["sources"], [])
+        self.assertIsNone(report["dataset_iteration"])
+
+        incompatible = {
+            **report,
+            "configuration": {**expected, "base_seed": experiment.BASE_SEED + 1},
+        }
+        with patch.object(
+            experiment,
+            "_new_report_manifest",
+            return_value={"configuration": expected},
+        ):
+            with self.assertRaisesRegex(RuntimeError, "incompatible"):
+                experiment._resume_report_manifest(
+                    incompatible, Path("/thermal"), source_ids, []
+                )
+
+    def test_pb_support_detection_finds_border_mask_and_rejects_interior_hole(self):
+        import numpy as np
+
+        sample = SimpleNamespace(sample_id="source_amp_snr_10", products={})
+        circular = np.ones((7, 7), dtype=np.float32)
+        circular[0, :] = 0.0
+        circular[-1, :] = 0.0
+        circular[:, 0] = 0.0
+        circular[:, -1] = 0.0
+        planes = {
+            name: SimpleNamespace(values=circular.copy())
+            for name in ("dirty", "clean", "residual")
+        }
+        with patch("scripts.preprocessing.validate_fits_products", return_value=planes):
+            self.assertTrue(experiment._has_border_connected_common_zeros(sample))
+
+        ambiguous = np.ones((7, 7), dtype=np.float32)
+        ambiguous[1, 1] = 0.0
+        planes = {
+            name: SimpleNamespace(values=ambiguous.copy())
+            for name in ("dirty", "clean", "residual")
+        }
+        with patch("scripts.preprocessing.validate_fits_products", return_value=planes):
+            with self.assertRaisesRegex(ValueError, "ambiguous"):
+                experiment._has_border_connected_common_zeros(sample)
+
+    def test_prepared_repair_swap_keeps_recoverable_old_directory(self):
+        sample_id = "source_amp_snr_10"
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary)
+            paths = experiment._repair_paths(output, sample_id)
+            paths["live"].mkdir(parents=True)
+            (paths["live"] / "marker").write_text("old", encoding="utf-8")
+            paths["staged"].mkdir(parents=True)
+            (paths["staged"] / "marker").write_text("new", encoding="utf-8")
+            experiment._write_repair_state(paths, sample_id, "prepared")
+
+            replacement = SimpleNamespace(path=paths["live"] / "sample.json")
+            with patch.object(
+                experiment, "_load_valid_replacement", return_value=replacement
+            ):
+                result = experiment._finish_repair_transaction(output, sample_id)
+
+            self.assertEqual(result, replacement.path)
+            self.assertEqual(
+                (paths["live"] / "marker").read_text(encoding="utf-8"), "new"
+            )
+            self.assertEqual(
+                (paths["backup"] / "marker").read_text(encoding="utf-8"), "old"
+            )
+            state = json.loads(paths["state"].read_text(encoding="utf-8"))
+            self.assertEqual(state["status"], "committed")
+
+    def test_invalid_staged_repair_restores_the_live_sample(self):
+        sample_id = "source_amp_snr_10"
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary)
+            paths = experiment._repair_paths(output, sample_id)
+            paths["live"].mkdir(parents=True)
+            (paths["live"] / "marker").write_text("old", encoding="utf-8")
+            paths["staged"].mkdir(parents=True)
+            (paths["staged"] / "marker").write_text("new", encoding="utf-8")
+            experiment._write_repair_state(paths, sample_id, "prepared")
+
+            with patch.object(
+                experiment,
+                "_load_valid_replacement",
+                side_effect=[SimpleNamespace(), ValueError("invalid replacement")],
+            ):
+                with self.assertRaisesRegex(ValueError, "invalid replacement"):
+                    experiment._finish_repair_transaction(output, sample_id)
+
+            self.assertEqual(
+                (paths["live"] / "marker").read_text(encoding="utf-8"), "old"
+            )
+            self.assertFalse(paths["backup"].exists())
+            self.assertTrue(paths["failed"].is_dir())
+            state = json.loads(paths["state"].read_text(encoding="utf-8"))
+            self.assertEqual(state["status"], "rolled_back")
+
+    def test_repair_sample_preserves_rolled_back_failed_replacement(self):
+        sample_id = "source_amp_snr_10"
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary)
+            paths = experiment._repair_paths(output, sample_id)
+            paths["live"].mkdir(parents=True)
+            old = SimpleNamespace(sample_id=sample_id)
+
+            def fail_after_rollback(_output, _sample_id):
+                paths["failed"].mkdir()
+                experiment._write_repair_state(paths, sample_id, "rolled_back")
+                raise ValueError("invalid replacement")
+
+            with patch.object(
+                experiment,
+                "_finalize_sample",
+                return_value=paths["staged"] / "sample.json",
+            ), patch(
+                "scripts.preprocessing.load_sample_manifest",
+                return_value=SimpleNamespace(),
+            ), patch.object(
+                experiment, "_assert_square_pb_support"
+            ), patch.object(
+                experiment, "_assert_sample_pb_policy"
+            ), patch.object(
+                experiment, "_assert_repair_equivalent"
+            ), patch.object(
+                experiment,
+                "_finish_repair_transaction",
+                side_effect=fail_after_rollback,
+            ):
+                with self.assertRaisesRegex(ValueError, "invalid replacement"):
+                    experiment._repair_sample(
+                        SimpleNamespace(),
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        Path("/V.ms"),
+                        1.0,
+                        None,
+                        "simplenoise",
+                        {},
+                        1,
+                        output,
+                        old,
+                    )
+
+            self.assertTrue(paths["failed"].is_dir())
+            state = json.loads(paths["state"].read_text(encoding="utf-8"))
+            self.assertEqual(state["status"], "rolled_back")
 
     def test_run_visits_every_source_and_variant(self):
         source_ids = (TRAIN_IDS[0], TEST_IDS[0], VAL_IDS[0])
@@ -181,12 +430,17 @@ class FullDatasetConfigurationTests(unittest.TestCase):
             sys.modules, {"scripts.corruption": fake_corruption}
         ), patch("scripts.reporting.QuartoReporter", Reporter), patch.multiple(
             experiment,
+            _ensure_thermal_entries=Mock(),
             find_thermal_run=Mock(return_value=(Path("/thermal"), {}, source_ids)),
             _thermal_source=Mock(side_effect=lambda run, report, source_id: sources[source_id]),
             _thermal_exclusions=Mock(return_value=[]),
             _new_report_manifest=Mock(side_effect=manifest),
             _check_disk_space=Mock(),
-            _existing_sample_ids=Mock(return_value=set()),
+            _recover_repair_transactions=Mock(),
+            _migrate_dataset_labels=Mock(),
+            _audit_indexed_samples=Mock(
+                return_value=experiment.IndexedSamples({}, frozenset())
+            ),
             _recover_or_remove_sample=Mock(return_value=False),
             _unflagged_antenna_choices=Mock(
                 return_value=((0, "ea01"), (1, "ea02"))
@@ -195,12 +449,18 @@ class FullDatasetConfigurationTests(unittest.TestCase):
             _prepare_V_ms=Mock(return_value=Path("/V.ms")),
             _noise_request=Mock(return_value=("simplenoise", {}, 1e-4)),
             _finalize_sample=finalized,
+            _assert_square_pb_support=Mock(),
+            _assert_sample_pb_policy=Mock(),
+            _append_sample_to_dataset=Mock(),
             _source_manifests=Mock(return_value={}),
             _shared_source_display_limits=Mock(return_value={}),
             _write_comparison_plots=Mock(return_value={"panels": [], "recipes": {}}),
             _cleanup_V_work=Mock(),
             FIXED_ANTENNA_ID=None,
             FIXED_ERROR_SIGN=None,
+        ), patch(
+            "scripts.preprocessing.load_sample_manifest",
+            return_value=SimpleNamespace(),
         ):
             output = experiment.run_experiment(output_dir=temporary)
             report = json.loads(

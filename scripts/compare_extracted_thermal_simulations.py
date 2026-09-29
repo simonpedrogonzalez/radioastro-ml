@@ -20,7 +20,7 @@ import sys
 import traceback
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -432,8 +432,31 @@ def _new_manifest(total_samples: int) -> dict[str, Any]:
     }
 
 
-def main(experiment_dir: str | Path | None = None) -> Path:
-    samples = find_samples(sample_ids=SAMPLE_IDS)
+def _pending_samples(
+    samples: Sequence[Path],
+    completed: dict[str, dict[str, Any]],
+    failed: dict[str, dict[str, Any]],
+    output: Path,
+) -> list[Path]:
+    pending = []
+    for ms_path in samples:
+        sample_id = ms_path.stem
+        if sample_id in completed:
+            continue
+        partial = output / sample_id
+        if sample_id in failed and partial.exists() and any(partial.iterdir()):
+            continue
+        pending.append(ms_path)
+    return pending
+
+
+def main(
+    experiment_dir: str | Path | None = None,
+    *,
+    sample_ids: Sequence[str] | None = None,
+) -> Path:
+    selected_ids = SAMPLE_IDS if sample_ids is None else list(sample_ids)
+    samples = find_samples(sample_ids=selected_ids)
     if not samples:
         raise RuntimeError("No canonical extracted Measurement Sets were selected")
 
@@ -448,7 +471,6 @@ def main(experiment_dir: str | Path | None = None) -> Path:
         )
     output = Path(requested_dir).expanduser().resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
-    _check_disk_space(samples, output.parent)
     output.mkdir(parents=True, exist_ok=True)
 
     report_path = output / "report.qmd"
@@ -484,6 +506,9 @@ def main(experiment_dir: str | Path | None = None) -> Path:
     for entry in completed.values():
         _verify_completed_entry(entry, output)
     failed = {entry["id"]: entry for entry in manifest["failures"]}
+    pending = _pending_samples(samples, completed, failed, output)
+    if pending:
+        _check_disk_space(pending, output)
     write_manifest(manifest_path, manifest)
     reporter = QuartoReporter(report_path, every=REPORT_EVERY)
 
