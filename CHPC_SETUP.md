@@ -73,3 +73,7 @@
 Slurm stdout/stderr is in `slurm/logs/`. Every launcher invocation writes a
 manifest under `$RADIOASTRO_SCRATCH/runs/`. Scratch is temporary and not backed
 up; keep source and configuration in the clone and copy important results out.
+uv's managed Python, package cache, and project environment are kept below
+`$RADIOASTRO_SCRATCH`, avoiding the home quota.
+CASA's downloaded runtime/measures data is kept under
+`$RADIOASTRO_SCRATCH/casa/data`, not `$HOME/.casa/data`.

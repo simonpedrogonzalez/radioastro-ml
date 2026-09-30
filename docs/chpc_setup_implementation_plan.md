@@ -55,6 +55,8 @@ CHPC_GPU_GRES=gpu:1
 RADIOASTRO_SCRATCH=/scratch/general/vast/__CHPC_USERNAME__/radioastroml
 UV_PROJECT_ENVIRONMENT=/scratch/general/vast/__CHPC_USERNAME__/radioastroml/envs/ml
 UV_CACHE_DIR=/scratch/general/vast/__CHPC_USERNAME__/radioastroml/.uv-cache
+UV_PYTHON_INSTALL_DIR=/scratch/general/vast/__CHPC_USERNAME__/radioastroml/envs/python
+UV_PYTHON_BIN_DIR=/scratch/general/vast/__CHPC_USERNAME__/radioastroml/bin
 
 CASA_STANDARD_MODULE=casa
 CASA_PIPELINE_MODULE=casa-vla
@@ -81,6 +83,7 @@ Because `$HOME` is nearly full and the locked CUDA environment may be large, cre
 ```text
 /scratch/general/vast/$USER/radioastroml/
 ├── .uv-cache/
+├── casa/data/
 ├── data/
 ├── envs/ml/
 ├── outputs/

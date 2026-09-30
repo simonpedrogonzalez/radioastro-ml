@@ -84,6 +84,9 @@ case "$runtime" in
             load_module "${QUARTO_MODULE:-quarto}"
             export UV_PROJECT_ENVIRONMENT="${UV_PROJECT_ENVIRONMENT:-$RADIOASTRO_SCRATCH/envs/ml}"
             export UV_CACHE_DIR="${UV_CACHE_DIR:-$RADIOASTRO_SCRATCH/.uv-cache}"
+            export UV_PYTHON_INSTALL_DIR="${UV_PYTHON_INSTALL_DIR:-$RADIOASTRO_SCRATCH/envs/python}"
+            export UV_PYTHON_BIN_DIR="${UV_PYTHON_BIN_DIR:-$RADIOASTRO_SCRATCH/bin}"
+            export UV_MANAGED_PYTHON=true
         fi
         command_array=(uv run --project "$ROOT/ml" --no-sync "$@")
         version_text=$(uv run --project "$ROOT/ml" --no-sync python --version 2>&1 || true)
@@ -103,6 +106,9 @@ case "$runtime" in
                 module_name=${CASA_PIPELINE_MODULE:-casa-vla}
             fi
             load_module "$module_name"
+            export RADIOASTRO_CASA_DATA="${CASA_DATA_DIR:-$RADIOASTRO_SCRATCH/casa/data}"
+            export CASASITECONFIG="$ROOT/config/casasiteconfig.py"
+            mkdir -p "$RADIOASTRO_CASA_DATA"
             if [[ "$runtime" == casa ]]; then
                 casa_bin=${CASA_STANDARD_BIN:-$(command -v casa 2>/dev/null || true)}
             else

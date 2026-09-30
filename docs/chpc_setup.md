@@ -36,17 +36,29 @@ The resulting layout is:
 $RADIOASTRO_SCRATCH/
 ├── .cache/
 ├── .uv-cache/
+├── casa/data/
 ├── data/
-├── envs/ml/
+├── envs/
+│   ├── ml/
+│   └── python/
 ├── outputs/
 └── runs/
 ```
+
+The launchers set CASA's `measurespath` to `casa/data/` through
+`config/casasiteconfig.py`. On first startup CASA downloads its runtime and
+Measures data there, avoiding the home quota. Setup also creates the guarded
+compatibility symlink `~/.casa/data` for older CASA modules. Later CASA
+invocations reuse the same scratch data.
 
 Confirm that no large environment was created in the clone:
 
 ```bash
 source config/chpc.env
 test -x "$UV_PROJECT_ENVIRONMENT/bin/python"
+base_python=$("$UV_PROJECT_ENVIRONMENT/bin/python" -c \
+  'import sys; print(sys._base_executable)')
+[[ "$base_python" == "${UV_PYTHON_INSTALL_DIR:-$RADIOASTRO_SCRATCH/envs/python}"/* ]]
 test ! -d ml/.venv
 readlink data collect/extracted collect/downloads collect/experiments ml/runs runs
 ```

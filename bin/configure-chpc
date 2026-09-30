@@ -130,7 +130,10 @@ trap 'rm -f "$temporary"' EXIT
     echo 'CHPC_GPU_GRES=gpu:1'
     printf '\nRADIOASTRO_SCRATCH=%q\n' "$scratch"
     printf 'UV_PROJECT_ENVIRONMENT=%q\n' "$scratch/envs/ml"
-    printf 'UV_CACHE_DIR=%q\n\n' "$scratch/.uv-cache"
+    printf 'UV_CACHE_DIR=%q\n' "$scratch/.uv-cache"
+    printf 'UV_PYTHON_INSTALL_DIR=%q\n' "$scratch/envs/python"
+    printf 'UV_PYTHON_BIN_DIR=%q\n' "$scratch/bin"
+    printf 'CASA_DATA_DIR=%q\n\n' "$scratch/casa/data"
     echo 'UV_MODULE=uv'
     echo 'QUARTO_MODULE=quarto'
     echo 'CASA_STANDARD_MODULE=casa'
