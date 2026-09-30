@@ -17,9 +17,10 @@ validate() {
     fi
     # shellcheck disable=SC1090
     source "$OUTPUT"
-    local required=(CHPC_CPU_PARTITION CHPC_CPU_ACCOUNT CHPC_GPU_PARTITION
-                    CHPC_GPU_ACCOUNT RADIOASTRO_SCRATCH UV_PROJECT_ENVIRONMENT
-                    UV_CACHE_DIR CHPC_LOGIN_HOST)
+    local required=(CHPC_CPU_CLUSTER CHPC_CPU_PARTITION CHPC_CPU_ACCOUNT
+                    CHPC_GPU_CLUSTER CHPC_GPU_PARTITION CHPC_GPU_ACCOUNT
+                    RADIOASTRO_SCRATCH UV_PROJECT_ENVIRONMENT UV_CACHE_DIR
+                    CHPC_LOGIN_HOST)
     local name
     for name in "${required[@]}"; do
         [[ -n "${!name:-}" ]] || { echo "$OUTPUT has no value for $name" >&2; return 1; }
@@ -28,6 +29,31 @@ validate() {
         echo "RADIOASTRO_SCRATCH is not below /scratch: $RADIOASTRO_SCRATCH" >&2
         return 1
     }
+    local rows
+    if command -v sinfo >/dev/null 2>&1; then
+        rows=$(sinfo -M "$CHPC_CPU_CLUSTER" -h -o '%P|%G' 2>/dev/null) || {
+            echo "Slurm does not recognize CPU cluster $CHPC_CPU_CLUSTER" >&2
+            return 1
+        }
+        if ! printf '%s\n' "$rows" | sed 's/\*//g' | cut -d'|' -f1 | \
+                grep -Fxq "$CHPC_CPU_PARTITION"; then
+            echo "Unknown CPU partition $CHPC_CPU_PARTITION on cluster $CHPC_CPU_CLUSTER" >&2
+            return 1
+        fi
+        rows=$(sinfo -M "$CHPC_GPU_CLUSTER" -h -o '%P|%G' 2>/dev/null) || {
+            echo "Slurm does not recognize GPU cluster $CHPC_GPU_CLUSTER" >&2
+            return 1
+        }
+        if ! printf '%s\n' "$rows" | sed 's/\*//g' | \
+                awk -F'|' -v partition="$CHPC_GPU_PARTITION" \
+                    '$1 == partition && tolower($2) ~ /gpu/ { found=1 } END { exit !found }'; then
+            echo "Unknown or non-GPU partition $CHPC_GPU_PARTITION on cluster $CHPC_GPU_CLUSTER" >&2
+            echo "GPU partitions visible there:" >&2
+            printf '%s\n' "$rows" | sed 's/\*//g' | awk -F'|' \
+                'tolower($2) ~ /gpu/ {print "  " $1}' | sort -u >&2
+            return 1
+        fi
+    fi
     echo "CHPC configuration is fully resolved: $OUTPUT"
 }
 
@@ -60,17 +86,21 @@ command -v sinfo >/dev/null 2>&1 || {
 }
 
 association_rows=$(sacctmgr -nP show assoc where user="$USER" \
-    format=Account,Partition,QOS 2>/dev/null)
-accounts=$(printf '%s\n' "$association_rows" |
+    format=Cluster,Account,Partition,QOS 2>/dev/null)
+clusters=$(printf '%s\n' "$association_rows" |
     cut -d'|' -f1 | sed '/^[[:space:]]*$/d' | sort -u)
-partition_rows=$(sinfo -h -o '%P|%G' 2>/dev/null | sed 's/\*//g' | sort -u)
-cpu_partitions=$(printf '%s\n' "$partition_rows" | awk -F'|' 'tolower($2) !~ /gpu/ {print $1}' | sort -u)
-gpu_partitions=$(printf '%s\n' "$partition_rows" | awk -F'|' 'tolower($2) ~ /gpu/ {print $1}' | sort -u)
+
+accounts_for_cluster() {
+    local cluster=$1
+    printf '%s\n' "$association_rows" | awk -F'|' -v cluster="$cluster" \
+        '$1 == cluster {print $2}' | sed '/^[[:space:]]*$/d' | sort -u
+}
 
 qoses_for_account() {
-    local account=$1
-    printf '%s\n' "$association_rows" | awk -F'|' -v account="$account" \
-        '$1 == account {print $3}' | tr ',' '\n' | sed '/^[[:space:]]*$/d' | sort -u
+    local cluster=$1 account=$2
+    printf '%s\n' "$association_rows" | awk -F'|' -v cluster="$cluster" -v account="$account" \
+        '$1 == cluster && $2 == account {print $4}' | tr ',' '\n' | \
+        sed '/^[[:space:]]*$/d' | sort -u
 }
 
 choose() {
@@ -107,12 +137,18 @@ choose() {
     printf '%s\n' "$answer"
 }
 
-cpu_account=$(choose "CPU account" "${CHPC_CPU_ACCOUNT:-}" "$accounts")
-gpu_account=$(choose "GPU account" "${CHPC_GPU_ACCOUNT:-}" "$accounts")
+cpu_cluster=$(choose "CPU cluster" "${CHPC_CPU_CLUSTER:-}" "$clusters")
+gpu_cluster=$(choose "GPU cluster" "${CHPC_GPU_CLUSTER:-}" "$clusters")
+cpu_partition_rows=$(sinfo -M "$cpu_cluster" -h -o '%P|%G' 2>/dev/null | sed 's/\*//g' | sort -u)
+gpu_partition_rows=$(sinfo -M "$gpu_cluster" -h -o '%P|%G' 2>/dev/null | sed 's/\*//g' | sort -u)
+cpu_partitions=$(printf '%s\n' "$cpu_partition_rows" | awk -F'|' 'tolower($2) !~ /gpu/ {print $1}' | sort -u)
+gpu_partitions=$(printf '%s\n' "$gpu_partition_rows" | awk -F'|' 'tolower($2) ~ /gpu/ {print $1}' | sort -u)
+cpu_account=$(choose "CPU account" "${CHPC_CPU_ACCOUNT:-}" "$(accounts_for_cluster "$cpu_cluster")")
+gpu_account=$(choose "GPU account" "${CHPC_GPU_ACCOUNT:-}" "$(accounts_for_cluster "$gpu_cluster")")
 cpu_partition=$(choose "CPU partition" "${CHPC_CPU_PARTITION:-}" "$cpu_partitions")
 gpu_partition=$(choose "GPU partition" "${CHPC_GPU_PARTITION:-}" "$gpu_partitions")
-cpu_qos=$(choose "CPU QoS" "${CHPC_CPU_QOS:-}" "$(qoses_for_account "$cpu_account")" true)
-gpu_qos=$(choose "GPU QoS" "${CHPC_GPU_QOS:-}" "$(qoses_for_account "$gpu_account")" true)
+cpu_qos=$(choose "CPU QoS" "${CHPC_CPU_QOS:-}" "$(qoses_for_account "$cpu_cluster" "$cpu_account")" true)
+gpu_qos=$(choose "GPU QoS" "${CHPC_GPU_QOS:-}" "$(qoses_for_account "$gpu_cluster" "$gpu_account")" true)
 login_host=${CHPC_LOGIN_HOST:-$(hostname -f)}
 username=$(id -un)
 scratch=${RADIOASTRO_SCRATCH:-/scratch/general/vast/$username/radioastroml}
@@ -121,9 +157,11 @@ trap 'rm -f "$temporary"' EXIT
 
 {
     echo "# Private CHPC configuration generated for $username. This file is gitignored."
+    printf 'CHPC_CPU_CLUSTER=%q\n' "$cpu_cluster"
     printf 'CHPC_CPU_PARTITION=%q\n' "$cpu_partition"
     printf 'CHPC_CPU_QOS=%q\n' "$cpu_qos"
     printf 'CHPC_CPU_ACCOUNT=%q\n\n' "$cpu_account"
+    printf 'CHPC_GPU_CLUSTER=%q\n' "$gpu_cluster"
     printf 'CHPC_GPU_PARTITION=%q\n' "$gpu_partition"
     printf 'CHPC_GPU_ACCOUNT=%q\n' "$gpu_account"
     printf 'CHPC_GPU_QOS=%q\n' "$gpu_qos"

@@ -42,11 +42,13 @@ Create `config/chpc.env` from the example after cloning on CHPC. Use these defau
 
 ```bash
 # Primary non-preemptible CPU allocation
+CHPC_CPU_CLUSTER=__CHPC_CPU_CLUSTER__
 CHPC_CPU_PARTITION=__CHPC_CPU_PARTITION__
 CHPC_CPU_QOS=__CHPC_CPU_QOS__
 CHPC_CPU_ACCOUNT=__CHPC_CPU_ACCOUNT__
 
 # Primary non-preemptible general GPU allocation
+CHPC_GPU_CLUSTER=__CHPC_GPU_CLUSTER__
 CHPC_GPU_PARTITION=__CHPC_GPU_PARTITION__
 CHPC_GPU_ACCOUNT=__CHPC_GPU_ACCOUNT__
 CHPC_GPU_QOS=
@@ -76,7 +78,7 @@ Do not include freecycle or guest queues in the default path.
 
 ## Storage behavior
 
-Keep the clone in `$HOME`, for example `$HOME/radioastroml`, but do not hardcode that location. Resolve the repository root from the launcher path.
+Keep the clone in `$HOME`, for example `$HOME/radioastro-ml`, but do not hardcode that location. Resolve the repository root from the launcher path.
 
 Because `$HOME` is nearly full and the locked CUDA environment may be large, create all large or reproducible content below:
 
@@ -104,8 +106,8 @@ Scratch is temporary and not backed up. Source, configuration, and small logs st
 The CHPC bootstrap sequence should be equivalent to:
 
 ```bash
-git clone <repo-url> "$HOME/radioastroml"
-cd "$HOME/radioastroml"
+git clone <repo-url> "$HOME/radioastro-ml"
+cd "$HOME/radioastro-ml"
 bin/configure-chpc
 bin/setup-chpc
 ```

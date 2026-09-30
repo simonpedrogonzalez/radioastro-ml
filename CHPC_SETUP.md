@@ -4,11 +4,14 @@
    Slurm allocations visible to your user:
 
    ```bash
-   git clone git@github.com:simonpedrogonzalez/radioastro-ml.git "$HOME/radioastroml"
-   cd "$HOME/radioastroml"
+   git clone git@github.com:simonpedrogonzalez/radioastro-ml.git "$HOME/radioastro-ml"
+   cd "$HOME/radioastro-ml"
    bin/configure-chpc
    bin/configure-chpc --check
    ```
+
+   Configuration records the Slurm cluster as well as the partition, account,
+   and QoS so jobs can be launched from a different cluster's login node.
 
    Alternatively, securely copy an existing private `config/chpc.env` into the
    clone. The public `.example` is documentation and intentionally contains
@@ -16,7 +19,8 @@
 
 2. Build the scratch-backed environment and inspect the reported CASA modules.
    Set `CASA_PIPELINE_FLAG=--pipeline` in `config/chpc.env` only if the probe
-   requests it.
+   requests it. Setup installs the simulation and plotting dependencies into a
+   version-specific CASA user environment under scratch.
 
    ```bash
    make chpc-setup
@@ -29,8 +33,9 @@
 
    ```bash
    make cpu-session
-   cd "$HOME/radioastroml"
+   cd "$HOME/radioastro-ml"
    make check
+   exit
    ```
 
 4. Verify that the locked environment uses the allocated GPU, with no CPU
@@ -38,7 +43,7 @@
 
    ```bash
    make gpu-session
-   cd "$HOME/radioastroml"
+   cd "$HOME/radioastro-ml"
    make gpu-check
    ```
 

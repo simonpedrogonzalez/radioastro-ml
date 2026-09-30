@@ -5,8 +5,8 @@
 Run on a CHPC login node:
 
 ```bash
-git clone git@github.com:simonpedrogonzalez/radioastro-ml.git "$HOME/radioastroml"
-cd "$HOME/radioastroml"
+git clone git@github.com:simonpedrogonzalez/radioastro-ml.git "$HOME/radioastro-ml"
+cd "$HOME/radioastro-ml"
 bin/configure-chpc
 bin/configure-chpc --check
 make chpc-setup
@@ -18,12 +18,17 @@ when more than one valid choice exists. The resulting `config/chpc.env` has
 literal values and is gitignored. You can instead securely copy an existing
 private `config/chpc.env` into a fresh clone; never commit it. The public
 `config/chpc.env.example` intentionally retains placeholders.
+CPU and GPU cluster names are stored separately and passed with Slurm's
+`--clusters` option, so a Notchpeak allocation can be requested from Granite.
 
 The setup command creates the locked Python 3.12 environment and caches below
 `$RADIOASTRO_SCRATCH`, then links the repository's large data/output paths to
 scratch. It refuses to replace any existing real path. It also prints the CASA
 module versions and probes whether `casa-vla` needs `--pipeline`; copy the
 reported `CASA_PIPELINE_FLAG` value into `config/chpc.env`.
+The standard CASA module gets its own version-specific scratch user base with
+Astropy, Matplotlib, `fbm`, and `stochastic`; it does not reuse the ML virtual
+environment or install packages under `$HOME`.
 
 Compare the reported versions with the exercised references: local standard
 CASA `6.7.6.14`, and the integration fixture's CASA `6.6.6.18` with Pipeline
@@ -70,7 +75,8 @@ Request an interactive allocation, then run the command printed by the target:
 ```bash
 make cpu-session
 # In the allocation:
-cd "$HOME/radioastroml" && make check
+cd "$HOME/radioastro-ml" && make check
+exit
 ```
 
 GPU verification must report CUDA as available, the GPU name, and the tensor
@@ -79,7 +85,7 @@ result. It intentionally fails instead of silently using CPU:
 ```bash
 make gpu-session
 # In the allocation:
-cd "$HOME/radioastroml" && make gpu-check
+cd "$HOME/radioastro-ml" && make gpu-check
 ```
 
 If this fails because the locked PyTorch CUDA runtime is incompatible with the

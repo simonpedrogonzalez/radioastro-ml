@@ -422,6 +422,7 @@ class PublicContractTests(unittest.TestCase):
                 "add_thermal_noise_inplace",
                 "get_phase_center",
                 "get_reference_frequency",
+                "initialize_weights",
                 "natural_image_rms_from_simplenoise",
                 "load_simulation_report",
                 "phase_center_point_source",

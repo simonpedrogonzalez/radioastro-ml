@@ -24,6 +24,7 @@ if str(ROOT) not in sys.path:
 
 from scripts.imaging import measure_pb_region, vla_pipeline_annulus_rms
 from scripts.simulation import (
+    SIMULATION_REPORT_SCHEMA_VERSION,
     phase_center_point_source,
     phase_center_point_source_from_snr,
     simulate_ms,
@@ -182,7 +183,7 @@ class SimulationIntegrationTests(unittest.TestCase):
             self.assertTrue(result.metadata_text and result.metadata_text.is_file())
             self.assertEqual(
                 json.loads(result.metadata_json.read_text(encoding="utf-8"))["schema_version"],
-                2,
+                SIMULATION_REPORT_SCHEMA_VERSION,
             )
             self.assertEqual(_persistent_tree_hash(SOURCE_MS), original_hash)
 
