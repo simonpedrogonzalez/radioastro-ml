@@ -17,7 +17,7 @@ import torch
 from ml import dinov2, resnet18
 from ml.evaluate import METRICS
 from ml.nn_common import PARITY_CHANNELS, RAW_CHANNELS, choose_device, load_data, prepare, train_job
-from ml.report import _plot_confusion_matrices
+from ml.report import _noise_control_lines, _plot_confusion_matrices, _plot_noise_controls
 from scripts.reporting import QuartoReporter
 
 
@@ -160,14 +160,15 @@ def write_report(output: Path, expected: list[dict[str, Any]], *, render: bool =
              "# Progress", "", f"- Complete: **{len(complete)}/{len(expected)}**",
              f"- Failed this invocation: **{failed}**",
              f"- Pending: **{len(expected) - len(complete) - failed}**", "", "# Validation runs", "",
-             "| Experiment | Seed | Precision | Recall | F1 | AUROC | AUPRC | Best epoch | Parameters | Minutes |",
-             "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"]
+            "| Experiment | Seed | Precision | Recall | F1 | AUROC | AUPRC | Noise FPR | Best epoch | Parameters | Minutes |",
+             "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"]
     for experiment_id, runs in grouped.items():
         for job, result in sorted(runs, key=lambda pair: pair[0]["seed"]):
             main = result["validation"]["overall"]["main"]
             cells = ["—" if main[name] is None else f'{main[name]:.4f}' for name in METRICS]
             lines.append(f'| `{experiment_id}` | {job["seed"]} | ' + " | ".join(cells) +
-                         f' | {result["best_epoch"]} | {result["trainable_parameters"]:,} | '
+                         f' | {result["noise_controls"]["overall"]["false_positive_rate"]:.4f} | '
+                         f'{result["best_epoch"]} | {result["trainable_parameters"]:,} | '
                          f'{result["runtime_seconds"] / 60:.1f} |')
     lines += ["", "# Three-seed comparisons", "",
               "| Experiment | " + " | ".join(name.upper() for name in METRICS) + " |",
@@ -184,17 +185,23 @@ def write_report(output: Path, expected: list[dict[str, Any]], *, render: bool =
             cells.append("—" if len(values) != 3 else f"{values.mean():.4f} ± {values.std(ddof=1):.4f}")
         lines.append(f"| `{experiment_id}` | " + " | ".join(cells) + " |")
         version = f"__{dataset_sha[:12]}" if dataset_sha else ""
-        strength, confusion, loss = (figures / f"{experiment_id}{version}__{kind}.png"
-                                     for kind in ("strength", "confusion", "loss"))
-        if not strength.exists():
+        strength, confusion, loss, noise = (figures / f"{experiment_id}{version}__{kind}.png"
+                                            for kind in ("strength", "confusion", "loss", "noise"))
+        if not all(path.exists() for path in (strength, confusion, loss, noise)):
             _strength_plot([result["validation"] for _, result in runs], strength)
             _plot_confusion_matrices({f'seed {job["seed"]}': result["validation"]
                                       for job, result in runs}, confusion)
             _loss_plot([json.loads((output / job["job_id"] / "history.json").read_text())
                         for job, _ in runs], loss)
+            _plot_noise_controls({f'seed {job["seed"]}': result["noise_controls"]
+                                  for job, result in runs}, noise)
         details += [f"## `{experiment_id}`", "", f"![Loss]({loss.relative_to(output)})", "",
                     f"![Strength metrics]({strength.relative_to(output)})", "",
-                    f"![Confusion matrices]({confusion.relative_to(output)})", ""]
+                    f"![Confusion matrices]({confusion.relative_to(output)})", "",
+                    "### Increased-noise controls", "",
+                    *_noise_control_lines({f'seed {job["seed"]}': result["noise_controls"]
+                                           for job, result in runs}), "",
+                    f"![Noise-control FPR]({noise.relative_to(output)})", ""]
     if failures:
         lines += ["", "# Failures", ""] + [f"- `{job}`: {message}" for job, message in failures.items()]
     lines += ["", "# Completed comparisons", "", *details]
@@ -209,9 +216,13 @@ def run(args: argparse.Namespace) -> None:
     selected = jobs(tuple(args.models), args.phase)
     if args.max_jobs is not None: selected = selected[:args.max_jobs]
     expected = selected if args.phase == "smoke" else jobs(tuple(args.models), "all")
-    dataset_sha = _dataset_fingerprint(dataset)
+    control_index = dataset.with_name("dataset_noise_controls.json")
+    fingerprints = {"main": _dataset_fingerprint(dataset),
+                    "noise_controls": _dataset_fingerprint(control_index)}
+    dataset_sha = hashlib.sha256(json.dumps(fingerprints, sort_keys=True).encode()).hexdigest()
     splits, labels = load_data(dataset)
-    if _dataset_fingerprint(dataset) != dataset_sha:
+    if fingerprints != {"main": _dataset_fingerprint(dataset),
+                        "noise_controls": _dataset_fingerprint(control_index)}:
         raise RuntimeError("Dataset changed while it was being loaded; retry after generation stops")
     if args.clean_label not in labels: raise ValueError("--clean-label is absent from the dataset")
     device, failures, completed = choose_device(args.device), {}, 0
@@ -226,6 +237,7 @@ def run(args: argparse.Namespace) -> None:
             if args.phase == "smoke": schedule.update(epochs=1, patience=1)
             config = {**job, **schedule, "channels": list(job["channels"]), "seed": job["seed"],
                       "dataset": str(dataset), "dataset_sha256": dataset_sha, "labels": list(labels),
+                      "dataset_fingerprints": fingerprints,
                       "clean_label": args.clean_label, "batch_size": args.batch_size,
                       "weight_decay": 1e-4, "normalization": normalization,
                       "backbone_revision": ("IMAGENET1K_V1" if job["backbone"] == "resnet18"

@@ -16,7 +16,7 @@ from torch import nn
 from torch.nn import functional as F
 from torch.utils.data import DataLoader, Dataset, TensorDataset
 
-from ml.task_evaluation import evaluate_task
+from ml.task_evaluation import evaluate_noise_robustness, evaluate_task
 from scripts.preprocessing import FitsSimulationDataset, source_dataset_id
 
 
@@ -86,9 +86,15 @@ def _load_split(dataset_path: Path, partition: str) -> LoadedSplit:
 def load_data(dataset_path: str | Path) -> tuple[dict[str, LoadedSplit], tuple[int, ...]]:
     path = Path(dataset_path).expanduser().resolve()
     splits = {name: _load_split(path, name) for name in ("train", "validation")}
+    control_path = path.with_name("dataset_noise_controls.json")
+    if not control_path.is_file():
+        raise FileNotFoundError(f"Noise-control index not found: {control_path}")
+    splits["noise_controls"] = _load_split(control_path, "validation")
     labels = tuple(sorted(set(splits["train"].labels.tolist())))
     if len(labels) < 3 or set(splits["validation"].labels.tolist()) != set(labels):
         raise ValueError("Train and validation must contain the same three or more classes")
+    if set(splits["noise_controls"].labels.tolist()) != {0}:
+        raise ValueError("Noise controls must all use clean label 0")
     return splits, labels
 
 
@@ -234,14 +240,25 @@ def train_job(model: nn.Module, groups: list[dict[str, Any]], set_train_mode,
     results: dict[str, Any] = {"best_epoch": -best_key[2] + 1,
                                "runtime_seconds": time.monotonic() - started,
                                "trainable_parameters": sum(p.numel() for p in model.parameters() if p.requires_grad)}
-    rows = []
+    rows, probabilities_by_split = [], {}
     for split_name, split in splits.items():
         probabilities, loss = predict(model, split, device, batch_size)
+        probabilities_by_split[split_name] = probabilities
         truth = np.asarray([labels[int(index)] for index in split.labels])
-        results[split_name] = evaluate_task(truth, probabilities, labels, split.metadata,
-                                            clean_label=clean_label)
-        results[f"{split_name}_loss"] = loss
+        if split_name != "noise_controls":
+            results[split_name] = evaluate_task(truth, probabilities, labels, split.metadata,
+                                                clean_label=clean_label)
+            results[f"{split_name}_loss"] = loss
         rows.extend(_prediction_rows(split_name, split, probabilities, labels))
+    controls, validation = splits["noise_controls"], splits["validation"]
+    results["noise_controls"] = evaluate_noise_robustness(
+        np.asarray([labels[int(index)] for index in controls.labels]),
+        probabilities_by_split["noise_controls"], labels, controls.metadata,
+        controls.source_ids,
+        np.asarray([labels[int(index)] for index in validation.labels]),
+        probabilities_by_split["validation"], validation.metadata,
+        validation.source_ids, clean_label=clean_label,
+    )
     checkpoint = run_dir / "checkpoint.pt.tmp"
     torch.save({"model": best_state, "labels": list(labels), "normalization": config["normalization"],
                 "best_epoch": results["best_epoch"]}, checkpoint)

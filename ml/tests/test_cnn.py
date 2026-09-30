@@ -27,7 +27,13 @@ def loaded(train_shift=0.0, validation_shift=100.0):
                            ({"corruption_snr_target": 0, "sample_kind": "baseline"},
                             {"corruption_snr_target": 10, "sample_kind": "gain"},
                             {"corruption_snr_target": 10, "sample_kind": "gain"}))
-    return {"train": split(train_shift), "validation": split(validation_shift)}
+    controls = LoadedSplit(torch.stack([grid.repeat(4, 1, 1) + validation_shift]),
+                           torch.stack([grid.repeat(2, 1, 1) + validation_shift]),
+                           torch.tensor([0]), ("noise",), ("s1",),
+                           ({"corruption_snr_target": 10,
+                             "sample_kind": "increased_noise"},))
+    return {"train": split(train_shift), "validation": split(validation_shift),
+            "noise_controls": controls}
 
 
 class PreprocessingTests(unittest.TestCase):
@@ -37,12 +43,21 @@ class PreprocessingTests(unittest.TestCase):
                     "label_metadata": {"corruption_snr_target": 0 if label == 0 else 10,
                                        "sample_kind": "baseline" if label == 0 else "gain"}}
                    for label in range(3)]
-        with patch("ml.nn_common.FitsSimulationDataset", return_value=samples), \
+        controls = [{"image": torch.randn(4, 256, 256), "label": 0,
+                     "sample_id": "noise", "label_metadata": {
+                         "corruption_snr_target": 10, "sample_kind": "increased_noise"}}]
+        def dataset(*args, **kwargs):
+            return controls if kwargs["index"] == "dataset_noise_controls.json" else samples
+        with tempfile.TemporaryDirectory() as temporary, \
+             patch("ml.nn_common.FitsSimulationDataset", side_effect=dataset), \
              patch("ml.nn_common.source_dataset_id", return_value="source"):
-            splits, labels = load_data(Path("dataset.json"))
+            root = Path(temporary); (root / "dataset.json").touch()
+            (root / "dataset_noise_controls.json").touch()
+            splits, labels = load_data(root / "dataset.json")
         self.assertEqual(labels, (0, 1, 2))
         self.assertEqual(splits["train"].raw.shape, (3, 4, 224, 224))
         self.assertEqual(splits["validation"].parity.shape, (3, 2, 224, 224))
+        self.assertEqual(splits["noise_controls"].labels.tolist(), [0])
 
     def test_parity_geometry(self):
         y, x = torch.meshgrid(torch.arange(256) - 128, torch.arange(256) - 128,
@@ -151,7 +166,11 @@ class ArtifactAndReportTests(unittest.TestCase):
                     {"corruption_snr_target": 10, "sample_kind": "gain"})
         split = PreparedSplit(torch.randn(3, 4, 8, 8), torch.tensor([0, 1, 2]),
                               ("clean", "amp", "phase"), ("a", "b", "c"), metadata)
-        return {"train": split, "validation": split}
+        controls = PreparedSplit(torch.randn(1, 4, 8, 8), torch.tensor([0]),
+                                 ("noise",), ("a",),
+                                 ({"corruption_snr_target": 10,
+                                   "sample_kind": "increased_noise"},))
+        return {"train": split, "validation": split, "noise_controls": controls}
 
     def test_training_artifacts_resume_and_probability_reproduction(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -173,6 +192,8 @@ class ArtifactAndReportTests(unittest.TestCase):
                                        clean_label=0)
             self.assertAlmostEqual(reproduced["overall"]["main"]["f1"],
                                    results["validation"]["overall"]["main"]["f1"])
+            self.assertEqual(results["noise_controls"]["evaluation_kind"],
+                             "noise_robustness")
 
             expected = []
             for seed in (42, 43, 44):

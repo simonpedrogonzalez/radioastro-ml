@@ -172,4 +172,70 @@ def evaluate_task(
     return result
 
 
-__all__ = ["evaluate_task"]
+def evaluate_noise_robustness(
+    control_truth: Sequence[Any] | np.ndarray,
+    control_probabilities: Sequence[Sequence[float]] | np.ndarray,
+    labels: Sequence[Any],
+    control_metadata: Sequence[Mapping[str, Any]],
+    control_sources: Sequence[str],
+    baseline_truth: Sequence[Any] | np.ndarray,
+    baseline_probabilities: Sequence[Sequence[float]] | np.ndarray,
+    baseline_metadata: Sequence[Mapping[str, Any]],
+    baseline_sources: Sequence[str],
+    *,
+    clean_label: Any,
+) -> dict[str, Any]:
+    """Compare held-out noisy controls with matched clean source baselines."""
+
+    controls = evaluate_task(
+        control_truth, control_probabilities, labels, control_metadata,
+        clean_label=clean_label,
+    )
+    truth = np.asarray(baseline_truth)
+    scores = np.asarray(baseline_probabilities, dtype=float)
+    if len(baseline_metadata) != len(truth) or len(baseline_sources) != len(truth):
+        raise ValueError("Baseline arrays, metadata, and sources must have equal length")
+    evaluate_classification(truth, scores, labels)
+    baseline_by_source = {}
+    for index, (label, metadata, source) in enumerate(
+        zip(truth, baseline_metadata, baseline_sources, strict=True)
+    ):
+        if metadata.get("sample_kind") != "baseline":
+            continue
+        if label != clean_label or source in baseline_by_source:
+            raise ValueError("Each control source must have one clean baseline")
+        baseline_by_source[source] = index
+    if len(control_sources) != len(control_metadata):
+        raise ValueError("Control metadata and sources must have equal length")
+    try:
+        matched_indices = [baseline_by_source[source] for source in control_sources]
+    except KeyError as exc:
+        raise ValueError(f"No validation baseline for control source {exc.args[0]!r}") from exc
+    targets, _ = _metadata_arrays(control_metadata, len(control_metadata))
+    matched_scores = scores[matched_indices]
+    evaluate_classification(np.full(len(targets), clean_label), matched_scores, labels)
+    matched = _noise_controls(
+        np.full(len(targets), clean_label), matched_scores, tuple(labels), clean_label, targets
+    )
+
+    def comparison(control, baseline):
+        return {
+            **control,
+            "matched_baseline_false_positive_rate": baseline["false_positive_rate"],
+            "excess_false_positive_rate": (
+                control["false_positive_rate"] - baseline["false_positive_rate"]
+            ),
+            "matched_baseline_predicted_counts": baseline["predicted_counts"],
+        }
+
+    return {
+        "evaluation_kind": "noise_robustness",
+        "overall": comparison(controls["overall"], matched["overall"]),
+        "by_noise_snr_target": {
+            level: comparison(values, matched["by_noise_snr_target"][level])
+            for level, values in controls["by_noise_snr_target"].items()
+        },
+    }
+
+
+__all__ = ["evaluate_noise_robustness", "evaluate_task"]

@@ -2,18 +2,12 @@
 
 from __future__ import annotations
 
-import csv
 import json
-import pickle
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from ml.evaluate import METRICS
 from scripts.reporting import QuartoReporter
-
-
-CLASS_NAMES = {0: "none", 1: "amp", 2: "phase"}
 
 
 def _format_metric(value: float | None, *, bold: bool = False) -> str:
@@ -165,260 +159,114 @@ def _plot_confusion_matrices(
     plt.close(figure)
 
 
-def _plot_feature_scatter(
-    model: Any,
-    rows: list[dict[str, Any]],
-    feature_names: tuple[str, ...],
-    destination: Path,
-) -> tuple[str, str]:
-    import matplotlib
-    import numpy as np
-
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    if len(feature_names) < 2:
-        raise ValueError("At least two features are required for the feature scatter")
-    scaler = model.named_steps["standardscaler"]
-    classifier = model.named_steps["logisticregression"]
-    importance = np.max(np.abs(np.asarray(classifier.coef_, dtype=float)), axis=0)
-    selected = np.argsort(importance)[-2:][::-1]
-    selected_names = tuple(feature_names[int(index)] for index in selected)
-    validation = [row for row in rows if row["split"] == "validation"]
-    values = np.asarray(
-        [[row[name] for name in feature_names] for row in validation], dtype=float
-    )
-    standardized = scaler.transform(values)
-    truth = np.asarray([row["true_class"] for row in validation], dtype=int)
-
-    figure, axis = plt.subplots(figsize=(6.4, 5.0), constrained_layout=True)
-    colors = {0: "#4c78a8", 1: "#f58518", 2: "#54a24b"}
-    for class_id in CLASS_NAMES:
-        chosen = truth == class_id
-        axis.scatter(
-            standardized[chosen, selected[0]],
-            standardized[chosen, selected[1]],
-            s=28,
-            alpha=0.7,
-            color=colors[class_id],
-            label=CLASS_NAMES[class_id],
-        )
-    axis.axhline(0.0, color="0.75", linewidth=0.8)
-    axis.axvline(0.0, color="0.75", linewidth=0.8)
-    axis.set(
-        xlabel=f"{selected_names[0]} (standardized)",
-        ylabel=f"{selected_names[1]} (standardized)",
-    )
-    axis.grid(alpha=0.15)
-    axis.legend(title="True class", frameon=False)
-    figure.savefig(destination, dpi=160)
-    plt.close(figure)
-    return selected_names
+def _noise_control_lines(results: dict[str, dict[str, Any]]) -> list[str]:
+    lines = [
+        "| Model | Noise target | Samples | Correct rejection | FPR | Matched baseline FPR | Excess FPR | Predicted counts |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
+    ]
+    for name, result in results.items():
+        cohorts = [("all", result["overall"]), *result["by_noise_snr_target"].items()]
+        for level, values in cohorts:
+            counts = ", ".join(
+                f"{label}: {count}" for label, count in values["predicted_counts"].items()
+            )
+            lines.append(
+                f"| {name} | {level} | {values['sample_count']} | "
+                f"{values['correct_rejection_rate']:.4f} | "
+                f"{values['false_positive_rate']:.4f} | "
+                f"{values['matched_baseline_false_positive_rate']:.4f} | "
+                f"{values['excess_false_positive_rate']:+.4f} | {counts} |"
+            )
+    return lines
 
 
-def _feature_importance(
-    model: Any, feature_names: tuple[str, ...]
-) -> list[dict[str, Any]]:
-    import numpy as np
-
-    classifier = model.named_steps["logisticregression"]
-    coefficients = np.asarray(classifier.coef_, dtype=float)
-    classes = [CLASS_NAMES[int(class_id)] for class_id in classifier.classes_]
-    return sorted(
-        [
-            {
-                "feature": feature,
-                "coefficients": {
-                    class_name: float(coefficients[class_index, feature_index])
-                    for class_index, class_name in enumerate(classes)
-                },
-                "importance": float(
-                    np.max(np.abs(coefficients[:, feature_index]))
-                ),
-            }
-            for feature_index, feature in enumerate(feature_names)
-        ],
-        key=lambda row: row["importance"],
-        reverse=True,
-    )
-
-
-def _plot_feature_importance(
-    importance_rows: list[dict[str, Any]], destination: Path
+def _plot_noise_controls(
+    results: dict[str, dict[str, Any]], destination: Path
 ) -> None:
     import matplotlib
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    ordered = list(reversed(importance_rows))
-    figure, axis = plt.subplots(figsize=(8.2, 4.2), constrained_layout=True)
-    axis.barh(
-        [row["feature"] for row in ordered],
-        [row["importance"] for row in ordered],
-        color="#4c78a8",
-    )
-    axis.set_xlabel("Maximum absolute standardized coefficient")
-    axis.grid(axis="x", alpha=0.25)
+    figure, axis = plt.subplots(figsize=(8.5, 5), constrained_layout=True)
+    for name, result in results.items():
+        pairs = sorted(
+            (float(level), values)
+            for level, values in result["by_noise_snr_target"].items()
+        )
+        levels = [level for level, _ in pairs]
+        values = [values for _, values in pairs]
+        line, = axis.plot(
+            levels, [value["false_positive_rate"] for value in values], marker="o", label=name
+        )
+        axis.plot(
+            levels,
+            [value["matched_baseline_false_positive_rate"] for value in values],
+            linestyle="--", color=line.get_color(), alpha=.65,
+        )
+    axis.set(xlabel="Injected-noise SNR target", ylabel="False-positive rate", ylim=(-.02, 1.02))
+    axis.grid(alpha=.25)
+    axis.legend(frameon=False)
+    axis.text(.01, .01, "solid: noisy control; dashed: matched clean baseline",
+              transform=axis.transAxes, fontsize=9)
     figure.savefig(destination, dpi=160)
     plt.close(figure)
 
 
-def write_run(
-    output_root: str | Path,
-    *,
-    dataset_path: Path,
-    model: Any,
-    prediction_rows: list[dict[str, Any]],
+def write_tabular_report(
+    run_dir: str | Path,
     results: dict[str, dict[str, Any]],
-    feature_names: tuple[str, ...],
-    split_counts: dict[str, dict[str, int]],
-    versions: dict[str, str],
+    tuning: dict[str, dict[str, Any]],
+    importance: dict[str, list[dict[str, Any]]],
 ) -> Path:
-    """Write one model, prediction table, and Quarto HTML report."""
+    """Render one canonical comparison report for tuned tabular models."""
 
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    run_dir = Path(output_root).expanduser().resolve() / f"{timestamp}_metric_logreg"
-    run_dir.mkdir(parents=True, exist_ok=False)
-
-    with (run_dir / "model.pkl").open("wb") as handle:
-        pickle.dump(model, handle)
-    with (run_dir / "predictions.csv").open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=list(prediction_rows[0]))
-        writer.writeheader()
-        writer.writerows(prediction_rows)
-    (run_dir / "results.json").write_text(
-        json.dumps(results, indent=2) + "\n", encoding="utf-8"
-    )
-    severity_plot = run_dir / "severity_performance.png"
-    confusion_plot = run_dir / "confusion_matrix.png"
-    scatter_plot = run_dir / "feature_scatter.png"
-    importance_plot = run_dir / "feature_importance.png"
-    _plot_strength({"Logistic regression": results["validation"]}, severity_plot)
-    _plot_confusion_matrices(
-        {"Logistic regression": results["validation"]}, confusion_plot
-    )
-    scatter_features = _plot_feature_scatter(
-        model, prediction_rows, feature_names, scatter_plot
-    )
-    importance_rows = _feature_importance(model, feature_names)
-    _plot_feature_importance(importance_rows, importance_plot)
-
+    run_dir = Path(run_dir)
+    validation = {name: value["validation"] for name, value in results.items()}
+    controls = {name: value["noise_controls"] for name, value in results.items()}
+    _plot_strength(validation, run_dir / "strength.png")
+    _plot_confusion_matrices(validation, run_dir / "confusion_matrices.png")
+    _plot_noise_controls(controls, run_dir / "noise_controls.png")
     lines = [
-        "# Metric logistic-regression run",
-        "",
-        f"- Dataset: `{dataset_path}`",
-        "- Labels: `none=0`, `amp=1`, `phase=2`",
-        "- Label criterion: `constant_antenna_type`",
-        (
-            "- Model: `StandardScaler -> LogisticRegression(C=1.0, "
-            "class_weight=balanced, solver=lbfgs, max_iter=1000)`"
-        ),
-        f"- Test evaluated: `{'yes' if 'test' in results else 'no'}`",
-        "",
-        "## Environment",
-        "",
-        *[f"- {name}: `{version}`" for name, version in versions.items()],
-        "",
-        "## Split sizes",
-        "",
-        "| Split | Samples | Sources |",
-        "| --- | ---: | ---: |",
-        *[
-            f'| {split} | {counts["samples"]} | {counts["sources"]} |'
-            for split, counts in split_counts.items()
-        ],
-        "",
-        "## Features",
-        "",
-        *[f"- `{name}`" for name in feature_names],
-        "",
-        "## Results",
-        "",
+        "---", 'title: "Tuned tabular corruption-detection models"', "format:", "  html:",
+        "    page-layout: full", "    toc: true", "    embed-resources: true", "---", "",
+        "# Validation comparison", "", *_comparison_lines(validation), "",
+        "![Validation confusion matrices](confusion_matrices.png)", "",
+        "# Metrics by corruption strength", "",
+        "![Five metrics for all evaluation views](strength.png)", "",
+        "# Increased-noise controls", "",
+        "All controls are true clean examples and were excluded from fitting and model selection.", "",
+        *_noise_control_lines(controls), "", "![Noise-control false positives](noise_controls.png)", "",
+        "# Hyperparameter selection", "",
+        "| Model | CV macro F1 | CV macro recall | Selected parameters |", "| --- | ---: | ---: | --- |",
     ]
-    for split, metrics in results.items():
-        lines.extend(_metric_lines(split.title(), metrics))
-    lines.extend(
-        [
-            (
-                "Corruption reports and their `SNR_corr` values were used only "
-                "for labels and grouped evaluation; they were not model inputs."
-            ),
-            "",
-            "## Feature importance",
-            "",
-            (
-                "Coefficients are fitted to standardized features. Their signs are "
-                "class-specific; the overall importance shown here is the maximum "
-                "absolute coefficient across the three classes."
-            ),
-            "",
-            "| Feature | None coefficient | Amp coefficient | Phase coefficient | Overall importance |",
-            "| --- | ---: | ---: | ---: | ---: |",
-            *[
-                f'| `{row["feature"]}` | '
-                f'{row["coefficients"]["none"]:.4f} | '
-                f'{row["coefficients"]["amp"]:.4f} | '
-                f'{row["coefficients"]["phase"]:.4f} | '
-                f'{row["importance"]:.4f} |'
-                for row in importance_rows
-            ],
-            "",
-            "![Feature importance](feature_importance.png)",
-            "",
-            "## Diagnostic plots",
-            "",
-            "### Confusion matrix",
-            "",
-            "![Validation confusion matrix](confusion_matrix.png)",
-            "",
-            "### Performance by corruption level",
-            "",
-            (
-                "Each strength cohort contains the clean baselines and every error "
-                "class at that strength. Error identification is conditional on "
-                "binary detection."
-            ),
-            "",
-            "![Performance by corruption level](severity_performance.png)",
-            "",
-            "### Most influential feature pair",
-            "",
-            (
-                "The two features were selected by the largest absolute fitted "
-                "coefficient across classes after standardization: "
-                f"`{scatter_features[0]}` and `{scatter_features[1]}`. Points are "
-                "held-out validation samples colored by true class."
-            ),
-            "",
-            "![True classes in the most influential feature pair](feature_scatter.png)",
-            "",
-        ]
-    )
-    (run_dir / "report.md").write_text("\n".join(lines), encoding="utf-8")
-    quarto_lines = [
-        "---",
-        'title: "Metric logistic-regression run"',
-        "format:",
-        "  html:",
-        "    toc: true",
-        "    embed-resources: true",
-        "---",
-        "",
-        *lines[2:],
-    ]
-    quarto_path = run_dir / "report.qmd"
-    quarto_path.write_text("\n".join(quarto_lines), encoding="utf-8")
-    QuartoReporter(quarto_path, every=1).finish()
-    if not quarto_path.with_suffix(".html").is_file():
+    for name, values in tuning.items():
+        parameters = json.dumps(values["best_params"], sort_keys=True).replace("|", "\\|")
+        lines.append(
+            f"| {name} | {values['mean_f1']:.4f} ± {values['std_f1']:.4f} | "
+            f"{values['mean_recall']:.4f} ± {values['std_recall']:.4f} | `{parameters}` |"
+        )
+    lines += ["", "# Model details", ""]
+    for name, result in validation.items():
+        lines += _metric_lines(name, result)
+        lines += ["#### Feature importance", "", "| Feature | Importance |", "| --- | ---: |"]
+        lines += [f"| `{row['feature']}` | {row['importance']:.6g} |"
+                  for row in importance[name]]
+        lines.append("")
+    qmd = run_dir / "report.qmd"
+    qmd.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    QuartoReporter(qmd, every=1).finish()
+    if not qmd.with_suffix(".html").is_file():
         raise RuntimeError("Quarto did not produce report.html")
-    return run_dir
+    return qmd
 
 
 __all__ = [
     "_comparison_lines",
     "_metric_lines",
     "_plot_confusion_matrices",
+    "_noise_control_lines",
+    "_plot_noise_controls",
     "_plot_strength",
-    "write_run",
+    "write_tabular_report",
 ]
