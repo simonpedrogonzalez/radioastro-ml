@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -22,10 +23,10 @@ def _dependencies():
     try:
         import numpy as np
         from astropy.io import fits
-        from astropy.wcs import WCS
+        from astropy.wcs import FITSFixedWarning, WCS
     except ImportError as exc:
         raise RuntimeError("NumPy and Astropy are required to load retained FITS images") from exc
-    return np, fits, WCS
+    return np, fits, WCS, FITSFixedWarning
 
 
 def _normalized_unit(value: Any, path: Path) -> str:
@@ -46,7 +47,7 @@ def load_fits_plane(
     invalid_policy: str = "error",
     fill_value: float = 0.0,
 ) -> FitsPlane:
-    np, fits, WCS = _dependencies()
+    np, fits, WCS, FITSFixedWarning = _dependencies()
     source = Path(path).expanduser().resolve()
     if invalid_policy not in {"error", "fill"}:
         raise ValueError("invalid_policy must be 'error' or 'fill'")
@@ -81,7 +82,9 @@ def load_fits_plane(
         raise ValueError(f"FITS image has invalid beam headers: {source}") from exc
     if not all(math.isfinite(value) for value in beam) or beam[0] <= 0 or beam[1] <= 0:
         raise ValueError(f"FITS image has invalid beam headers: {source}")
-    celestial = WCS(header).celestial
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", FITSFixedWarning)
+        celestial = WCS(header).celestial
     if celestial.pixel_n_dim != 2 or celestial.world_n_dim != 2:
         raise ValueError(f"FITS image has no two-dimensional celestial WCS: {source}")
     celestial_header = dict(celestial.to_header(relax=True))

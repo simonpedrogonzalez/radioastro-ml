@@ -58,16 +58,23 @@ Reuse `ml.task_evaluation.evaluate_task` and the plotting/table helpers in
   full backbone `1e-5`, DINOv2 last block `1e-5`; weight decay `1e-4`.
 - Base duration: 30 epochs, patience 5. Schedule jobs vary one factor at a time:
   LR multiplier `{1/3,3}`, five warmup epochs, or max duration `{20,40}`.
-- Select the checkpoint by validation macro F1, then macro recall, then earlier
-  epoch. Record weighted train loss and deterministic validation loss/metrics
-  each epoch.
+- Select the checkpoint by class-balanced validation cross-entropy, using the
+  training-derived class weights for both train and validation loss. Early-stop
+  patience begins after warmup.
+- The focused `residual100` diagnostic crosses residual-only input with every
+  ResNet train mode, runs all 100 epochs beginning with five warmup epochs and
+  without early stopping, and retains the minimum balanced-validation-loss
+  checkpoint.
 - On all four products, run every train mode and the schedule jobs. Channel jobs
   use ResNet `last` and DINOv2 `linear`: all products, every leave-one-out set,
   every individual product, plus `(E,O)` for ResNet. Each job has three seeds.
 
 ## Runs and report
 
-- Stable job ID: backbone, train mode, channels, schedule, seed. Write each job
+- Stable job ID: backbone, explicit trainable scope, channels, schedule, seed.
+  Scope names are ResNet `head_only`, `head_and_last`, `all` and DINOv2
+  `head_adapter`, `head_last_adapter`; the internal `mode` remains in config.
+  Write each job
   to `ml/runs/nn/<job-id>/` with `checkpoint.pt`, `config.json`, `history.json`,
   `results.json`, and `predictions.csv`. A complete matching job is resumable.
 - Evaluate probabilities with `evaluate_task`: main, clean/corrupted detection,

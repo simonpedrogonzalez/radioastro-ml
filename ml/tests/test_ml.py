@@ -12,7 +12,10 @@ from ml.evaluate import evaluate_classification
 from ml.logreg import (ALL_FEATURES, QA_FEATURES, FeatureSet,
                        features_from_dataloader, grouped_folds,
                        parity_features, tune)
-from ml.task_evaluation import evaluate_noise_robustness, evaluate_task
+from ml.report import (_noise_control_count_lines, _noise_control_lines,
+                       _select_hard_samples)
+from ml.task_evaluation import (corruption_strength_weights,
+                                evaluate_noise_robustness, evaluate_task)
 
 
 def _qa(values: list[float]) -> dict:
@@ -134,6 +137,14 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual(result["evaluation_kind"], "classification")
         self.assertEqual(result["overall"]["main"]["confusion_matrix"],
                          [[0, 1, 0], [0, 1, 1], [1, 0, 1]])
+        weak = float(corruption_strength_weights([10])[0])
+        np.testing.assert_allclose(
+            result["overall"]["main"]["strength_weighted_confusion_matrix"],
+            [[0, 1, 0], [0, weak, 1], [weak, 0, 1]],
+        )
+        weights = corruption_strength_weights([0, 5, 10, 15, 20, 30, 100])
+        np.testing.assert_allclose(weights[[0, 5, 6]], 1)
+        self.assertTrue(np.all(np.diff(weights[1:6]) > 0))
         detection = result["overall"]["detection"]
         self.assertAlmostEqual(detection["precision"], .75)
         self.assertAlmostEqual(detection["recall"], .75)
@@ -204,6 +215,35 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual(result["overall"]["matched_baseline_false_positive_rate"], .5)
         self.assertEqual(result["overall"]["excess_false_positive_rate"], 0)
         self.assertEqual(result["by_noise_snr_target"]["10"]["false_positive_rate"], .5)
+
+        tables = {"model": result}
+        summary = "\n".join(_noise_control_lines(tables))
+        counts = "\n".join(_noise_control_count_lines(tables))
+        self.assertIn("Original FPR", summary)
+        self.assertNotIn("Noise target", summary)
+        self.assertIn("Predicted No corruption (0)", counts)
+        self.assertIn("| model | 2 | 1 | 1 |", counts)
+
+    def test_hard_samples_require_consensus_and_prioritize_clean_then_strength(self):
+        rows = []
+        samples = [
+            ("clean-hard", 0, 0, "baseline", (2, 2)),
+            ("clean-solved", 0, 0, "baseline", (2, 0)),
+            ("strong-hard", 1, 100, "gain", (0, 2)),
+            ("weak-hard", 2, 10, "gain", (0, 1)),
+            ("strong-solved", 2, 100, "gain", (1, 2)),
+        ]
+        for sample, truth, target, kind, predictions in samples:
+            for model, predicted in zip(("a", "b"), predictions, strict=True):
+                rows.append({"model": model, "sample_id": sample, "split": "validation",
+                             "true_label": truth, "predicted_label": predicted,
+                             "corruption_snr_target": target, "sample_kind": kind})
+        selected = _select_hard_samples(rows)
+        self.assertEqual([row["sample_id"] for row in selected],
+                         ["clean-hard", "strong-hard", "weak-hard"])
+        self.assertEqual(selected[0]["prediction_counts"], {"2": 2})
+        self.assertEqual([row["sample_id"] for row in _select_hard_samples(rows, limit=2)],
+                         ["clean-hard", "strong-hard"])
 
     def test_evaluation_rejects_mixed_gain_and_noise_controls(self):
         metadata = [

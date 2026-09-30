@@ -6,8 +6,40 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 import numpy as np
+from sklearn.metrics import confusion_matrix
 
 from ml.evaluate import METRICS, evaluate_classification
+
+
+STRENGTH_SATURATION_TARGET = 30.0
+
+
+def corruption_strength_weights(targets: Sequence[float] | np.ndarray) -> np.ndarray:
+    """Weight clean as one and logarithmically saturate corrupted examples at 30."""
+
+    values = np.asarray(targets, dtype=float)
+    if values.ndim != 1 or not len(values) or not np.isfinite(values).all() or (values < 0).any():
+        raise ValueError("strength targets must be a nonempty finite nonnegative vector")
+    weights = np.minimum(
+        1.0, np.log1p(values) / np.log1p(STRENGTH_SATURATION_TARGET)
+    )
+    weights[values == 0] = 1.0
+    return weights
+
+
+def strength_weighted_confusion(
+    y_true: Sequence[Any] | np.ndarray,
+    y_predicted: Sequence[Any] | np.ndarray,
+    labels: Sequence[Any],
+    targets: Sequence[float] | np.ndarray,
+) -> list[list[float]]:
+    truth, predicted = np.asarray(y_true), np.asarray(y_predicted)
+    weights = corruption_strength_weights(targets)
+    if truth.shape != predicted.shape or truth.shape != weights.shape:
+        raise ValueError("truth, predictions, and strength targets must have equal shape")
+    return confusion_matrix(
+        truth, predicted, labels=tuple(labels), sample_weight=weights
+    ).tolist()
 
 
 def _main_view(truth, scores, labels):
@@ -164,6 +196,18 @@ def evaluate_task(
         "overall": _views(truth, scores, labels, clean_label),
         "by_corruption_snr_target": {},
     }
+    predicted = np.asarray(labels)[np.argmax(scores, axis=1)]
+    result["overall"]["main"]["strength_weighted_confusion_matrix"] = (
+        strength_weighted_confusion(truth, predicted, labels, targets)
+    )
+    result["strength_weighting"] = {
+        "formula": "clean=1; corrupted=min(1, log1p(target)/log1p(30))",
+        "saturation_target": STRENGTH_SATURATION_TARGET,
+        "by_target": {
+            f"{level:g}": float(corruption_strength_weights([level])[0])
+            for level in sorted(set(targets))
+        },
+    }
     for level in sorted(set(targets[~baseline])):
         selected = baseline | ((kinds == "gain") & (targets == level))
         result["by_corruption_snr_target"][f"{level:g}"] = _views(
@@ -238,4 +282,10 @@ def evaluate_noise_robustness(
     }
 
 
-__all__ = ["evaluate_noise_robustness", "evaluate_task"]
+__all__ = [
+    "STRENGTH_SATURATION_TARGET",
+    "corruption_strength_weights",
+    "evaluate_noise_robustness",
+    "evaluate_task",
+    "strength_weighted_confusion",
+]

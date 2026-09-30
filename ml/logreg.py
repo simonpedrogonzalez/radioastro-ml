@@ -237,8 +237,8 @@ def main(argv: list[str] | None = None) -> int:
     control_index = dataset.with_name("dataset_noise_controls.json")
     before = {"main": _fingerprint(dataset), "noise_controls": _fingerprint(control_index)}
     train = features_from_dataloader(_loader(dataset, "train"))
-    validation = features_from_dataloader(_loader(dataset, "validation"))
-    controls = features_from_dataloader(_loader(dataset, "validation", control_index.name))
+    validation = features_from_dataloader(_loader(dataset, "val"))
+    controls = features_from_dataloader(_loader(dataset, "val", control_index.name))
     after = {"main": _fingerprint(dataset), "noise_controls": _fingerprint(control_index)}
     if before != after:
         raise RuntimeError("Dataset changed while loading; retry after generation finishes")
@@ -297,7 +297,10 @@ def main(argv: list[str] | None = None) -> int:
         writer = csv.DictWriter(handle, fieldnames=list(prediction_rows[0])); writer.writeheader(); writer.writerows(prediction_rows)
     with (run_dir / "cv_results.csv").open("w", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=list(cv_rows[0])); writer.writeheader(); writer.writerows(cv_rows)
-    write_tabular_report(run_dir, results, tuning, importance)
+    write_tabular_report(
+        run_dir, results, tuning, importance,
+        dataset_path=dataset, prediction_rows=prediction_rows,
+    )
     print(f"Report: {run_dir / 'report.html'}", flush=True)
     return 0
 

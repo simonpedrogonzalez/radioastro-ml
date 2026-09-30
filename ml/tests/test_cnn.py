@@ -10,7 +10,8 @@ import torch
 from torch import nn
 
 from ml import dinov2, resnet18
-from ml.nn_common import LoadedSplit, PARITY_CHANNELS, PreparedSplit, load_data, parity_channels, prepare, rotate, train_job
+from ml.nn_common import (LoadedSplit, PARITY_CHANNELS, PreparedSplit, load_data,
+                          parity_channels, predict, prepare, rotate, train_job)
 from ml.run_nn_experiments import _complete, experiments, jobs, write_report
 from ml.task_evaluation import evaluate_task
 
@@ -38,6 +39,7 @@ def loaded(train_shift=0.0, validation_shift=100.0):
 
 class PreprocessingTests(unittest.TestCase):
     def test_dataset_loading_and_resize(self):
+        partitions = []
         samples = [{"image": torch.randn(4, 256, 256), "label": label,
                     "sample_id": f"sample-{label}",
                     "label_metadata": {"corruption_snr_target": 0 if label == 0 else 10,
@@ -47,6 +49,7 @@ class PreprocessingTests(unittest.TestCase):
                      "sample_id": "noise", "label_metadata": {
                          "corruption_snr_target": 10, "sample_kind": "increased_noise"}}]
         def dataset(*args, **kwargs):
+            partitions.append(kwargs["partition"])
             return controls if kwargs["index"] == "dataset_noise_controls.json" else samples
         with tempfile.TemporaryDirectory() as temporary, \
              patch("ml.nn_common.FitsSimulationDataset", side_effect=dataset), \
@@ -58,6 +61,7 @@ class PreprocessingTests(unittest.TestCase):
         self.assertEqual(splits["train"].raw.shape, (3, 4, 224, 224))
         self.assertEqual(splits["validation"].parity.shape, (3, 2, 224, 224))
         self.assertEqual(splits["noise_controls"].labels.tolist(), [0])
+        self.assertEqual(partitions, ["train", "val", "val"])
 
     def test_parity_geometry(self):
         y, x = torch.meshgrid(torch.arange(256) - 128, torch.arange(256) - 128,
@@ -172,6 +176,16 @@ class ArtifactAndReportTests(unittest.TestCase):
                                    "sample_kind": "increased_noise"},))
         return {"train": split, "validation": split, "noise_controls": controls}
 
+    def test_prediction_loss_uses_supplied_class_weights(self):
+        logits = torch.tensor([[2., 0., 0.], [2., 0., 0.], [2., 0., 0.]])
+        labels = torch.tensor([0, 0, 1])
+        split = PreparedSplit(logits, labels, ("a", "b", "c"), ("a", "b", "c"),
+                              ({}, {}, {}))
+        weights = torch.tensor([.5, 2., 1.])
+        _, loss = predict(nn.Identity(), split, torch.device("cpu"), 2, weights)
+        losses = nn.functional.cross_entropy(logits, labels, weight=weights, reduction="none")
+        self.assertAlmostEqual(loss, float(losses.sum() / weights[labels].sum()))
+
     def test_training_artifacts_resume_and_probability_reproduction(self):
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary) / "job"
@@ -201,15 +215,66 @@ class ArtifactAndReportTests(unittest.TestCase):
                 shutil.copytree(directory, Path(temporary) / job_id)
                 expected.append({"job_id": job_id, "experiment_id": "exp", "seed": seed})
             report = write_report(Path(temporary), expected, render=False)
-            self.assertIn("3/3", report.read_text())
-            self.assertTrue((Path(temporary) / "figures/exp__strength.png").is_file())
+            report_text = report.read_text()
+            self.assertIn("3/3", report_text)
+            self.assertIn("Corruption-strength weighting", report_text)
+            self.assertIn("Original FPR", report_text)
+            self.assertIn("Increased-noise predicted counts", report_text)
+            self.assertTrue((Path(temporary) /
+                             "figures/model_comparison__strength.png").is_file())
+            self.assertTrue((Path(temporary) /
+                             "figures/model_comparison__confusion_v3.png").is_file())
+            self.assertTrue((Path(temporary) /
+                             "figures/model_comparison__noise.png").is_file())
+            self.assertTrue((Path(temporary) / "figures/strength_weighting__v2.png").is_file())
+
+            smoke = Path(temporary) / "smoke"
+            shutil.copytree(directory, smoke / "exp__seed42")
+            smoke_report = write_report(
+                smoke,
+                [{"job_id": "exp__seed42", "experiment_id": "exp", "seed": 42}],
+                render=False,
+            )
+            smoke_text = smoke_report.read_text()
+            headings = ["# Validation comparison", "# Confusion matrices",
+                        "# Metrics by corruption strength", "# Increased-noise controls",
+                        "# Hard samples", "# Training loss by epoch"]
+            self.assertTrue(all(heading in smoke_text for heading in headings))
+            self.assertEqual(sorted(smoke_text.index(heading) for heading in headings),
+                             [smoke_text.index(heading) for heading in headings])
+            self.assertIn("| `exp` | 42 |", smoke_text)
+            self.assertNotIn("Three-seed comparisons", smoke_text)
+            self.assertIn(".hard-samples table", smoke_text)
+            self.assertEqual(smoke_text.count("![Raw and strength-weighted confusion matrices]"), 1)
+            self.assertEqual(smoke_text.count("![All-model metrics by corruption strength]"), 1)
+            self.assertEqual(smoke_text.count("![All-model noise-control comparison]"), 1)
+            self.assertTrue((smoke /
+                             "figures/model_comparison__confusion_v3.png").is_file())
+            self.assertTrue((smoke / "figures/exp__loss.png").is_file())
 
     def test_matrix_is_deduplicated_and_seeded(self):
         matrix = experiments(("resnet18", "dinov2"), "all")
         self.assertEqual(len(matrix), len({row["experiment_id"] for row in matrix}))
+        smoke_ids = {row["experiment_id"] for row in experiments(
+            ("resnet18", "dinov2"), "smoke"
+        )}
+        self.assertEqual(smoke_ids, {
+            "resnet18__head_only__d-c-r-p__base",
+            "resnet18__head_and_last__d-c-r-p__base",
+            "resnet18__all__d-c-r-p__base",
+            "dinov2__head_adapter__d-c-r-p__base",
+            "dinov2__head_last_adapter__d-c-r-p__base",
+        })
         self.assertEqual({job["seed"] for job in jobs(("resnet18",), "depth")},
                          {42, 43, 44})
         self.assertEqual(len(jobs(("resnet18", "dinov2"), "smoke")), 5)
+        residual = experiments(("resnet18",), "residual100")
+        self.assertEqual({row["experiment_id"] for row in residual}, {
+            "resnet18__head_only__r__residual100",
+            "resnet18__head_and_last__r__residual100",
+            "resnet18__all__r__residual100",
+        })
+        self.assertTrue(all(job["channels"] == ("residual",) for job in residual))
 
 
 if __name__ == "__main__":

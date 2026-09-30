@@ -85,11 +85,14 @@ def _load_split(dataset_path: Path, partition: str) -> LoadedSplit:
 
 def load_data(dataset_path: str | Path) -> tuple[dict[str, LoadedSplit], tuple[int, ...]]:
     path = Path(dataset_path).expanduser().resolve()
-    splits = {name: _load_split(path, name) for name in ("train", "validation")}
+    splits = {
+        "train": _load_split(path, "train"),
+        "validation": _load_split(path, "val"),
+    }
     control_path = path.with_name("dataset_noise_controls.json")
     if not control_path.is_file():
         raise FileNotFoundError(f"Noise-control index not found: {control_path}")
-    splits["noise_controls"] = _load_split(control_path, "validation")
+    splits["noise_controls"] = _load_split(control_path, "val")
     labels = tuple(sorted(set(splits["train"].labels.tolist())))
     if len(labels) < 3 or set(splits["validation"].labels.tolist()) != set(labels):
         raise ValueError("Train and validation must contain the same three or more classes")
@@ -150,16 +153,20 @@ def rotate(image: torch.Tensor, k: int | None = None) -> torch.Tensor:
 
 @torch.no_grad()
 def predict(model: nn.Module, split: PreparedSplit, device: torch.device,
-            batch_size: int) -> tuple[np.ndarray, float]:
+            batch_size: int,
+            class_weights: torch.Tensor | None = None) -> tuple[np.ndarray, float]:
     model.eval()
-    logits, total_loss = [], 0.0
+    logits, total_loss, loss_weight = [], 0.0, 0.0
     loader = DataLoader(TensorDataset(split.images, split.labels), batch_size=batch_size)
     for images, target in loader:
         values = model(images.to(device))
         logits.append(values.cpu())
-        total_loss += float(F.cross_entropy(values, target.to(device), reduction="sum"))
+        target = target.to(device)
+        losses = F.cross_entropy(values, target, weight=class_weights, reduction="none")
+        total_loss += float(losses.sum())
+        loss_weight += float(class_weights[target].sum()) if class_weights is not None else len(target)
     scores = torch.cat(logits).softmax(1).numpy()
-    return scores, total_loss / len(split.labels)
+    return scores, total_loss / loss_weight
 
 
 def _atomic_json(path: Path, value: Any) -> None:
@@ -199,7 +206,7 @@ def train_job(model: nn.Module, groups: list[dict[str, Any]], set_train_mode,
     base_lrs = [group["lr"] for group in optimizer.param_groups]
     loader = DataLoader(_Rotations(splits["train"]), batch_size=batch_size, shuffle=True,
                         generator=torch.Generator().manual_seed(seed))
-    history, best_state, best_key, stale = [], None, None, 0
+    history, best_state, best_loss, best_epoch, stale = [], None, float("inf"), None, 0
     started = time.monotonic()
     for epoch in range(int(config["epochs"])):
         warmup = int(config.get("warmup_epochs", 0))
@@ -217,32 +224,33 @@ def train_job(model: nn.Module, groups: list[dict[str, Any]], set_train_mode,
             loss.backward(); optimizer.step()
             loss_sum += float(losses.detach().sum())
             loss_weight += float(class_weights[target].sum())
-        probabilities, validation_loss = predict(model, splits["validation"], device, batch_size)
+        probabilities, validation_loss = predict(
+            model, splits["validation"], device, batch_size, class_weights
+        )
         truth = np.asarray([labels[int(index)] for index in splits["validation"].labels])
         metrics = evaluate_task(truth, probabilities, labels, splits["validation"].metadata,
                                 clean_label=clean_label)["overall"]["main"]
-        key = (metrics["f1"] if metrics["f1"] is not None else -1,
-               metrics["recall"] if metrics["recall"] is not None else -1, -epoch)
         history.append({"epoch": epoch + 1, "train_loss": loss_sum / loss_weight,
                         "validation_loss": validation_loss, "validation_f1": metrics["f1"],
                         "validation_recall": metrics["recall"], "lr": [g["lr"] for g in optimizer.param_groups]})
         print(f'{config["job_id"]}: epoch {epoch + 1}/{config["epochs"]} '
               f'loss={history[-1]["train_loss"]:.5g} val_f1={metrics["f1"]:.4f}', flush=True)
-        if best_key is None or key > best_key:
-            best_key, stale = key, 0
+        if validation_loss < best_loss:
+            best_loss, best_epoch, stale = validation_loss, epoch + 1, 0
             best_state = {name: value.detach().cpu().clone() for name, value in model.state_dict().items()}
-        else:
+        elif epoch + 1 > warmup:
             stale += 1
-            if stale >= int(config.get("patience", 5)):
+            patience = config.get("patience", 5)
+            if patience is not None and stale >= int(patience):
                 break
-    assert best_state is not None
+    assert best_state is not None and best_epoch is not None
     model.load_state_dict(best_state)
-    results: dict[str, Any] = {"best_epoch": -best_key[2] + 1,
+    results: dict[str, Any] = {"best_epoch": best_epoch,
                                "runtime_seconds": time.monotonic() - started,
                                "trainable_parameters": sum(p.numel() for p in model.parameters() if p.requires_grad)}
     rows, probabilities_by_split = [], {}
     for split_name, split in splits.items():
-        probabilities, loss = predict(model, split, device, batch_size)
+        probabilities, loss = predict(model, split, device, batch_size, class_weights)
         probabilities_by_split[split_name] = probabilities
         truth = np.asarray([labels[int(index)] for index in split.labels])
         if split_name != "noise_controls":
