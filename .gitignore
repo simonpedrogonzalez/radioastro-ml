@@ -233,3 +233,14 @@ AGENTS.md.backup
 AGENTS.md
 
 .agent/backup.md
+
+# CHPC-local configuration and runtime state
+config/chpc.env
+slurm/logs/
+.chpc-scratch
+/data
+/runs
+/ml/runs
+/collect/experiments
+/collect/extracted
+/collect/downloads

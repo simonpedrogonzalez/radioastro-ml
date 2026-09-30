@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
+CONFIG="$ROOT/config/chpc.env"
+[[ -f "$CONFIG" ]] || {
+    echo "Missing $CONFIG; run bin/configure-chpc or securely copy your private config" >&2
+    exit 1
+}
+"$ROOT/bin/configure-chpc" --check >/dev/null
+source "$CONFIG"
+
+usage() {
+    echo "usage: bin/submit {ml-cpu|ml-gpu|casa|casa-pipeline} <command-or-script> [args...]" >&2
+    exit 2
+}
+
+[[ $# -ge 2 ]] || usage
+profile=$1
+shift
+mkdir -p "$ROOT/slurm/logs"
+
+case "$profile" in
+    ml-cpu)
+        partition=${CHPC_CPU_PARTITION:?set CHPC_CPU_PARTITION}; qos=${CHPC_CPU_QOS:-}
+        account=${CHPC_CPU_ACCOUNT:?set CHPC_CPU_ACCOUNT}; cpus=${ML_CPU_CPUS:-8}
+        memory=${ML_CPU_MEM:-64G}; walltime=${ML_CPU_TIME:-12:00:00}; gres=
+        ;;
+    ml-gpu)
+        partition=${CHPC_GPU_PARTITION:?set CHPC_GPU_PARTITION}; qos=${CHPC_GPU_QOS:-}
+        account=${CHPC_GPU_ACCOUNT:?set CHPC_GPU_ACCOUNT}; cpus=${ML_GPU_CPUS:-4}
+        memory=${ML_GPU_MEM:-48G}; walltime=${ML_GPU_TIME:-12:00:00}
+        gres=${CHPC_GPU_GRES:-gpu:1}
+        ;;
+    casa|casa-pipeline)
+        partition=${CHPC_CPU_PARTITION:?set CHPC_CPU_PARTITION}; qos=${CHPC_CPU_QOS:-}
+        account=${CHPC_CPU_ACCOUNT:?set CHPC_CPU_ACCOUNT}; cpus=${CASA_CPUS:-8}
+        memory=${CASA_MEM:-64G}; walltime=${CASA_TIME:-24:00:00}; gres=
+        ;;
+    *) usage ;;
+esac
+
+options=(--job-name="radioastro-$profile" --partition="$partition" --account="$account"
+         --nodes=1 --ntasks=1 --cpus-per-task="$cpus" --mem="$memory" --time="$walltime"
+         --output="$ROOT/slurm/logs/%x-%j.out" --error="$ROOT/slurm/logs/%x-%j.err")
+[[ -z "$qos" ]] || options+=(--qos="$qos")
+[[ -z "$gres" ]] || options+=(--gres="$gres")
+
+exec sbatch "${options[@]}" "$ROOT/slurm/run_profile.sbatch" "$profile" "$@"

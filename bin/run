@@ -1,0 +1,165 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
+CONFIG="$ROOT/config/chpc.env"
+[[ -f "$CONFIG" ]] && source "$CONFIG"
+
+usage() {
+    echo "usage: bin/run {ml|casa|casa-pipeline} <command-or-script> [args...]" >&2
+    exit 2
+}
+
+is_chpc() {
+    [[ -n "${SLURM_JOB_ID:-}" || -d /uufs/chpc.utah.edu || "$(hostname -f 2>/dev/null || hostname)" == *.chpc.utah.edu ]]
+}
+
+is_chpc && "$ROOT/bin/configure-chpc" --check >/dev/null
+
+modules_init() {
+    type module >/dev/null 2>&1 && return
+    local init
+    for init in /etc/profile.d/modules.sh /usr/share/Modules/init/bash; do
+        if [[ -r "$init" ]]; then
+            source "$init"
+            type module >/dev/null 2>&1 && return
+        fi
+    done
+    echo "CHPC module command is unavailable" >&2
+    exit 1
+}
+
+load_module() {
+    modules_init
+    module load "$1"
+}
+
+find_macos_casa() {
+    local kind=$1 candidate
+    if [[ "$kind" == pipeline ]]; then
+        for candidate in \
+            "$HOME/Applications/CASA 2.app/Contents/MacOS/casa" \
+            "/Applications/CASA 2.app/Contents/MacOS/casa" \
+            "$HOME/Applications/CASA.app/Contents/MacOS/casa" \
+            "/Applications/CASA.app/Contents/MacOS/casa"; do
+            [[ -x "$candidate" ]] && { printf '%s\n' "$candidate"; return; }
+        done
+    else
+        for candidate in \
+            "$HOME/Applications/CASA.app/Contents/MacOS/casa" \
+            "/Applications/CASA.app/Contents/MacOS/casa"; do
+            [[ -x "$candidate" ]] && { printf '%s\n' "$candidate"; return; }
+        done
+    fi
+    command -v casa 2>/dev/null || return 1
+}
+
+[[ $# -ge 2 ]] || usage
+runtime=$1
+shift
+
+if is_chpc; then
+    : "${RADIOASTRO_SCRATCH:=/scratch/general/vast/${USER}/radioastroml}"
+    run_root="$RADIOASTRO_SCRATCH/runs"
+    cache_root="$RADIOASTRO_SCRATCH/.cache"
+else
+    run_root="${TMPDIR:-/tmp}/radioastroml-${USER}/runs"
+    cache_root="${TMPDIR:-/tmp}/radioastroml-${USER}/cache"
+fi
+run_id="$(date -u +%Y%m%dT%H%M%SZ)_${SLURM_JOB_ID:-local}_$$"
+run_dir="$run_root/$run_id"
+mkdir -p "$run_dir/tmp" "$run_dir/matplotlib" "$cache_root/torch" "$cache_root/huggingface"
+export RADIOASTRO_RUN_DIR="$run_dir"
+export TMPDIR="$run_dir/tmp"
+export MPLCONFIGDIR="$run_dir/matplotlib"
+export XDG_CACHE_HOME="$cache_root"
+export TORCH_HOME="$cache_root/torch"
+export HF_HOME="$cache_root/huggingface"
+export PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}"
+
+case "$runtime" in
+    ml)
+        if is_chpc; then
+            load_module "${UV_MODULE:-uv}"
+            load_module "${QUARTO_MODULE:-quarto}"
+            export UV_PROJECT_ENVIRONMENT="${UV_PROJECT_ENVIRONMENT:-$RADIOASTRO_SCRATCH/envs/ml}"
+            export UV_CACHE_DIR="${UV_CACHE_DIR:-$RADIOASTRO_SCRATCH/.uv-cache}"
+        fi
+        command_array=(uv run --project "$ROOT/ml" --no-sync "$@")
+        version_text=$(uv run --project "$ROOT/ml" --no-sync python --version 2>&1 || true)
+        ;;
+    casa|casa-pipeline)
+        script=$1
+        shift
+        [[ -f "$script" ]] || [[ -f "$ROOT/$script" ]] || {
+            echo "CASA script not found: $script" >&2
+            exit 2
+        }
+        [[ -f "$script" ]] || script="$ROOT/$script"
+        if is_chpc; then
+            if [[ "$runtime" == casa ]]; then
+                module_name=${CASA_STANDARD_MODULE:-casa}
+            else
+                module_name=${CASA_PIPELINE_MODULE:-casa-vla}
+            fi
+            load_module "$module_name"
+            if [[ "$runtime" == casa ]]; then
+                casa_bin=${CASA_STANDARD_BIN:-$(command -v casa 2>/dev/null || true)}
+            else
+                casa_bin=${CASA_PIPELINE_BIN:-$(command -v casa-vla 2>/dev/null || command -v casa 2>/dev/null || true)}
+            fi
+            [[ -n "$casa_bin" ]] || { echo "$module_name did not expose a CASA executable" >&2; exit 1; }
+            loaded_module=$(module -t list 2>&1 | awk '/casa/{print; exit}')
+            safe_module=${loaded_module:-$module_name}
+            safe_module=${safe_module//\//_}
+            export PYTHONUSERBASE="${RADIOASTRO_SCRATCH}/envs/casa-user/${safe_module}"
+        elif [[ "$runtime" == casa ]]; then
+            casa_bin=${CASA_STANDARD_BIN:-$(find_macos_casa standard || true)}
+        else
+            casa_bin=${CASA_PIPELINE_BIN:-$(find_macos_casa pipeline || true)}
+        fi
+        if [[ "$casa_bin" != */* ]]; then
+            casa_bin=$(command -v "$casa_bin" 2>/dev/null || true)
+        fi
+        [[ -n "${casa_bin:-}" && -x "$casa_bin" ]] || {
+            echo "CASA executable not found; set the appropriate CASA_*_BIN override" >&2
+            exit 1
+        }
+        casa_args=(--nogui --nologger)
+        if [[ "$runtime" == casa-pipeline ]]; then
+            pipeline_flag=${CASA_PIPELINE_FLAG:-}
+            [[ -n "$pipeline_flag" ]] || [[ "$(uname -s)" != Darwin ]] || pipeline_flag=--pipeline
+            [[ -z "$pipeline_flag" ]] || casa_args+=("$pipeline_flag")
+        fi
+        command_array=("$casa_bin" "${casa_args[@]}" -c "$script" "$@")
+        version_text=$("$casa_bin" --version 2>&1 | head -n 3 || true)
+        ;;
+    *) usage ;;
+esac
+
+{
+    echo "started_utc=$(date -u +%FT%TZ)"
+    echo "runtime=$runtime"
+    echo "profile=${RADIOASTRO_PROFILE:-interactive}"
+    echo "git_commit=$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || echo unavailable)"
+    echo "host=$(hostname -f 2>/dev/null || hostname)"
+    echo "slurm_job_id=${SLURM_JOB_ID:-none}"
+    printf 'command='; printf '%q ' "${command_array[@]}"; echo
+    printf 'version=%q\n' "$version_text"
+    if type module >/dev/null 2>&1; then
+        echo "modules_begin"
+        module list 2>&1 || true
+        echo "modules_end"
+    fi
+} > "$run_dir/manifest.txt"
+
+echo "Run directory: $run_dir"
+set +e
+(cd "$ROOT" && "${command_array[@]}")
+status=$?
+set -e
+{
+    echo "finished_utc=$(date -u +%FT%TZ)"
+    echo "exit_status=$status"
+} >> "$run_dir/manifest.txt"
+exit "$status"

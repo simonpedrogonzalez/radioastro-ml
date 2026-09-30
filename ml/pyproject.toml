@@ -16,3 +16,9 @@ dependencies = [
 
 [tool.uv]
 package = false
+
+[dependency-groups]
+notebook = [
+    "ipykernel",
+    "jupyterlab",
+]

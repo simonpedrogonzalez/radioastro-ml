@@ -1,0 +1,132 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
+CONFIG="$ROOT/config/chpc.env"
+[[ -f "$CONFIG" ]] || {
+    echo "Missing $CONFIG; run bin/configure-chpc or securely copy your private config" >&2
+    exit 1
+}
+"$ROOT/bin/configure-chpc" --check >/dev/null
+source "$CONFIG"
+
+is_chpc() {
+    [[ -d /uufs/chpc.utah.edu || "$(hostname -f 2>/dev/null || hostname)" == *.chpc.utah.edu ]]
+}
+
+is_chpc || { echo "Refusing CHPC setup on a non-CHPC host" >&2; exit 1; }
+: "${RADIOASTRO_SCRATCH:?set RADIOASTRO_SCRATCH in config/chpc.env}"
+[[ "$RADIOASTRO_SCRATCH" == /scratch/*/"$USER"/* ]] || {
+    echo "RADIOASTRO_SCRATCH must be a user-owned path below /scratch: $RADIOASTRO_SCRATCH" >&2
+    exit 1
+}
+
+modules_init() {
+    type module >/dev/null 2>&1 && return
+    local init
+    for init in /etc/profile.d/modules.sh /usr/share/Modules/init/bash; do
+        if [[ -r "$init" ]]; then
+            source "$init"
+            type module >/dev/null 2>&1 && return
+        fi
+    done
+    echo "CHPC module command is unavailable" >&2
+    exit 1
+}
+
+link_scratch() {
+    local link=$1 target=$2 current
+    mkdir -p "$target" "$(dirname -- "$link")"
+    if [[ -L "$link" ]]; then
+        current=$(readlink "$link")
+        [[ "$current" == "$target" ]] || {
+            echo "Refusing to replace symlink $link -> $current (expected $target)" >&2
+            exit 1
+        }
+    elif [[ -e "$link" ]]; then
+        echo "Refusing to replace real path: $link" >&2
+        exit 1
+    else
+        ln -s "$target" "$link"
+        echo "Linked $link -> $target"
+    fi
+}
+
+mkdir -p "$RADIOASTRO_SCRATCH"/{.uv-cache,.cache,data,envs/ml,outputs,runs} \
+         "$ROOT/slurm/logs"
+setup_log="$ROOT/slurm/logs/chpc-setup-$(date -u +%Y%m%dT%H%M%SZ).log"
+exec > >(tee "$setup_log") 2>&1
+echo "Setup log: $setup_log"
+link_scratch "$ROOT/data" "$RADIOASTRO_SCRATCH/data"
+link_scratch "$ROOT/collect/extracted" "$RADIOASTRO_SCRATCH/data/extracted"
+link_scratch "$ROOT/collect/downloads" "$RADIOASTRO_SCRATCH/data/downloads"
+link_scratch "$ROOT/runs" "$RADIOASTRO_SCRATCH/runs/repository"
+link_scratch "$ROOT/ml/runs" "$RADIOASTRO_SCRATCH/runs/ml"
+link_scratch "$ROOT/collect/experiments" "$RADIOASTRO_SCRATCH/outputs/collect-experiments"
+
+modules_init
+module load "${UV_MODULE:-uv}"
+module load "${QUARTO_MODULE:-quarto}"
+export UV_PROJECT_ENVIRONMENT="${UV_PROJECT_ENVIRONMENT:-$RADIOASTRO_SCRATCH/envs/ml}"
+export UV_CACHE_DIR="${UV_CACHE_DIR:-$RADIOASTRO_SCRATCH/.uv-cache}"
+uv python install 3.12
+uv sync --project "$ROOT/ml" --locked --group notebook
+
+echo "Modeling environment: $UV_PROJECT_ENVIRONMENT"
+uv run --project "$ROOT/ml" --no-sync python -c \
+    'import ml, torch; print("python/torch import: OK"); print("torch:", torch.__version__)'
+quarto --version
+module unload "${QUARTO_MODULE:-quarto}" "${UV_MODULE:-uv}" || true
+
+for casa_module in "${CASA_STANDARD_MODULE:-casa}" "${CASA_PIPELINE_MODULE:-casa-vla}"; do
+    echo "Inspecting CHPC module: $casa_module"
+    module spider "$casa_module" || true
+    module show "$casa_module" || true
+done
+
+setup_work="$RADIOASTRO_SCRATCH/runs/setup-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+mkdir -p "$setup_work"
+cd "$setup_work"
+
+module load "${CASA_STANDARD_MODULE:-casa}"
+standard_bin=${CASA_STANDARD_BIN:-$(command -v casa 2>/dev/null || true)}
+[[ "$standard_bin" == */* ]] || standard_bin=$(command -v "$standard_bin" 2>/dev/null || true)
+[[ -n "$standard_bin" ]] || { echo "Standard CASA module exposed no casa executable" >&2; exit 1; }
+"$standard_bin" --version || true
+"$standard_bin" --nogui --nologger -c \
+    'import casatasks, casatools; print("standard CASA imports: OK")'
+simulation_probe='import fbm, stochastic; print("simulation-only imports: OK")'
+if ! "$standard_bin" --nogui --nologger -c "$simulation_probe"; then
+    loaded_standard=$(module -t list 2>&1 | awk '/casa/{print; exit}')
+    safe_standard=${loaded_standard:-${CASA_STANDARD_MODULE:-casa}}
+    safe_standard=${safe_standard//\//_}
+    export PYTHONUSERBASE="$RADIOASTRO_SCRATCH/envs/casa-user/$safe_standard"
+    module_python=$(command -v python3 2>/dev/null || command -v python 2>/dev/null || true)
+    [[ -n "$module_python" ]] || {
+        echo "CASA lacks fbm/stochastic and its module exposed no Python installer" >&2
+        exit 1
+    }
+    "$module_python" -m pip install --user 'fbm==0.3.0'
+    "$module_python" -m pip install --user 'stochastic==0.6.0' --no-deps
+    "$standard_bin" --nogui --nologger -c "$simulation_probe"
+fi
+module unload "${CASA_STANDARD_MODULE:-casa}" || true
+
+module load "${CASA_PIPELINE_MODULE:-casa-vla}"
+pipeline_bin=${CASA_PIPELINE_BIN:-$(command -v casa-vla 2>/dev/null || command -v casa 2>/dev/null || true)}
+[[ "$pipeline_bin" == */* ]] || pipeline_bin=$(command -v "$pipeline_bin" 2>/dev/null || true)
+[[ -n "$pipeline_bin" ]] || { echo "CASA pipeline module exposed no executable" >&2; exit 1; }
+"$pipeline_bin" --version || true
+pipeline_probe='import pipeline; print("VLA pipeline import: OK"); print("pipeline version:", getattr(pipeline, "__version__", "unknown"))'
+if "$pipeline_bin" --nogui --nologger -c "$pipeline_probe"; then
+    echo "Set CASA_PIPELINE_FLAG= in config/chpc.env"
+elif "$pipeline_bin" --pipeline --nogui --nologger -c "$pipeline_probe"; then
+    echo "Set CASA_PIPELINE_FLAG=--pipeline in config/chpc.env"
+else
+    echo "The casa-vla module could not import pipeline with or without --pipeline" >&2
+    exit 1
+fi
+module unload "${CASA_PIPELINE_MODULE:-casa-vla}" || true
+
+echo "CHPC setup complete. Scratch is temporary and not backed up: $RADIOASTRO_SCRATCH"
+echo "Next: make cpu-session, then make check"

@@ -1,0 +1,160 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
+OUTPUT="$ROOT/config/chpc.env"
+
+usage() {
+    echo "usage: bin/configure-chpc [--check|--force|--non-interactive]" >&2
+    exit 2
+}
+
+validate() {
+    [[ -f "$OUTPUT" ]] || { echo "Missing $OUTPUT" >&2; return 1; }
+    if grep -Eq '__CHPC_|\$\{|<[^>]+>' "$OUTPUT"; then
+        echo "$OUTPUT contains unresolved placeholders or shell variables" >&2
+        return 1
+    fi
+    # shellcheck disable=SC1090
+    source "$OUTPUT"
+    local required=(CHPC_CPU_PARTITION CHPC_CPU_ACCOUNT CHPC_GPU_PARTITION
+                    CHPC_GPU_ACCOUNT RADIOASTRO_SCRATCH UV_PROJECT_ENVIRONMENT
+                    UV_CACHE_DIR CHPC_LOGIN_HOST)
+    local name
+    for name in "${required[@]}"; do
+        [[ -n "${!name:-}" ]] || { echo "$OUTPUT has no value for $name" >&2; return 1; }
+    done
+    [[ "$RADIOASTRO_SCRATCH" == /scratch/* ]] || {
+        echo "RADIOASTRO_SCRATCH is not below /scratch: $RADIOASTRO_SCRATCH" >&2
+        return 1
+    }
+    echo "CHPC configuration is fully resolved: $OUTPUT"
+}
+
+mode=write
+force=false
+interactive=true
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --check) mode=check ;;
+        --force) force=true ;;
+        --non-interactive) interactive=false ;;
+        -h|--help) usage ;;
+        *) usage ;;
+    esac
+    shift
+done
+[[ "$mode" == check ]] && { validate; exit; }
+
+[[ ! -e "$OUTPUT" || "$force" == true ]] || {
+    echo "$OUTPUT already exists; use --force to replace it" >&2
+    exit 1
+}
+command -v sacctmgr >/dev/null 2>&1 || {
+    echo "Run this command on CHPC: sacctmgr is unavailable" >&2
+    exit 1
+}
+command -v sinfo >/dev/null 2>&1 || {
+    echo "Run this command on CHPC: sinfo is unavailable" >&2
+    exit 1
+}
+
+association_rows=$(sacctmgr -nP show assoc where user="$USER" \
+    format=Account,Partition,QOS 2>/dev/null)
+accounts=$(printf '%s\n' "$association_rows" |
+    cut -d'|' -f1 | sed '/^[[:space:]]*$/d' | sort -u)
+partition_rows=$(sinfo -h -o '%P|%G' 2>/dev/null | sed 's/\*//g' | sort -u)
+cpu_partitions=$(printf '%s\n' "$partition_rows" | awk -F'|' 'tolower($2) !~ /gpu/ {print $1}' | sort -u)
+gpu_partitions=$(printf '%s\n' "$partition_rows" | awk -F'|' 'tolower($2) ~ /gpu/ {print $1}' | sort -u)
+
+qoses_for_account() {
+    local account=$1
+    printf '%s\n' "$association_rows" | awk -F'|' -v account="$account" \
+        '$1 == account {print $3}' | tr ',' '\n' | sed '/^[[:space:]]*$/d' | sort -u
+}
+
+choose() {
+    local label=$1 provided=$2 choices=$3 optional=${4:-false} count answer
+    if [[ -n "$provided" ]]; then
+        printf '%s\n' "$provided"
+        return
+    fi
+    count=$(printf '%s\n' "$choices" | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' ')
+    if [[ "$count" == 0 && "$optional" == true ]]; then
+        printf '\n'
+        return
+    fi
+    if [[ "$count" == 1 ]]; then
+        printf '%s\n' "$choices" | sed '/^[[:space:]]*$/d'
+        return
+    fi
+    [[ "$interactive" == true && -t 0 ]] || {
+        echo "Cannot choose $label automatically. Available values:" >&2
+        printf '%s\n' "$choices" >&2
+        echo "Export the corresponding CHPC_* value or run interactively." >&2
+        exit 1
+    }
+    echo "Available $label values:" >&2
+    while IFS= read -r answer; do
+        [[ -z "$answer" ]] || printf '  %s\n' "$answer" >&2
+    done <<< "$choices"
+    if [[ "$optional" == true ]]; then
+        read -r -p "$label (Enter for none): " answer
+    else
+        read -r -p "$label: " answer
+        [[ -n "$answer" ]] || { echo "$label is required" >&2; exit 1; }
+    fi
+    printf '%s\n' "$answer"
+}
+
+cpu_account=$(choose "CPU account" "${CHPC_CPU_ACCOUNT:-}" "$accounts")
+gpu_account=$(choose "GPU account" "${CHPC_GPU_ACCOUNT:-}" "$accounts")
+cpu_partition=$(choose "CPU partition" "${CHPC_CPU_PARTITION:-}" "$cpu_partitions")
+gpu_partition=$(choose "GPU partition" "${CHPC_GPU_PARTITION:-}" "$gpu_partitions")
+cpu_qos=$(choose "CPU QoS" "${CHPC_CPU_QOS:-}" "$(qoses_for_account "$cpu_account")" true)
+gpu_qos=$(choose "GPU QoS" "${CHPC_GPU_QOS:-}" "$(qoses_for_account "$gpu_account")" true)
+login_host=${CHPC_LOGIN_HOST:-$(hostname -f)}
+username=$(id -un)
+scratch=${RADIOASTRO_SCRATCH:-/scratch/general/vast/$username/radioastroml}
+temporary=$(mktemp "$ROOT/config/chpc.env.tmp.XXXXXX")
+trap 'rm -f "$temporary"' EXIT
+
+{
+    echo "# Private CHPC configuration generated for $username. This file is gitignored."
+    printf 'CHPC_CPU_PARTITION=%q\n' "$cpu_partition"
+    printf 'CHPC_CPU_QOS=%q\n' "$cpu_qos"
+    printf 'CHPC_CPU_ACCOUNT=%q\n\n' "$cpu_account"
+    printf 'CHPC_GPU_PARTITION=%q\n' "$gpu_partition"
+    printf 'CHPC_GPU_ACCOUNT=%q\n' "$gpu_account"
+    printf 'CHPC_GPU_QOS=%q\n' "$gpu_qos"
+    echo 'CHPC_GPU_GRES=gpu:1'
+    printf '\nRADIOASTRO_SCRATCH=%q\n' "$scratch"
+    printf 'UV_PROJECT_ENVIRONMENT=%q\n' "$scratch/envs/ml"
+    printf 'UV_CACHE_DIR=%q\n\n' "$scratch/.uv-cache"
+    echo 'UV_MODULE=uv'
+    echo 'QUARTO_MODULE=quarto'
+    echo 'CASA_STANDARD_MODULE=casa'
+    echo 'CASA_PIPELINE_MODULE=casa-vla'
+    echo 'CASA_PIPELINE_FLAG='
+    printf '\nCHPC_LOGIN_HOST=%q\n' "$login_host"
+    echo 'JUPYTER_PORT=8888'
+    cat <<'EOF'
+
+ML_CPU_CPUS=8
+ML_CPU_MEM=64G
+ML_CPU_TIME=12:00:00
+ML_GPU_CPUS=4
+ML_GPU_MEM=48G
+ML_GPU_TIME=12:00:00
+CASA_CPUS=8
+CASA_MEM=64G
+CASA_TIME=24:00:00
+SESSION_CPUS=4
+SESSION_MEM=32G
+SESSION_TIME=04:00:00
+EOF
+} > "$temporary"
+chmod 600 "$temporary"
+mv "$temporary" "$OUTPUT"
+trap - EXIT
+validate
