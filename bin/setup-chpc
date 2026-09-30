@@ -52,7 +52,7 @@ link_scratch() {
     fi
 }
 
-mkdir -p "$RADIOASTRO_SCRATCH"/{.uv-cache,.cache,bin,casa/data,data,envs/ml,envs/python,outputs,runs} \
+mkdir -p "$RADIOASTRO_SCRATCH"/{.uv-cache,.cache,bin,casa/data,data,envs,envs/python,outputs,runs} \
          "$ROOT/slurm/logs"
 setup_log="$ROOT/slurm/logs/chpc-setup-$(date -u +%Y%m%dT%H%M%SZ).log"
 exec > >(tee "$setup_log") 2>&1
@@ -80,14 +80,26 @@ export UV_PYTHON_INSTALL_DIR="${UV_PYTHON_INSTALL_DIR:-$RADIOASTRO_SCRATCH/envs/
 export UV_PYTHON_BIN_DIR="${UV_PYTHON_BIN_DIR:-$RADIOASTRO_SCRATCH/bin}"
 export UV_PYTHON_INSTALL_BIN=true
 export UV_MANAGED_PYTHON=true
+[[ "$UV_PROJECT_ENVIRONMENT" == "$RADIOASTRO_SCRATCH"/envs/* ]] || {
+    echo "UV_PROJECT_ENVIRONMENT must be below $RADIOASTRO_SCRATCH/envs" >&2
+    exit 1
+}
 uv python install 3.12
+stale_environment=
+environment_is_valid=false
 if [[ -x "$UV_PROJECT_ENVIRONMENT/bin/python" ]]; then
     base_python=$("$UV_PROJECT_ENVIRONMENT/bin/python" -c \
-        'import sys; print(sys._base_executable)')
-    if [[ "$base_python" != "$UV_PYTHON_INSTALL_DIR"/* ]]; then
-        echo "Recreating uv environment with scratch-managed Python (was $base_python)"
-        uv venv --clear --python 3.12 "$UV_PROJECT_ENVIRONMENT"
-    fi
+        'import sys; print(sys._base_executable)' 2>/dev/null || true)
+    [[ "$base_python" == "$UV_PYTHON_INSTALL_DIR"/* ]] && environment_is_valid=true
+fi
+if [[ -e "$UV_PROJECT_ENVIRONMENT" || -L "$UV_PROJECT_ENVIRONMENT" ]] && \
+        [[ "$environment_is_valid" == false ]]; then
+    stale_environment="${UV_PROJECT_ENVIRONMENT}.stale-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+    echo "Discarding incomplete or home-backed environment: $UV_PROJECT_ENVIRONMENT"
+    mv "$UV_PROJECT_ENVIRONMENT" "$stale_environment"
+fi
+if [[ "$environment_is_valid" == false ]]; then
+    uv venv --python 3.12 "$UV_PROJECT_ENVIRONMENT"
 fi
 uv sync --project "$ROOT/ml" --locked --group notebook
 
@@ -95,6 +107,13 @@ echo "Modeling environment: $UV_PROJECT_ENVIRONMENT"
 echo "Managed Python: $UV_PYTHON_INSTALL_DIR"
 uv run --project "$ROOT/ml" --no-sync python -c \
     'import ml, torch; print("python/torch import: OK"); print("torch:", torch.__version__)'
+if [[ -n "$stale_environment" ]]; then
+    if rm -rf -- "$stale_environment"; then
+        echo "Removed discarded environment: $stale_environment"
+    else
+        echo "WARNING: could not fully remove discarded environment: $stale_environment" >&2
+    fi
+fi
 quarto --version
 module unload "${QUARTO_MODULE:-quarto}" "${UV_MODULE:-uv}" || true
 
