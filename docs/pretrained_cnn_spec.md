@@ -1,6 +1,6 @@
 # Small pretrained CNN experiment for dataset v1
 
-Status: implemented in `ml/cnn.py` and `ml/cnn_report.py`, 2026-09-22. No CNN was trained during the original research; implementation checks and initial runs are recorded below.
+Status: superseded by [the minimal ResNet-18/DINOv2 stack](minimal_nn_approaches_plan.md); the legacy modules were removed. The historical design and results remain below.
 
 Research note: [Pretrained CNN for Constant Antenna Corruption Classification](</Users/u1528314/Documents/Obsidian Vault/Notes/Pretrained CNN for Constant Antenna Corruption Classification.md>).
 

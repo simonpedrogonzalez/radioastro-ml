@@ -17,8 +17,9 @@ import numpy as np
 import torch
 from astropy.io import fits
 from astropy.wcs import FITSFixedWarning
+from scipy.ndimage import binary_propagation
 
-from ml.cnn import residual_channels, residual_scale, support_mask
+from ml.nn_common import parity_channels
 from scripts.imaging.plot_utils import casa_image_to_png, shared_fits_display_limits
 from scripts.preprocessing import FitsSimulationDataset, source_dataset_id
 from scripts.preprocessing.schema import load_sample_manifest
@@ -40,6 +41,28 @@ format:
 @media(max-width:850px) {.parity-row {grid-template-columns:repeat(2,minmax(0,1fr))}}
 </style>
 """
+
+
+def support_mask(image):
+    if image.shape != (4, 256, 256) or not torch.isfinite(image).all():
+        raise ValueError("Expected finite (4,256,256) FITS planes")
+    filled = (image[:3] == 0).all(dim=0).numpy()
+    if filled.any():
+        boundary = filled.copy(); boundary[1:-1, 1:-1] = False
+        if not np.array_equal(binary_propagation(boundary, mask=filled), filled):
+            raise ValueError("Unexpected interior shared-zero holes")
+        if filled[128, 128]:
+            raise ValueError("Invalid support: phase centre is zero-filled")
+    return filled
+
+
+def residual_scale(residual):
+    y, x = np.indices((256, 256)); radius = np.hypot(x - 128, y - 128)
+    values = residual.numpy()[(radius >= 32) & (radius < 72)]
+    scale = float(1.4826 * np.median(np.abs(values - np.median(values))))
+    if not np.isfinite(scale) or scale <= 0:
+        raise ValueError("Residual annulus has nonpositive/nonfinite MAD scale")
+    return scale
 
 
 def select_examples(dataset):
@@ -83,7 +106,7 @@ def build_report(dataset_path, output):
         for (kind, level), sample in sorted(samples.items()):
             residual_path = sample['paths']['products']['residual']
             residual = sample['image'][2]
-            channels = residual_channels(residual, 'parity')
+            channels = torch.cat((residual[None], parity_channels(residual)))
             scale = residual_scale(residual)
             energies = (channels[1:, 1:, 1:].double() / scale).square().mean((-2, -1)).numpy()
             np.testing.assert_allclose(channels[1:, 1:, 1:].sum(0), residual[1:, 1:],

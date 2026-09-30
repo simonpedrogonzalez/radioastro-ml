@@ -1,142 +1,194 @@
+import csv
+import shutil
+import tempfile
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
 import torch
 from torch import nn
-from torchvision.models import resnet18
 
-from ml.cnn import Split, augment, configure_stage, parity_features, preload, preprocess, residual_channels, residual_scale, support_mask, train
+from ml import dinov2, resnet18
+from ml.nn_common import LoadedSplit, PARITY_CHANNELS, PreparedSplit, load_data, parity_channels, prepare, rotate, train_job
+from ml.run_nn_experiments import _complete, experiments, jobs, write_report
+from ml.task_evaluation import evaluate_task
+
+
+def loaded(train_shift=0.0, validation_shift=100.0):
+    grid = torch.linspace(-1, 1, 224 * 224).reshape(224, 224)
+
+    def split(shift):
+        raw = torch.stack([torch.stack([grid + shift + sample + channel
+                                       for channel in range(4)]) for sample in range(3)])
+        parity = raw[:, :2].clone()
+        return LoadedSplit(raw, parity, torch.tensor([0, 1, 2]),
+                           ("a", "b", "c"), ("s1", "s2", "s3"),
+                           ({"corruption_snr_target": 0, "sample_kind": "baseline"},
+                            {"corruption_snr_target": 10, "sample_kind": "gain"},
+                            {"corruption_snr_target": 10, "sample_kind": "gain"}))
+    return {"train": split(train_shift), "validation": split(validation_shift)}
 
 
 class PreprocessingTests(unittest.TestCase):
-    def setUp(self):
-        torch.manual_seed(42)
-        self.image = torch.randn(4, 256, 256)
+    def test_dataset_loading_and_resize(self):
+        samples = [{"image": torch.randn(4, 256, 256), "label": label,
+                    "sample_id": f"sample-{label}",
+                    "label_metadata": {"corruption_snr_target": 0 if label == 0 else 10,
+                                       "sample_kind": "baseline" if label == 0 else "gain"}}
+                   for label in range(3)]
+        with patch("ml.nn_common.FitsSimulationDataset", return_value=samples), \
+             patch("ml.nn_common.source_dataset_id", return_value="source"):
+            splits, labels = load_data(Path("dataset.json"))
+        self.assertEqual(labels, (0, 1, 2))
+        self.assertEqual(splits["train"].raw.shape, (3, 4, 224, 224))
+        self.assertEqual(splits["validation"].parity.shape, (3, 2, 224, 224))
 
-    def test_parity_actual_centre_and_full_field(self):
-        y, x = torch.meshgrid(torch.arange(256) - 128, torch.arange(256) - 128, indexing="ij")
-        even, odd = (x*x + y*y).float(), (x + y).float()
-        channels = residual_channels(even + odd, "parity")
-        torch.testing.assert_close(channels[1, 1:, 1:], even[1:, 1:])
-        torch.testing.assert_close(channels[2, 1:, 1:], odd[1:, 1:])
-        self.assertEqual(channels[1:, 0, :].count_nonzero(), 0)
-        self.assertEqual(channels[1:, :, 0].count_nonzero(), 0)
-        torch.testing.assert_close(channels[0], even + odd)
-        transformed = augment(channels[None])[0]
-        # Every channel gets exactly the same square symmetry.
-        self.assertTrue(any(torch.equal(transformed, torch.rot90(channels, k, (-2, -1)).flip(-1) if flip else torch.rot90(channels, k, (-2, -1)))
-                            for k in range(4) for flip in (False, True)))
+    def test_parity_geometry(self):
+        y, x = torch.meshgrid(torch.arange(256) - 128, torch.arange(256) - 128,
+                              indexing="ij")
+        even, odd = (x.square() + y.square()).float(), (x + y).float()
+        result = parity_channels(even + odd)
+        torch.testing.assert_close(result[0, 1:, 1:], even[1:, 1:])
+        torch.testing.assert_close(result[1, 1:, 1:], odd[1:, 1:])
+        self.assertEqual(result[:, 0].count_nonzero(), 0)
+        self.assertEqual(result[:, :, 0].count_nonzero(), 0)
 
-    def test_scale_sign_and_no_crop(self):
-        output, fraction = preprocess(self.image, "parity")
-        scaled, _ = preprocess(self.image * 17, "parity")
-        torch.testing.assert_close(output, scaled, atol=2e-6, rtol=2e-6)
-        self.assertEqual(output.shape, (3, 224, 224))
-        self.assertTrue(torch.isfinite(output).all())
-        self.assertGreaterEqual(fraction, 0)
-        changed = self.image.clone()
-        changed[2, :20] += 1  # Well outside the scale annulus and radius-80 disk.
-        self.assertFalse(torch.equal(output, preprocess(changed, "parity")[0]))
-        with self.assertRaisesRegex(ValueError, "MAD scale"):
-            preprocess(torch.ones_like(self.image), "parity")
-        # Shared scale, signed even/odd values; check against the defining equations.
-        y, x = np.indices((256, 256))
-        r = np.hypot(x-128, y-128)
-        b = self.image[2].numpy()[(r >= 32) & (r < 72)]
-        s = 1.4826 * np.median(abs(b - np.median(b)))
-        raw = residual_channels(self.image[2], "parity")
-        z = (torch.asinh((raw/s).clamp(-10, 10))/np.arcsinh(10) + 1)/2
-        z = torch.nn.functional.interpolate(z[None], (224, 224), mode="bilinear", align_corners=False, antialias=True)[0]
-        expected = (z - torch.tensor([.485, .456, .406])[:, None, None])/torch.tensor([.229, .224, .225])[:, None, None]
-        torch.testing.assert_close(output, expected)
+    def test_training_only_normalization_and_zero_slots(self):
+        splits = loaded()
+        prepared, settings = prepare(splits, ("dirty", "residual"), (0, 1, 2))
+        self.assertAlmostEqual(float(prepared["train"].images[:, 0].mean()), 0, places=5)
+        self.assertGreater(float(prepared["validation"].images[:, 0].mean()), 20)
+        self.assertEqual(prepared["train"].images[:, 1].count_nonzero(), 0)
+        self.assertEqual(prepared["train"].images[:, 3].count_nonzero(), 0)
+        self.assertEqual(settings["included"], ["dirty", "residual"])
+        parity, parity_settings = prepare(splits, PARITY_CHANNELS, (0, 1, 2))
+        self.assertEqual(parity["train"].images.shape[1], 2)
+        self.assertEqual(parity_settings["source"], "parity")
 
-    def test_parity_features_are_raw_paired_energies(self):
-        y, x = np.indices((256, 256)) - 128
-        even, odd = (x*x + y*y).astype(float), (x-y).astype(float)
-        self.image[2] = torch.from_numpy(even + odd).float()
-        scale = residual_scale(self.image[2])
-        expected = [np.log1p(np.mean((a[1:, 1:]/scale)**2)) for a in (even, odd)]
-        np.testing.assert_allclose(parity_features(self.image), expected, rtol=1e-10)
-        np.testing.assert_allclose(parity_features(self.image * 17), expected, rtol=1e-6)
-
-    def test_support_and_source_filter(self):
-        self.assertFalse(support_mask(self.image).any())
-        circular = self.image.clone()
-        circular[:3, :10] = 0
-        self.assertTrue(support_mask(circular).any())
-        hole = self.image.clone()
-        hole[:3, 50, 50] = 0
-        with self.assertRaisesRegex(ValueError, "interior"):
-            support_mask(hole)
-        for value in (float("nan"), float("inf")):
-            hole[0, 0, 0] = value
-            with self.assertRaisesRegex(ValueError, "finite"):
-                support_mask(hole)
-        items = [dict(image=image, sample_id=f"{source}_{label}", label=label,
-                      label_metadata={}, qa={}, paths={"products": {"clean": "unused"}})
-                 for source, image in (("0005+383", self.image), ("0006-063", circular))
-                 for label in range(3)]
-
-        class FakeDataset(list):
-            samples = [SimpleNamespace(sample_id=s["sample_id"]) for s in items]
-
-        with patch("ml.cnn.FitsSimulationDataset", return_value=FakeDataset(items)), patch("ml.cnn.fits.getheader", return_value={"CRPIX1": 129, "CRPIX2": 129}):
-            split = preload(Path("unused.json"), "train", "parity")
-            self.assertEqual(split.audit["retained_samples"], 3)
-            self.assertEqual(split.audit["excluded_samples"], 3)
-            self.assertEqual(split.audit["excluded_sources"], 1)
-            self.assertTrue(all(s.startswith("0005+383_") for s in split.batch["sample_id"]))
-            items[4]["image"] = self.image
-            with self.assertRaisesRegex(ValueError, "Mixed support"):
-                preload(Path("unused.json"), "train", "parity")
-        with patch("ml.cnn.FitsSimulationDataset", return_value=FakeDataset(items)), patch("ml.cnn.fits.getheader", return_value={"CRPIX1": 128, "CRPIX2": 128}):
-            with self.assertRaisesRegex(ValueError, "reference pixel"):
-                preload(Path("unused.json"), "train", "parity")
+    def test_rotation_is_joint(self):
+        image = torch.stack([torch.arange(16).reshape(4, 4) + 100 * channel
+                             for channel in range(4)])
+        transformed = rotate(image, 3)
+        for channel in range(4):
+            torch.testing.assert_close(transformed[channel],
+                                       torch.rot90(image[channel], 3, (-2, -1)))
 
 
-class FreezingTests(unittest.TestCase):
-    def test_head_only_keeps_backbone_frozen_through_second_stage(self):
-        torch.manual_seed(42)
-        model = resnet18(weights=None)
-        model.fc = nn.Linear(512, 3)
-        before = {k: v.clone() for k, v in model.state_dict().items()}
-        batch = {"label": torch.tensor([0, 1, 2]), "sample_id": ["clean", "amp", "phase"],
-                 "label_metadata": [
-                     {"corruption_snr_target": 0, "sample_kind": "baseline"},
-                     {"corruption_snr_target": 10, "sample_kind": "gain"},
-                     {"corruption_snr_target": 10, "sample_kind": "gain"},
-                 ]}
-        split = Split(torch.randn(3, 3, 64, 64), batch, {})
-        history, settings = train(model, split, split, "cpu", warmup_epochs=1, finetune_epochs=1, head_only=True)
-        self.assertEqual([h["stage"] for h in history], ["head", "head_continued"])
-        self.assertEqual([h["trainable_parameters"] for h in history], [1539, 1539])
-        self.assertTrue(settings["head_only"])
-        for key, value in model.state_dict().items():
-            if not key.startswith("fc."):
-                self.assertTrue(torch.equal(before[key], value), key)
-        self.assertFalse(torch.equal(before["fc.weight"], model.fc.weight))
+class ResNetTests(unittest.TestCase):
+    def test_trainable_policies_and_frozen_batchnorm(self):
+        expected = {
+            "head": lambda name: name.startswith("fc."),
+            "last": lambda name: name.startswith("fc.") or name.startswith("layer4.1."),
+            "all": lambda name: True,
+        }
+        for mode, allowed in expected.items():
+            model, groups, set_mode = resnet18.build(3, 4, mode, weights=None)
+            self.assertTrue(all(parameter.requires_grad == allowed(name)
+                                for name, parameter in model.named_parameters()))
+            self.assertEqual(model.conv1.in_channels, 4)
+            self.assertTrue(groups)
+            if mode != "all":
+                model.train(); set_mode()
+                before = [(module.running_mean.clone(), module.running_var.clone())
+                          for module in model.modules() if isinstance(module, nn.BatchNorm2d)]
+                model(torch.randn(2, 4, 64, 64))
+                after = [(module.running_mean, module.running_var)
+                         for module in model.modules() if isinstance(module, nn.BatchNorm2d)]
+                for old, new in zip(before, after, strict=True):
+                    torch.testing.assert_close(old[0], new[0])
+                    torch.testing.assert_close(old[1], new[1])
 
-    def test_only_allowed_weights_change_and_bn_stays_frozen(self):
-        model = resnet18(weights=None)  # Unit test never downloads weights.
-        model.fc = nn.Linear(512, 3)
-        for finetune, expected in ((False, 1539), (True, 4720131)):
-            configure_stage(model, finetune)
-            allowed = {n for n, p in model.named_parameters() if p.requires_grad}
-            self.assertEqual(sum(p.numel() for p in model.parameters() if p.requires_grad), expected)
-            before = {k: v.clone() for k, v in model.state_dict().items()}
-            optimizer = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=.001)
-            optimizer.zero_grad(set_to_none=True)
-            nn.functional.cross_entropy(model(torch.randn(2, 3, 64, 64)), torch.tensor([0, 2])).backward()
+    def test_optimizer_step(self):
+        model, groups, set_mode = resnet18.build(3, 2, "head", weights=None)
+        before = model.fc.weight.detach().clone()
+        model.train(); set_mode(); optimizer = torch.optim.AdamW(groups)
+        nn.functional.cross_entropy(model(torch.randn(2, 2, 64, 64)),
+                                    torch.tensor([0, 2])).backward()
+        optimizer.step()
+        self.assertFalse(torch.equal(before, model.fc.weight))
+
+
+class FakeDino(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.embedding = nn.Linear(3, 384)
+        self.blocks = nn.ModuleList([nn.Linear(384, 384), nn.Linear(384, 384)])
+
+    def forward(self, image):
+        value = self.embedding(image.mean((-2, -1)))
+        for block in self.blocks:
+            value = block(value)
+        return value
+
+
+class DinoTests(unittest.TestCase):
+    def test_policies_and_optimizer_step(self):
+        for mode in ("linear", "last"):
+            model, groups, set_mode = dinov2.build(3, mode, backbone=FakeDino())
+            trainable = {name for name, parameter in model.named_parameters()
+                         if parameter.requires_grad}
+            self.assertTrue(all(name.startswith(("adapter.", "head.")) or
+                                (mode == "last" and name.startswith("backbone.blocks.1."))
+                                for name in trainable))
+            frozen = model.backbone.embedding.weight.detach().clone()
+            adapter = model.adapter.weight.detach().clone()
+            model.train(); set_mode(); optimizer = torch.optim.AdamW(groups)
+            nn.functional.cross_entropy(model(torch.randn(2, 4, 28, 28)),
+                                        torch.tensor([0, 2])).backward()
             optimizer.step()
-            after = model.state_dict()
-            for key in before.keys() - allowed:
-                self.assertTrue(torch.equal(before[key], after[key]), key)
-            self.assertFalse(torch.equal(before["fc.weight"], after["fc.weight"]))
-            if finetune:
-                self.assertFalse(torch.equal(before["layer4.1.conv1.weight"], after["layer4.1.conv1.weight"]))
+            torch.testing.assert_close(frozen, model.backbone.embedding.weight)
+            self.assertFalse(torch.equal(adapter, model.adapter.weight))
+            self.assertFalse(model.backbone.training)
+            if mode == "last":
+                self.assertTrue(model.backbone.blocks[-1].training)
+
+
+class ArtifactAndReportTests(unittest.TestCase):
+    def _prepared(self):
+        metadata = ({"corruption_snr_target": 0, "sample_kind": "baseline"},
+                    {"corruption_snr_target": 10, "sample_kind": "gain"},
+                    {"corruption_snr_target": 10, "sample_kind": "gain"})
+        split = PreparedSplit(torch.randn(3, 4, 8, 8), torch.tensor([0, 1, 2]),
+                              ("clean", "amp", "phase"), ("a", "b", "c"), metadata)
+        return {"train": split, "validation": split}
+
+    def test_training_artifacts_resume_and_probability_reproduction(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary) / "job"
+            model = nn.Sequential(nn.AdaptiveAvgPool2d(1), nn.Flatten(), nn.Linear(4, 3))
+            config = {"job_id": "job", "seed": 42, "epochs": 1, "patience": 1,
+                      "batch_size": 3, "normalization": {}, "weight_decay": 1e-4}
+            results = train_job(model, [{"params": list(model.parameters()), "lr": .01}],
+                                lambda: None, self._prepared(), (0, 1, 2), 0,
+                                config, directory, "cpu")
+            self.assertTrue(_complete(directory, config))
+            with (directory / "predictions.csv").open() as handle:
+                rows = [row for row in csv.DictReader(handle)
+                        if row["split"] == "validation"]
+            scores = np.asarray([[float(row[f"probability_{label}"])
+                                  for label in (0, 1, 2)] for row in rows])
+            reproduced = evaluate_task([int(row["true_label"]) for row in rows], scores,
+                                       (0, 1, 2), self._prepared()["validation"].metadata,
+                                       clean_label=0)
+            self.assertAlmostEqual(reproduced["overall"]["main"]["f1"],
+                                   results["validation"]["overall"]["main"]["f1"])
+
+            expected = []
+            for seed in (42, 43, 44):
+                job_id = f"exp__seed{seed}"
+                shutil.copytree(directory, Path(temporary) / job_id)
+                expected.append({"job_id": job_id, "experiment_id": "exp", "seed": seed})
+            report = write_report(Path(temporary), expected, render=False)
+            self.assertIn("3/3", report.read_text())
+            self.assertTrue((Path(temporary) / "figures/exp__strength.png").is_file())
+
+    def test_matrix_is_deduplicated_and_seeded(self):
+        matrix = experiments(("resnet18", "dinov2"), "all")
+        self.assertEqual(len(matrix), len({row["experiment_id"] for row in matrix}))
+        self.assertEqual({job["seed"] for job in jobs(("resnet18",), "depth")},
+                         {42, 43, 44})
+        self.assertEqual(len(jobs(("resnet18", "dinov2"), "smoke")), 5)
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
 # Ablations for the square-only CNN
 
-Status: core ablations implemented and completed on 2026-09-22. The original research plan follows the results. See [implementation/specification](pretrained_cnn_spec.md).
+Status: completed on 2026-09-22 and retained as a historical result. Its runner was superseded by [the minimal ResNet-18/DINOv2 stack](minimal_nn_approaches_plan.md) and removed.
 
 ## Run the implemented suite
 
