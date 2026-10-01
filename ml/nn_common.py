@@ -22,16 +22,20 @@ from scripts.preprocessing import FitsSimulationDataset, source_dataset_id
 
 RAW_CHANNELS = ("dirty", "clean", "residual", "psf")
 PARITY_CHANNELS = ("even", "odd")
+RESIDUAL_RRR_CHANNELS = ("residual_rrr",)
+IMAGENET_MEAN = (0.485, 0.456, 0.406)
+IMAGENET_STD = (0.229, 0.224, 0.225)
 
 
 @dataclass(frozen=True)
 class LoadedSplit:
-    raw: torch.Tensor
-    parity: torch.Tensor
+    raw: torch.Tensor | None
+    parity: torch.Tensor | None
     labels: torch.Tensor
     sample_ids: tuple[str, ...]
     source_ids: tuple[str, ...]
     metadata: tuple[dict[str, Any], ...]
+    residual_rrr: torch.Tensor | None = None
 
 
 @dataclass(frozen=True)
@@ -56,43 +60,84 @@ def parity_channels(residual: torch.Tensor) -> torch.Tensor:
     return output
 
 
-def _load_split(dataset_path: Path, partition: str) -> LoadedSplit:
+def residual_rrr_input(residual: torch.Tensor) -> tuple[torch.Tensor, float]:
+    """Scale one native residual by annulus MAD and form ImageNet-ready RRR input."""
+
+    if residual.shape != (256, 256) or not torch.isfinite(residual).all():
+        raise ValueError("RRR input requires one finite 256x256 residual plane")
+    residual = residual.float()
+    y, x = torch.meshgrid(torch.arange(256, dtype=residual.dtype),
+                          torch.arange(256, dtype=residual.dtype), indexing="ij")
+    radius = torch.hypot(x - 128, y - 128)
+    values = residual[(radius >= 32) & (radius < 72)]
+    median = values.median()
+    scale = 1.4826 * (values - median).abs().median()
+    if not torch.isfinite(scale) or scale <= 0:
+        raise ValueError("residual annulus has nonpositive or nonfinite MAD scale")
+    transformed = torch.asinh((residual / scale).clamp(-10, 10)) / np.arcsinh(10)
+    rgb = ((transformed + 1) / 2).repeat(3, 1, 1)
+    rgb = F.interpolate(rgb[None], (224, 224), mode="bilinear",
+                        align_corners=False, antialias=True)[0]
+    mean = rgb.new_tensor(IMAGENET_MEAN)[:, None, None]
+    std = rgb.new_tensor(IMAGENET_STD)[:, None, None]
+    return (rgb - mean) / std, float(scale)
+
+
+def _load_split(dataset_path: Path, partition: str,
+                representations: frozenset[str]) -> LoadedSplit:
     dataset = FitsSimulationDataset(dataset_path.parent, index=dataset_path.name,
                                     partition=partition,
                                     label_criterion="constant_antenna_type")
-    raw, parity, labels, ids, sources, metadata = [], [], [], [], [], []
+    raw = [] if "raw" in representations else None
+    parity = [] if "parity" in representations else None
+    residual_rrr = [] if "residual_rrr" in representations else None
+    labels, ids, sources, metadata = [], [], [], []
     print(f"Loading {partition}: {len(dataset)} samples", flush=True)
     for index, sample in enumerate(dataset, 1):
         image = sample["image"]
         if image.shape != (4, 256, 256) or not torch.isfinite(image).all():
             raise ValueError(f'{partition}/{sample["sample_id"]}: expected finite (4,256,256) planes')
-        raw.append(F.interpolate(image[None], (224, 224), mode="bilinear",
-                                 align_corners=False, antialias=True)[0])
-        components = parity_channels(image[2])
-        parity.append(F.interpolate(components[None], (224, 224), mode="bilinear",
-                                    align_corners=False, antialias=True)[0])
+        if raw is not None:
+            raw.append(F.interpolate(image[None], (224, 224), mode="bilinear",
+                                     align_corners=False, antialias=True)[0])
+        if parity is not None:
+            components = parity_channels(image[2])
+            parity.append(F.interpolate(components[None], (224, 224), mode="bilinear",
+                                        align_corners=False, antialias=True)[0])
+        if residual_rrr is not None:
+            try:
+                prepared, _ = residual_rrr_input(image[2])
+            except ValueError as exc:
+                raise ValueError(f'{partition}/{sample["sample_id"]}: {exc}') from exc
+            residual_rrr.append(prepared)
         labels.append(int(sample["label"]))
         ids.append(sample["sample_id"])
         sources.append(source_dataset_id(sample["sample_id"]))
         metadata.append(dict(sample["label_metadata"]))
         if index % 100 == 0 or index == len(dataset):
             print(f"Loading {partition}: {index}/{len(dataset)}", flush=True)
-    if not raw:
+    if not labels:
         raise ValueError(f"{partition} split is empty")
-    return LoadedSplit(torch.stack(raw), torch.stack(parity), torch.tensor(labels),
-                       tuple(ids), tuple(sources), tuple(metadata))
+    return LoadedSplit(torch.stack(raw) if raw is not None else None,
+                       torch.stack(parity) if parity is not None else None,
+                       torch.tensor(labels), tuple(ids), tuple(sources), tuple(metadata),
+                       torch.stack(residual_rrr) if residual_rrr is not None else None)
 
 
-def load_data(dataset_path: str | Path) -> tuple[dict[str, LoadedSplit], tuple[int, ...]]:
+def load_data(dataset_path: str | Path, representations: Sequence[str] = ("raw", "parity"),
+              ) -> tuple[dict[str, LoadedSplit], tuple[int, ...]]:
     path = Path(dataset_path).expanduser().resolve()
+    requested = frozenset(representations)
+    if not requested or not requested <= {"raw", "parity", "residual_rrr"}:
+        raise ValueError(f"Unknown input representations: {sorted(requested)}")
     splits = {
-        "train": _load_split(path, "train"),
-        "validation": _load_split(path, "val"),
+        "train": _load_split(path, "train", requested),
+        "validation": _load_split(path, "val", requested),
     }
     control_path = path.with_name("dataset_noise_controls.json")
     if not control_path.is_file():
         raise FileNotFoundError(f"Noise-control index not found: {control_path}")
-    splits["noise_controls"] = _load_split(control_path, "val")
+    splits["noise_controls"] = _load_split(control_path, "val", requested)
     labels = tuple(sorted(set(splits["train"].labels.tolist())))
     if len(labels) < 3 or set(splits["validation"].labels.tolist()) != set(labels):
         raise ValueError("Train and validation must contain the same three or more classes")
@@ -106,6 +151,30 @@ def prepare(splits: dict[str, LoadedSplit], channels: Sequence[str],
     """Normalize included channels from training only; leave other raw slots zero."""
 
     names = tuple(channels)
+    label_to_index = {label: index for index, label in enumerate(labels)}
+    if names == RESIDUAL_RRR_CHANNELS:
+        prepared = {}
+        for split_name, split in splits.items():
+            if split.residual_rrr is None:
+                raise ValueError("Residual RRR representation was not loaded")
+            encoded = torch.tensor([label_to_index[int(label)] for label in split.labels])
+            prepared[split_name] = PreparedSplit(split.residual_rrr, encoded, split.sample_ids,
+                                                 split.source_ids, split.metadata)
+        settings = {
+            "source": "residual_rrr",
+            "slots": ["red", "green", "blue"],
+            "included": ["residual", "residual", "residual"],
+            "recipe_version": 1,
+            "per_image_scale": {"kind": "annulus_mad", "center": [128, 128],
+                                "inner_radius": 32, "outer_radius": 72,
+                                "consistency_factor": 1.4826},
+            "transform": {"kind": "signed_asinh", "clip": 10.0,
+                          "mapped_range": [0.0, 1.0]},
+            "resize": {"shape": [224, 224], "mode": "bilinear", "antialias": True},
+            "imagenet_mean": list(IMAGENET_MEAN), "imagenet_std": list(IMAGENET_STD),
+        }
+        return prepared, settings
+
     parity = names == PARITY_CHANNELS
     allowed = PARITY_CHANNELS if parity else RAW_CHANNELS
     if not names or len(set(names)) != len(names) or not set(names) <= set(allowed):
@@ -113,6 +182,8 @@ def prepare(splits: dict[str, LoadedSplit], channels: Sequence[str],
     source = "parity" if parity else "raw"
     indices = [allowed.index(name) for name in names]
     train = getattr(splits["train"], source)
+    if train is None:
+        raise ValueError(f"{source} representation was not loaded")
     stats: dict[str, dict[str, float]] = {}
     for name, index in zip(names, indices, strict=True):
         mean = float(train[:, index].mean())
@@ -120,10 +191,11 @@ def prepare(splits: dict[str, LoadedSplit], channels: Sequence[str],
         if not np.isfinite([mean, std]).all() or std <= 0:
             raise ValueError(f"Training channel {name!r} has invalid normalization")
         stats[name] = {"mean": mean, "std": std}
-    label_to_index = {label: index for index, label in enumerate(labels)}
     prepared = {}
     for split_name, split in splits.items():
         values = getattr(split, source)
+        if values is None:
+            raise ValueError(f"{source} representation was not loaded")
         output = torch.zeros((len(values), len(allowed), 224, 224), dtype=torch.float32)
         for name, index in zip(names, indices, strict=True):
             output[:, index] = (values[:, index] - stats[name]["mean"]) / stats[name]["std"]
@@ -291,5 +363,8 @@ def choose_device(requested: str | None = None) -> str:
     return "cpu"
 
 
-__all__ = ["PARITY_CHANNELS", "RAW_CHANNELS", "LoadedSplit", "PreparedSplit",
-           "choose_device", "load_data", "parity_channels", "predict", "prepare", "rotate", "train_job"]
+__all__ = ["IMAGENET_MEAN", "IMAGENET_STD", "PARITY_CHANNELS", "RAW_CHANNELS",
+           "RESIDUAL_RRR_CHANNELS",
+           "LoadedSplit", "PreparedSplit",
+           "choose_device", "load_data", "parity_channels", "predict", "prepare",
+           "residual_rrr_input", "rotate", "train_job"]

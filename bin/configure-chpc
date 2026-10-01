@@ -11,7 +11,7 @@ usage() {
 
 validate() {
     [[ -f "$OUTPUT" ]] || { echo "Missing $OUTPUT" >&2; return 1; }
-    if grep -Eq '__CHPC_|\$\{|<[^>]+>' "$OUTPUT"; then
+    if grep -Eq '__[A-Z0-9_]+__|\$\{|<[^>]+>' "$OUTPUT"; then
         echo "$OUTPUT contains unresolved placeholders or shell variables" >&2
         return 1
     fi
@@ -25,10 +25,26 @@ validate() {
     for name in "${required[@]}"; do
         [[ -n "${!name:-}" ]] || { echo "$OUTPUT has no value for $name" >&2; return 1; }
     done
-    [[ "$RADIOASTRO_SCRATCH" == /scratch/* ]] || {
-        echo "RADIOASTRO_SCRATCH is not below /scratch: $RADIOASTRO_SCRATCH" >&2
+    [[ "$RADIOASTRO_SCRATCH" == /* && "$RADIOASTRO_SCRATCH" != / &&
+       "${RADIOASTRO_SCRATCH##*/}" == radioastroml ]] || {
+        echo "RADIOASTRO_SCRATCH must be an absolute project path ending in /radioastroml: $RADIOASTRO_SCRATCH" >&2
         return 1
     }
+    if [[ -e "$RADIOASTRO_SCRATCH" ]]; then
+        [[ -d "$RADIOASTRO_SCRATCH" && -w "$RADIOASTRO_SCRATCH" &&
+           -x "$RADIOASTRO_SCRATCH" ]] || {
+            echo "RADIOASTRO_SCRATCH is not a writable, searchable directory: $RADIOASTRO_SCRATCH" >&2
+            return 1
+        }
+    fi
+    local storage_path
+    for storage_path in "$UV_PROJECT_ENVIRONMENT" "$UV_CACHE_DIR" \
+            "${UV_PYTHON_INSTALL_DIR:-}" "${UV_PYTHON_BIN_DIR:-}" "${CASA_DATA_DIR:-}"; do
+        [[ -n "$storage_path" && "$storage_path" == "$RADIOASTRO_SCRATCH"/* ]] || {
+            echo "Managed environment, cache, Python, and CASA paths must be below RADIOASTRO_SCRATCH" >&2
+            return 1
+        }
+    done
     local rows
     if command -v sinfo >/dev/null 2>&1; then
         rows=$(sinfo -M "$CHPC_CPU_CLUSTER" -h -o '%P|%G' 2>/dev/null) || {
@@ -151,7 +167,7 @@ cpu_qos=$(choose "CPU QoS" "${CHPC_CPU_QOS:-}" "$(qoses_for_account "$cpu_cluste
 gpu_qos=$(choose "GPU QoS" "${CHPC_GPU_QOS:-}" "$(qoses_for_account "$gpu_cluster" "$gpu_account")" true)
 login_host=${CHPC_LOGIN_HOST:-$(hostname -f)}
 username=$(id -un)
-scratch=${RADIOASTRO_SCRATCH:-/scratch/general/vast/$username/radioastroml}
+storage=${RADIOASTRO_SCRATCH:-/scratch/general/vast/$username/radioastroml}
 temporary=$(mktemp "$ROOT/config/chpc.env.tmp.XXXXXX")
 trap 'rm -f "$temporary"' EXIT
 
@@ -166,12 +182,13 @@ trap 'rm -f "$temporary"' EXIT
     printf 'CHPC_GPU_ACCOUNT=%q\n' "$gpu_account"
     printf 'CHPC_GPU_QOS=%q\n' "$gpu_qos"
     echo 'CHPC_GPU_GRES=gpu:1'
-    printf '\nRADIOASTRO_SCRATCH=%q\n' "$scratch"
-    printf 'UV_PROJECT_ENVIRONMENT=%q\n' "$scratch/envs/ml"
-    printf 'UV_CACHE_DIR=%q\n' "$scratch/.uv-cache"
-    printf 'UV_PYTHON_INSTALL_DIR=%q\n' "$scratch/envs/python"
-    printf 'UV_PYTHON_BIN_DIR=%q\n' "$scratch/bin"
-    printf 'CASA_DATA_DIR=%q\n\n' "$scratch/casa/data"
+    echo '# Compatibility name: this may be scratch or persistent shared storage.'
+    printf 'RADIOASTRO_SCRATCH=%q\n' "$storage"
+    printf 'UV_PROJECT_ENVIRONMENT=%q\n' "$storage/envs/ml"
+    printf 'UV_CACHE_DIR=%q\n' "$storage/.uv-cache"
+    printf 'UV_PYTHON_INSTALL_DIR=%q\n' "$storage/envs/python"
+    printf 'UV_PYTHON_BIN_DIR=%q\n' "$storage/bin"
+    printf 'CASA_DATA_DIR=%q\n\n' "$storage/casa/data"
     echo 'UV_MODULE=uv'
     echo 'QUARTO_MODULE=quarto'
     echo 'CASA_STANDARD_MODULE=casa'

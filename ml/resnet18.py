@@ -8,6 +8,8 @@ from torchvision.models import ResNet18_Weights, resnet18 as _resnet18
 
 
 def _replace_input(model: nn.Module, channels: int) -> None:
+    if channels == 3:
+        return
     old = model.conv1
     new = nn.Conv2d(channels, old.out_channels, old.kernel_size, old.stride,
                     old.padding, bias=False)
@@ -17,7 +19,7 @@ def _replace_input(model: nn.Module, channels: int) -> None:
         elif channels == 2:
             new.weight.copy_(old.weight[:, :2] * 3 / 2)
         else:
-            raise ValueError("ResNet input must have two or four channels")
+            raise ValueError("ResNet input must have two, three, or four channels")
     model.conv1 = new
 
 

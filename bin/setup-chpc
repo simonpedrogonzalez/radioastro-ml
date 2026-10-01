@@ -16,8 +16,9 @@ is_chpc() {
 
 is_chpc || { echo "Refusing CHPC setup on a non-CHPC host" >&2; exit 1; }
 : "${RADIOASTRO_SCRATCH:?set RADIOASTRO_SCRATCH in config/chpc.env}"
-[[ "$RADIOASTRO_SCRATCH" == /scratch/*/"$USER"/* ]] || {
-    echo "RADIOASTRO_SCRATCH must be a user-owned path below /scratch: $RADIOASTRO_SCRATCH" >&2
+[[ "$RADIOASTRO_SCRATCH" == /* && "$RADIOASTRO_SCRATCH" != / &&
+   "${RADIOASTRO_SCRATCH##*/}" == radioastroml ]] || {
+    echo "RADIOASTRO_SCRATCH must be an absolute project path ending in /radioastroml: $RADIOASTRO_SCRATCH" >&2
     exit 1
 }
 
@@ -34,7 +35,7 @@ modules_init() {
     exit 1
 }
 
-link_scratch() {
+link_storage() {
     local link=$1 target=$2 current
     mkdir -p "$target" "$(dirname -- "$link")"
     if [[ -L "$link" ]]; then
@@ -54,19 +55,23 @@ link_scratch() {
 
 mkdir -p "$RADIOASTRO_SCRATCH"/{.uv-cache,.cache,bin,casa/data,data,envs,envs/python,outputs,runs} \
          "$ROOT/slurm/logs"
+[[ -w "$RADIOASTRO_SCRATCH" && -x "$RADIOASTRO_SCRATCH" ]] || {
+    echo "Storage root is not writable and searchable: $RADIOASTRO_SCRATCH" >&2
+    exit 1
+}
 setup_log="$ROOT/slurm/logs/chpc-setup-$(date -u +%Y%m%dT%H%M%SZ).log"
 exec > >(tee "$setup_log") 2>&1
 echo "Setup log: $setup_log"
-link_scratch "$ROOT/data" "$RADIOASTRO_SCRATCH/data"
-link_scratch "$ROOT/collect/extracted" "$RADIOASTRO_SCRATCH/data/extracted"
-link_scratch "$ROOT/collect/downloads" "$RADIOASTRO_SCRATCH/data/downloads"
-link_scratch "$ROOT/runs" "$RADIOASTRO_SCRATCH/runs/repository"
-link_scratch "$ROOT/ml/runs" "$RADIOASTRO_SCRATCH/runs/ml"
-link_scratch "$ROOT/collect/experiments" "$RADIOASTRO_SCRATCH/outputs/collect-experiments"
+link_storage "$ROOT/data" "$RADIOASTRO_SCRATCH/data"
+link_storage "$ROOT/collect/extracted" "$RADIOASTRO_SCRATCH/data/extracted"
+link_storage "$ROOT/collect/downloads" "$RADIOASTRO_SCRATCH/data/downloads"
+link_storage "$ROOT/runs" "$RADIOASTRO_SCRATCH/runs/repository"
+link_storage "$ROOT/ml/runs" "$RADIOASTRO_SCRATCH/runs/ml"
+link_storage "$ROOT/collect/experiments" "$RADIOASTRO_SCRATCH/outputs/collect-experiments"
 if [[ ! -e "$HOME/.casa/data" && ! -L "$HOME/.casa/data" ]]; then
-    link_scratch "$HOME/.casa/data" "$RADIOASTRO_SCRATCH/casa/data"
+    link_storage "$HOME/.casa/data" "$RADIOASTRO_SCRATCH/casa/data"
 elif [[ -L "$HOME/.casa/data" ]]; then
-    link_scratch "$HOME/.casa/data" "$RADIOASTRO_SCRATCH/casa/data"
+    link_storage "$HOME/.casa/data" "$RADIOASTRO_SCRATCH/casa/data"
 else
     echo "Keeping existing CASA data directory: $HOME/.casa/data"
 fi
@@ -172,5 +177,6 @@ else
 fi
 module unload "${CASA_PIPELINE_MODULE:-casa-vla}" || true
 
-echo "CHPC setup complete. Scratch is temporary and not backed up: $RADIOASTRO_SCRATCH"
+echo "CHPC setup complete. Storage root: $RADIOASTRO_SCRATCH"
+echo "Retention and backup policy depend on the selected CHPC filesystem."
 echo "Next: make cpu-session, then make check"

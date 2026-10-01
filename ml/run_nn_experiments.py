@@ -17,7 +17,8 @@ import torch
 
 from ml import dinov2, resnet18
 from ml.evaluate import METRICS
-from ml.nn_common import PARITY_CHANNELS, RAW_CHANNELS, choose_device, load_data, prepare, train_job
+from ml.nn_common import (PARITY_CHANNELS, RAW_CHANNELS, RESIDUAL_RRR_CHANNELS,
+                          choose_device, load_data, prepare, train_job)
 from ml.report import (
     _ensure_strength_weighting,
     _hard_sample_lines,
@@ -44,7 +45,12 @@ TRAINABLE_SCOPES = {
 
 
 def _experiment(backbone: str, mode: str, channels=RAW_CHANNELS, schedule="base") -> dict[str, Any]:
-    channel_id = "eo" if tuple(channels) == PARITY_CHANNELS else "-".join(name[0] for name in channels)
+    if tuple(channels) == PARITY_CHANNELS:
+        channel_id = "eo"
+    elif tuple(channels) == RESIDUAL_RRR_CHANNELS:
+        channel_id = "rrr"
+    else:
+        channel_id = "-".join(name[0] for name in channels)
     trainable_scope = TRAINABLE_SCOPES[(backbone, mode)]
     experiment_id = f"{backbone}__{trainable_scope}__{channel_id}__{schedule}"
     return {"experiment_id": experiment_id, "backbone": backbone, "mode": mode,
@@ -59,9 +65,11 @@ def experiments(models=("resnet18", "dinov2"), phase="all") -> list[dict[str, An
     for backbone in models:
         modes = ("head", "last", "all") if backbone == "resnet18" else ("linear", "last")
         reference = "last" if backbone == "resnet18" else "linear"
-        if phase == "residual100":
+        if phase in {"residual100", "residual_rrr100"}:
             if backbone == "resnet18":
-                selected += [_experiment(backbone, mode, ("residual",), "residual100")
+                channels = (("residual",) if phase == "residual100" else
+                            RESIDUAL_RRR_CHANNELS)
+                selected += [_experiment(backbone, mode, channels, "residual100")
                              for mode in modes]
             continue
         if phase in {"all", "depth", "smoke"}:
@@ -460,12 +468,20 @@ def run(args: argparse.Namespace) -> None:
     output.mkdir(parents=True, exist_ok=True)
     selected = jobs(tuple(args.models), args.phase)
     if args.max_jobs is not None: selected = selected[:args.max_jobs]
-    expected = selected if args.phase in {"smoke", "residual100"} else jobs(tuple(args.models), "all")
+    expected = selected if args.phase in {"smoke", "residual100", "residual_rrr100"} else jobs(tuple(args.models), "all")
     control_index = dataset.with_name("dataset_noise_controls.json")
     fingerprints = {"main": _dataset_fingerprint(dataset),
                     "noise_controls": _dataset_fingerprint(control_index)}
     dataset_sha = hashlib.sha256(json.dumps(fingerprints, sort_keys=True).encode()).hexdigest()
-    splits, labels = load_data(dataset)
+    representations = set()
+    for job in selected:
+        if job["channels"] == RESIDUAL_RRR_CHANNELS:
+            representations.add("residual_rrr")
+        elif job["channels"] == PARITY_CHANNELS:
+            representations.add("parity")
+        else:
+            representations.add("raw")
+    splits, labels = load_data(dataset, sorted(representations))
     if fingerprints != {"main": _dataset_fingerprint(dataset),
                         "noise_controls": _dataset_fingerprint(control_index)}:
         raise RuntimeError("Dataset changed while it was being loaded; retry after generation stops")
@@ -519,7 +535,7 @@ def main() -> None:
     parser.add_argument("--dataset", type=Path, required=True)
     parser.add_argument("--output", type=Path, default=Path("ml/runs/nn"))
     parser.add_argument("--phase", choices=("all", "depth", "schedule", "channels", "smoke",
-                                             "residual100"), default="all")
+                                             "residual100", "residual_rrr100"), default="all")
     parser.add_argument("--models", nargs="+", choices=("resnet18", "dinov2"), default=("resnet18", "dinov2"))
     parser.add_argument("--device"); parser.add_argument("--clean-label", type=int, default=0)
     parser.add_argument("--batch-size", type=int, default=16)

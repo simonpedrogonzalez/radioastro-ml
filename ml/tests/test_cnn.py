@@ -10,8 +10,11 @@ import torch
 from torch import nn
 
 from ml import dinov2, resnet18
-from ml.nn_common import (LoadedSplit, PARITY_CHANNELS, PreparedSplit, load_data,
-                          parity_channels, predict, prepare, rotate, train_job)
+from ml.compare_nn_runs import combine_runs
+from ml.nn_common import (IMAGENET_MEAN, IMAGENET_STD, LoadedSplit, PARITY_CHANNELS,
+                          RESIDUAL_RRR_CHANNELS, PreparedSplit, load_data,
+                          parity_channels, predict, prepare, residual_rrr_input,
+                          rotate, train_job)
 from ml.run_nn_experiments import _complete, experiments, jobs, write_report
 from ml.task_evaluation import evaluate_task
 
@@ -73,6 +76,26 @@ class PreprocessingTests(unittest.TestCase):
         self.assertEqual(result[:, 0].count_nonzero(), 0)
         self.assertEqual(result[:, :, 0].count_nonzero(), 0)
 
+    def test_residual_rrr_uses_per_image_mad_asinh_and_imagenet_normalization(self):
+        generator = torch.Generator().manual_seed(12)
+        residual = torch.randn((256, 256), generator=generator)
+        image, scale = residual_rrr_input(residual)
+        y, x = torch.meshgrid(torch.arange(256, dtype=residual.dtype),
+                              torch.arange(256, dtype=residual.dtype), indexing="ij")
+        annulus = residual[(torch.hypot(x - 128, y - 128) >= 32) &
+                           (torch.hypot(x - 128, y - 128) < 72)]
+        expected_scale = 1.4826 * (annulus - annulus.median()).abs().median()
+        self.assertAlmostEqual(scale, float(expected_scale), places=6)
+        self.assertEqual(image.shape, (3, 224, 224))
+        restored = image * torch.tensor(IMAGENET_STD)[:, None, None]
+        restored += torch.tensor(IMAGENET_MEAN)[:, None, None]
+        torch.testing.assert_close(restored[0], restored[1])
+        torch.testing.assert_close(restored[1], restored[2])
+        self.assertGreaterEqual(float(restored.min()), 0)
+        self.assertLessEqual(float(restored.max()), 1)
+        with self.assertRaisesRegex(ValueError, "MAD scale"):
+            residual_rrr_input(torch.ones(256, 256))
+
     def test_training_only_normalization_and_zero_slots(self):
         splits = loaded()
         prepared, settings = prepare(splits, ("dirty", "residual"), (0, 1, 2))
@@ -84,6 +107,15 @@ class PreprocessingTests(unittest.TestCase):
         parity, parity_settings = prepare(splits, PARITY_CHANNELS, (0, 1, 2))
         self.assertEqual(parity["train"].images.shape[1], 2)
         self.assertEqual(parity_settings["source"], "parity")
+
+        rrr = {name: LoadedSplit(split.raw, split.parity, split.labels, split.sample_ids,
+                                split.source_ids, split.metadata,
+                                torch.randn(len(split.labels), 3, 224, 224))
+               for name, split in splits.items()}
+        prepared_rrr, settings = prepare(rrr, RESIDUAL_RRR_CHANNELS, (0, 1, 2))
+        self.assertEqual(prepared_rrr["train"].images.shape[1], 3)
+        self.assertEqual(settings["source"], "residual_rrr")
+        self.assertEqual(settings["transform"]["kind"], "signed_asinh")
 
     def test_rotation_is_joint(self):
         image = torch.stack([torch.arange(16).reshape(4, 4) + 100 * channel
@@ -117,6 +149,9 @@ class ResNetTests(unittest.TestCase):
                 for old, new in zip(before, after, strict=True):
                     torch.testing.assert_close(old[0], new[0])
                     torch.testing.assert_close(old[1], new[1])
+
+        rgb_model, _, _ = resnet18.build(3, 3, "head", weights=None)
+        self.assertEqual(rgb_model.conv1.in_channels, 3)
 
     def test_optimizer_step(self):
         model, groups, set_mode = resnet18.build(3, 2, "head", weights=None)
@@ -275,6 +310,36 @@ class ArtifactAndReportTests(unittest.TestCase):
             "resnet18__all__r__residual100",
         })
         self.assertTrue(all(job["channels"] == ("residual",) for job in residual))
+        rrr = experiments(("resnet18",), "residual_rrr100")
+        self.assertEqual({row["experiment_id"] for row in rrr}, {
+            "resnet18__head_only__rrr__residual100",
+            "resnet18__head_and_last__rrr__residual100",
+            "resnet18__all__rrr__residual100",
+        })
+        self.assertTrue(all(job["channels"] == RESIDUAL_RRR_CHANNELS for job in rrr))
+
+    def test_combined_report_links_complete_jobs(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            prepared = self._prepared()
+            sources = []
+            for index, experiment in enumerate(("old", "rrr")):
+                source = root / f"source-{index}"
+                job_id = f"resnet18__head_only__{experiment}__residual100__seed42"
+                directory = source / job_id
+                model = nn.Sequential(nn.AdaptiveAvgPool2d(1), nn.Flatten(), nn.Linear(4, 3))
+                config = {"job_id": job_id, "experiment_id": job_id.rsplit("__seed", 1)[0],
+                          "seed": 42, "epochs": 1, "patience": 1, "batch_size": 3,
+                          "normalization": {}, "weight_decay": 1e-4,
+                          "dataset_sha256": "same-dataset"}
+                train_job(model, [{"params": list(model.parameters()), "lr": .01}],
+                          lambda: None, prepared, (0, 1, 2), 0, config, directory, "cpu")
+                sources.append(source)
+            report = combine_runs(sources, root / "comparison", render=False)
+            self.assertIn("2/2", report.read_text())
+            self.assertEqual(len(list((root / "comparison").glob("resnet18*"))), 2)
+            self.assertTrue(all(path.is_symlink() for path in
+                                (root / "comparison").glob("resnet18*")))
 
 
 if __name__ == "__main__":
