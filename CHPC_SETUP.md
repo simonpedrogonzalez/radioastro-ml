@@ -79,6 +79,10 @@
 
 ## Changing the storage root
 
+For the specific move from general scratch to the astronomy work directory,
+including rerunning rsync and verifying the result, follow
+[CHPC_STORAGE_MIGRATION.md](CHPC_STORAGE_MIGRATION.md).
+
 1. Confirm the new location is mounted and writable on login, CPU, and GPU
    nodes. Use a dedicated child directory ending in `radioastroml`.
 
