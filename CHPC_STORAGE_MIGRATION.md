@@ -214,3 +214,34 @@ If synchronization fails, retain the error output before proceeding. Once the
 import succeeds, request a fresh CPU allocation and repeat step 4. This repairs
 the ML dependency installation; completion of the full CASA setup still needs
 to be verified separately if `make chpc-setup` did not finish successfully.
+
+## If Globus reports `Path not allowed`
+
+The CHPC DMZ collection rejected listing the parent `sgonzalez` directory with
+`500 Command failed : Path not allowed`, although the same user can list the
+parent and project directories on `granite1`. The
+[Globus server troubleshooting guide](https://docs.globus.org/globus-connect-server/v5/troubleshooting-guide/#33-troubleshooting-policy-based-mapped-collection-access-issues)
+identifies this error on a mapped collection as a storage-gateway path-policy
+restriction. Changing Unix file modes does not remove that restriction.
+
+Try entering the exact project directory in the Globus Path field:
+
+```text
+/uufs/astro.utah.edu/common/home/u6039460/work/sgonzalez/radioastroml/
+```
+
+If this also returns `Path not allowed`, ask CHPC support at
+`helpdesk@chpc.utah.edu` which collection and permitted path expose this storage,
+or whether the collection policy can be updated. Include:
+
+- User: `u1528314`, group: `laskar`; shell access confirmed on `granite1`.
+- Collection: `University of Utah -- CHPC DMZ Clustered Endpoint`.
+- Collection ID: `7cf0baa1-8bd0-4e91-a1e6-c19042952a7c`.
+- Desired project path above, and the full Globus error text.
+- Original parent-directory failure request ID: `1wb6EYsZJ`.
+
+The configured path is valid for the tested login/CPU shells; its availability
+through Globus remains unresolved.
+
+
+du --apparent-size -B1 --max-depth=1/uufs/astro.utah.edu/common/home/u6039460/work/sgonzalez/radioastroml | sort -nr | awk '{print "%10.2f GB %s\n", $1/1000000000, $2}'
