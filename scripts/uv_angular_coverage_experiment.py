@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import shutil
@@ -27,7 +28,7 @@ class FixedGrid:
         return replace(self.reference, first_pass_imagename=Path(workspace) / 'firstpass')
 
 
-def run(output: Path, source_id: str = '2241+098'):
+def run(output: Path, source_id: str = '2241+098', *, no_noise: bool = False):
     output=output.resolve()
     if output.exists():
         raise FileExistsError(output)
@@ -39,10 +40,15 @@ def run(output: Path, source_id: str = '2241+098'):
     ms=output/f'{source_id}.ms'
     shutil.copytree(v_ms,ms)
     seed=_stable_seed(source_id,'thermal_noise')
-    control=NoiseControl(50.,'noise_snr_50')
-    injected=_apply_noise_control(source,control,v_ms,ms,sigma,model,params,seed)
-    add_thermal_noise_inplace(ms,noise_model=model,noise_parameters=params,seed=seed)
-    initialize_weights(ms,injected['final_total_sigma_jy'])
+    if no_noise:
+        # Finite nominal weights for imaging; no noise is added to DATA.
+        initialize_weights(ms,sigma)
+        injected={'extra_noise_seed':None,'SNR_corr_measured':0.}
+    else:
+        control=NoiseControl(50.,'noise_snr_50')
+        injected=_apply_noise_control(source,control,v_ms,ms,sigma,model,params,seed)
+        add_thermal_noise_inplace(ms,noise_model=model,noise_parameters=params,seed=seed)
+        initialize_weights(ms,injected['final_total_sigma_jy'])
     original=json.loads((DATASET_DIR/'samples'/f'{source_id}_noise_snr_50'/'imaging'/'qa.json').read_text())
     tb=table();tb.open(str(ms),nomodify=True)
     try:
@@ -61,6 +67,27 @@ def run(output: Path, source_id: str = '2241+098'):
     region=BeamRegion(min_radius_beams=source.metric_min_radius_beams,max_radius_beams=source.metric_max_radius_beams)
     fixed_config = DefaultImagingConfig
     reference_grid = None
+    if no_noise:
+        from scripts.imaging.models import ImageGrid, ResolvedGrid
+        d=json.loads(Path('runs/uv-angular-2241-noise50-final/remove_00/imaging/qa.json').read_text())['resolved_config']['grid']
+        reference_grid=ResolvedGrid(Beam(**d['beam']),ImageGrid(**d['image_grid']),Path(d['first_pass_imagename']))
+        fixed_config=replace(DefaultImagingConfig,grid=FixedGrid(reference_grid))
+    def fingerprints():
+        tb.open(str(ms),nomodify=True)
+        try:
+            result={}
+            for name in ('DATA','CORRECTED_DATA','WEIGHT','SIGMA','WEIGHT_SPECTRUM','SIGMA_SPECTRUM'):
+                if name not in tb.colnames():continue
+                digest=hashlib.sha256()
+                for start in range(0,nrows,4096):
+                    digest.update(np.ascontiguousarray(tb.getcol(name,startrow=start,nrow=min(4096,nrows-start))).tobytes())
+                result[name]=digest.hexdigest()
+            return result
+        finally:tb.close()
+    before=fingerprints() if no_noise else None
+    uv_usable=np.any(~baseline_flags,axis=(0,1)) & ~row_flags
+    extent=float(np.percentile(np.hypot(uvw[0][uv_usable],uvw[1][uv_usable]),99.5))*1.1
+    np.savez_compressed(output/'uvw_initial.npz',u=uvw[0],v=uvw[1],usable=uv_usable,extent=extent)
     for pct in range(0,100,10):
         selected=angle < math.pi*pct/100
         tb.open(str(ms),nomodify=False)
@@ -76,7 +103,7 @@ def run(output: Path, source_id: str = '2241+098'):
         image=image_ms(ms,fixed_config,row_dir/'imaging',imsize=source.imsize,
             metric_region=BeamRegion(),keep_intermediate_products=False,fits_invalid_policy='fill',
             fits_fill_value=0.0,pblimit=DATASET_PBLIMIT)
-        if pct == 0:
+        if pct == 0 and reference_grid is None:
             reference_grid = image.resolved_config.grid
             fixed_config = replace(DefaultImagingConfig, grid=FixedGrid(reference_grid))
         with fits.open(image.residual_fits, memmap=False) as hdus:
@@ -103,15 +130,35 @@ def run(output: Path, source_id: str = '2241+098'):
             'warnings':list(image.qa.warnings),
             'image_cell_arcsec':list(image.resolved_config.grid.image_grid.cell_arcsec)}
         rows.append(record)
-        (output/'results.json').write_text(json.dumps({'source':source_id,'baseline_seed':seed,
+        (output/'results.json').write_text(json.dumps({'source':source_id,'baseline_seed':None if no_noise else seed,
             'extra_seed':injected['extra_noise_seed'],'measured_snr_corr':injected['SNR_corr_measured'],
             'sigma_reference_jy':sigma,'original_qa':original['metrics']['residual'],
+            'noise_mode':'none' if no_noise else 'baseline_plus_extra',
+            'injected_noise_sigma_jy':0. if no_noise else injected['final_total_sigma_jy'],
+            'grid_reference':'original SNR50 report 0% grid and mask' if no_noise else 'current 0% row',
             'mask':'atan2(v,u) mod 180 degrees; remove [0, 180*p/100) and conjugate',
             'rows':rows},indent=2)+'\n')
         print('Completed',pct,'actual removed',record['actual_usable_removed_percent'],flush=True)
+    if no_noise:
+        from scripts.noise_snr_audit import measure_pair
+        measured=measure_pair(v_ms,ms,sigma)
+        assert measured['SNR_corr_actual']==0.
+        after=fingerprints();assert before==after
+        tb.open(str(ms),nomodify=True)
+        try:
+            np.testing.assert_array_equal(tb.getcol('FLAG'),baseline_flags | selected[None,None,:])
+            np.testing.assert_array_equal(tb.getcol('FLAG_ROW'),row_flags | selected)
+        finally:tb.close()
+        (output/'validation.json').write_text(json.dumps(dict(rows=len(rows),
+            no_regular_or_extra_noise_added=True,measured_final_thermal_SNR_corr=0.,
+            data_weights_unchanged_across_cuts=True,identical_column_hashes=after,
+            final_flags_exact_original_or_90_percent_wedge=True,
+            grid_and_clean_mask_pinned_to_original_report=True,
+            fixed_metric_annulus=True),indent=2)+'\n')
     return output
 
 
 if __name__=='__main__':
     p=argparse.ArgumentParser(description=__doc__);p.add_argument('--output',type=Path,required=True);p.add_argument('--source',default='2241+098')
-    a=p.parse_args();run(a.output,a.source)
+    p.add_argument('--no-noise',action='store_true',help='Sky only: neither baseline nor extra thermal noise; pin original report grid')
+    a=p.parse_args();run(a.output,a.source,no_noise=a.no_noise)

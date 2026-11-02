@@ -9,3 +9,29 @@ Image the progressively flagged working copy with the dataset 1 direct imaging a
 [Completed report](../runs/uv-angular-2241-noise50-final/report.html) and [flag audit](../runs/uv-angular-2241-noise50-final/validation.json).
 
 The completed run independently reproduced the unmasked noisy Measurement Set and confirmed exact equality of DATA, CORRECTED_DATA, WEIGHT, SIGMA and WEIGHT_SPECTRUM with the final 90%-masked set. The report uses pipeline `inferno` colors, individual colorbars, and a wide scrollable layout.
+
+## Sky-only replication (no regular or extra thermal noise)
+
+The separate [noiseless report](../runs/uv-angular-2241-noiseless/report.html)
+uses the same source, 0–90% angular cuts, pipeline settings and five-column
+layout. Its grid, CLEAN mask and pixel annulus are pinned to the original
+noise50 report. Input point-source flux remains 0.0921665 Jy. Finite nominal
+sigma0 weights permit imaging but no noise is added to the visibilities.
+Scientific notation exposes the tiny reconstruction/numerical residuals;
+residual limits are shared across cuts within each report, not across reports.
+
+Reproduce in a fresh output directory:
+
+```sh
+bin/run casa scripts/uv_angular_coverage_experiment.py \
+  --output runs/uv-angular-2241-noiseless --no-noise
+bin/run casa runs/uv-angular-2241-noiseless/validate.py
+ml/.venv/bin/python -m scripts.uv_angular_coverage_report \
+  runs/uv-angular-2241-noiseless
+```
+
+The generation audit checks zero measured thermal perturbation, exact nested
+flags and unchanged DATA/noise-weight column hashes across cuts. The retained
+independent `validate.py` checks every stored visibility against the noiseless
+sky (including flagged samples), all 30 FITS for finiteness, original grids and
+measurement masks, and recalculates annulus MAD/peak/tail statistics.

@@ -22,12 +22,18 @@ def plane(path):
 
 def render(run:Path):
     run=run.resolve();record=json.loads((run/'results.json').read_text());rows=record['rows']
+    noiseless=record.get('noise_mode')=='none'
+    number=lambda value: f'{value:.4g}' if noiseless else f'{value:.4f}'
     if [r['angular_removed_percent'] for r in rows] != list(range(0,100,10)):
         raise ValueError('Require completed 0 through 90 percent images')
     uv=np.load(run/'uvw_initial.npz');u,v,usable=uv['u'],uv['v'],uv['usable']
     reference=Path('collect/experiments/dataset_v1_20260921_all_psf/samples')/f"{record['source']}_noise_snr_50"/'imaging'
-    for key in ('dirty','clean','residual'):
-        np.testing.assert_array_equal(plane(run/rows[0][key]),plane(reference/f'{key}.fits.gz'))
+    if not noiseless:
+        for key in ('dirty','clean','residual'):
+            np.testing.assert_array_equal(plane(run/rows[0][key]),plane(reference/f'{key}.fits.gz'))
+    else:
+        validation=json.loads((run/'validation.json').read_text())
+        assert validation['no_regular_or_extra_noise_added'] and validation['measured_final_thermal_SNR_corr']==0.
     angle=np.mod(np.arctan2(v,u),np.pi)
     arrays={key:[plane(run/r[key]) for r in rows] for key in ('dirty','clean','residual')}
     limits={key:max(float(np.nanpercentile(np.abs(a),99.8)) for a in images) for key,images in arrays.items()}
@@ -52,8 +58,8 @@ def render(run:Path):
             axis.set_xticks([]);axis.set_yticks([])
             axis.set_title(key.capitalize(),fontsize=9)
         axis=axes[i,4];axis.axis('off')
-        axis.text(0,.8,f"MAD σ: {1000*r['residual_scaled_mad_jy_per_beam']:.4f} mJy/beam\n"
-             f"Peak: {1000*r['residual_abs_peak_jy_per_beam']:.4f} mJy/beam\n"
+        axis.text(0,.8,f"MAD σ: {number(1000*r['residual_scaled_mad_jy_per_beam'])} mJy/beam\n"
+             f"Peak: {number(1000*r['residual_abs_peak_jy_per_beam'])} mJy/beam\n"
              f"P99.5 / MAD: {r['residual_p99_5_over_mad']:.3f}",
              va='top',fontsize=9,transform=axis.transAxes)
     fig.savefig(run/'overview.png',dpi=160);plt.close(fig)
@@ -64,14 +70,27 @@ body { font-size: 20px; }
 .quarto-figure img, main img { max-width: none !important; width: 3300px !important; height: auto !important; }
 table { font-size: 20px; }
 ''')
-    lines=['---','title: "Angular UV coverage with fixed extra thermal noise"','format:','  html:','    embed-resources: true','    toc: true','    page-layout: full','    css: report.css','---','','## Experiment','',
-           f"Dataset 1 source **{record['source']}**, extra thermal-noise SNR_corr **{record['measured_snr_corr']:.8f}**. The full SNR_corr=50 sample is generated first: extra noise is injected, baseline thermal noise is added, and weights are initialized. Angular UVW flags are applied only afterward. The visibility data and weights are unchanged across rows; only flags accumulate.",'',
+    title='Angular UV coverage with no thermal noise' if noiseless else 'Angular UV coverage with fixed extra thermal noise'
+    description=(f"Dataset 1 source **{record['source']}**, **no thermal noise at all**: neither regular baseline noise nor extra noise is added. The visibilities contain only the predicted sky (point-source flux 0.0921665 Jy). Measured thermal **SNR_corr_actual = 0**. Finite nominal weights are used for imaging only; they do not inject noise. The image grid, CLEAN mask and measurement annulus are pinned to the original SNR_corr=50 report for direct comparison. Across rows only UVW flags change; visibility values and weights stay fixed."
+        if noiseless else f"Dataset 1 source **{record['source']}**, extra thermal-noise SNR_corr **{record['measured_snr_corr']:.8f}**. The full SNR_corr=50 sample is generated first: extra noise is injected, baseline thermal noise is added, and weights are initialized. Angular UVW flags are applied only afterward. The visibility data and weights are unchanged across rows; only flags accumulate.")
+    lines=['---',f'title: "{title}"','format:','  html:','    embed-resources: true','    toc: true','    page-layout: full','    css: report.css','---','','## Experiment','',
+           description,'',
            'The angle is `atan2(v,u) mod 180°`. A baseline and its conjugate represent opposite points, so each cut removes a paired wedge. Percentages specify angular width, not an equal fraction of measured visibilities. The last column below gives the actual fraction of initially usable samples removed. 100% would leave no data to image.','',
            '## Image sequence','', 'Each row shows retained uv coverage, dirty, CLEAN and residual images, and the three statistics. All panels use the imaging pipeline’s inferno colormap and have individual labeled colorbars. Image limits are fixed within each image type across rows. The wide page scrolls horizontally and vertically; browser zoom enlarges images and text.','', '![](overview.png)','','## Metrics','',
            '| Angle removed | Usable samples removed | Robust sigma (mJy/beam) | Residual absolute peak (mJy/beam) | Residual P99.5 / MAD |',
            '| ---: | ---: | ---: | ---: | ---: |']
     for r in rows:
-        lines.append(f"| {r['angular_removed_percent']}% | {r['actual_usable_removed_percent']:.2f}% | {1000*r['residual_scaled_mad_jy_per_beam']:.4f} | {1000*r['residual_abs_peak_jy_per_beam']:.4f} | {r['residual_p99_5_over_mad']:.3f} |")
+        lines.append(f"| {r['angular_removed_percent']}% | {r['actual_usable_removed_percent']:.2f}% | {number(1000*r['residual_scaled_mad_jy_per_beam'])} | {number(1000*r['residual_abs_peak_jy_per_beam'])} | {r['residual_p99_5_over_mad']:.3f} |")
+    if noiseless:
+        lines += ['','[Full numerical results](results.json) · [Noiseless and flag audit](validation.json) · [Original noise50 report](../uv-angular-2241-noise50-final/report.html)',
+                  '', '## Verification', '',
+                  'Direct comparison of the final flagged Measurement Set with the predicted noiseless sky gives exactly zero thermal perturbation. SHA256 fingerprints of DATA, CORRECTED_DATA and available noise-weight columns are identical before and after all cuts. Final flags equal original flags OR the paired 90% angular wedge; the grid, CLEAN mask and annulus match the original report. No existing report or dataset was overwritten.', '',
+                  'The very small nonzero residuals are reconstruction/stopping and numerical residuals, not injected thermal noise. Values are displayed with scientific notation where needed. Residual color limits are shared across all cuts in this report but differ from the original noisy report; consult the labeled colorbars before comparing visual prominence. CLEAN convergence and CASA warnings are retained in each row’s QA. 100% removal is omitted because no image can be formed.', '']
+        (run/'report.qmd').write_text('\n'.join(lines))
+        QuartoReporter(run/'report.qmd',every=1).finish()
+        if not (run/'report.html').is_file(): raise RuntimeError('HTML report was not created')
+        print(run/'report.html')
+        return
     lines += ['','[Full numerical results](results.json) · [Flag audit](validation.json) · [Experiment plan](../../docs/uv_angular_coverage_experiment.md)','','## Verification','',
               'The 0% dirty, CLEAN and residual FITS pixel arrays match the retained dataset 1 sample exactly. The table below compares the original CASA image-mask QA with this report’s statistics measured on exported FITS pixels in a fixed 0%-defined annulus; the slight differences reflect that measurement path. CASA warnings are recorded in `results.json`.','','',
               '| Metric | Retained dataset 1 | New 0% row | Relative difference |',
