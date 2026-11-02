@@ -570,5 +570,129 @@ class FullDatasetConfigurationTests(unittest.TestCase):
         self.assertEqual(len(control_calls), len(experiment.NOISE_CONTROLS))
 
 
+class TrainingNoiseTests(unittest.TestCase):
+    def test_reindex_existing_noise_preserves_cleanup_audit(self):
+        source_id = TRAIN_IDS[0]
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary).resolve()
+            (output / "dataset.json").write_text("{}\n")
+            baseline_path = output / "baseline.json"
+            baseline = SimpleNamespace(sample_id=source_id + "_not_corrupted", label_name="not_corrupted")
+            samples = {}
+            audits = {}
+            for sid in experiment._requested_noise_controls(source_id):
+                path = output / "samples" / sid / "sample.json"
+                path.parent.mkdir(parents=True)
+                path.write_text("{}")
+                samples[path] = SimpleNamespace(sample_id=sid, path=path)
+                audit = path.with_name("cleanup.audit.json")
+                audit.write_text('{"original_cleanup_history": true}\n')
+                audits[audit] = (audit.read_bytes(), audit.stat().st_mtime_ns)
+            with patch("scripts.preprocessing.load_dataset_manifest", return_value=SimpleNamespace(samples=[baseline_path])), \
+                 patch("scripts.preprocessing.load_sample_manifest", side_effect=lambda path, **kw: baseline if path == baseline_path else samples[path]), \
+                 patch.multiple(experiment,
+                    find_thermal_run=Mock(return_value=(Path("/thermal"), {}, (source_id,))),
+                    _thermal_source=Mock(), _audit_noise_controls=Mock(return_value={}),
+                    _assert_noise_control_sample=Mock(), _append_sample_to_dataset=Mock(),
+                    _noise_control_payload=Mock(return_value={}),
+                    _iterate_and_validate_noise_controls=Mock(return_value={})), \
+                 patch.object(experiment, "_recover_or_remove_sample") as recovery, \
+                 patch.object(experiment, "_prepare_V_ms") as prepare:
+                experiment.run_noise_training(output_dir=output)
+                recovery.assert_not_called()
+                prepare.assert_not_called()
+                self.assertEqual(experiment._append_sample_to_dataset.call_count, len(samples))
+            for audit, before in audits.items():
+                self.assertEqual((audit.read_bytes(), audit.stat().st_mtime_ns), before)
+
+    def test_noise_extension_keeps_gain_levels_and_validation_split(self):
+        old_levels = (5., 10., 15., 20., 30., 40., 50., 100.)
+        self.assertEqual(experiment.SNR_CORR_TARGETS, old_levels)
+        self.assertEqual(experiment.NOISE_SNR_CORR_TARGETS, (*old_levels, 1000., 2000., 3000., 4000.))
+        available = [TRAIN_IDS[0], VAL_IDS[0], TEST_IDS[0]]
+        self.assertEqual(experiment._select_noise_sources(available, available, partition="val"), (VAL_IDS[0],))
+        for selected in ([TRAIN_IDS[0]], [TEST_IDS[0]]):
+            with self.assertRaises(ValueError):
+                experiment._select_noise_sources(available, available, selected, partition="val")
+        with patch.object(experiment, "run_noise_validation") as validation, patch.object(experiment, "run_experiment") as main:
+            experiment.main(["--noise-validation-only", "--noise-control-source", VAL_IDS[0]])
+            validation.assert_called_once_with(source_run=None, output_dir=None, source_ids=[VAL_IDS[0]])
+            main.assert_not_called()
+
+    def test_selection_and_dispatch_are_train_only(self):
+        available = [TRAIN_IDS[0], VAL_IDS[0], TEST_IDS[0]]
+        self.assertEqual(experiment._select_noise_training_sources(available, available), (TRAIN_IDS[0],))
+        for selected in ([VAL_IDS[0]], [TEST_IDS[0]], [TRAIN_IDS[0]] * 2, [TRAIN_IDS[1]]):
+            with self.subTest(selected=selected), self.assertRaises(ValueError):
+                experiment._select_noise_training_sources(available, available, selected)
+        with patch.object(experiment, "run_noise_training") as training, patch.object(experiment, "run_experiment") as main:
+            experiment.main(["--noise-training-source", TRAIN_IDS[0]])
+            training.assert_called_once_with(source_run=None, output_dir=None, source_ids=[TRAIN_IDS[0]])
+            main.assert_not_called()
+        with self.assertRaises(SystemExit):
+            experiment._parse_args(["--noise-training", "--noise-controls"])
+
+    def test_training_generation_preserves_main_and_resumes_without_work(self):
+        source_id = TRAIN_IDS[0]
+        indexed = {}
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary).resolve()
+            main_index = output / "dataset.json"; main_index.write_text("{}\n")
+            old_report = output / "report.json"; old_report.write_text('{"failures": ["old gain failure"]}\n')
+            baseline_path = output / "baseline.json"
+            baseline = SimpleNamespace(sample_id=source_id + "_not_corrupted", label_name="not_corrupted")
+            source = SimpleNamespace(source_id=source_id)
+
+            def finalize(*args, noise_control):
+                sid = source_id + "_" + noise_control.label_name
+                sample = SimpleNamespace(sample_id=sid, path=output / "samples" / sid / "sample.json")
+                indexed[sid] = sample
+                return sample.path
+
+            def load_sample(path, **kwargs):
+                return baseline if path == baseline_path else indexed[path.parent.name]
+
+            with patch("scripts.preprocessing.load_dataset_manifest", return_value=SimpleNamespace(samples=[baseline_path])), \
+                 patch("scripts.preprocessing.load_sample_manifest", side_effect=load_sample), \
+                 patch.multiple(experiment,
+                    find_thermal_run=Mock(return_value=(Path("/thermal"), {}, (source_id,))),
+                    _thermal_source=Mock(return_value=source),
+                    _audit_noise_controls=Mock(side_effect=lambda index: dict(indexed)),
+                    _recover_or_remove_sample=Mock(return_value=False),
+                    _prepare_V_ms=Mock(return_value=Path("/V.ms")),
+                    _check_disk_space=Mock(), _cleanup_V_work=Mock(),
+                    _noise_request=Mock(return_value=("simplenoise", {}, 1.)),
+                    _assert_noise_control_sample=Mock(),
+                    _noise_control_payload=Mock(return_value={"SNR_corr_measured": 20.}),
+                    _iterate_and_validate_noise_controls=Mock(return_value={"sample_count": len(experiment.NOISE_CONTROLS)})), \
+                 patch.object(experiment, "_finalize_sample", side_effect=finalize) as finalized, \
+                 patch.object(experiment, "_append_sample_to_dataset") as append, \
+                 patch.object(experiment, "_ensure_thermal_entries") as precursor, \
+                 patch.object(experiment, "_migrate_dataset_labels") as migrate:
+                experiment.run_noise_training(output_dir=output)
+                self.assertEqual(finalized.call_count, len(experiment.NOISE_CONTROLS))
+                self.assertTrue(all(call.args[0] == output / "dataset_noise_training.json" for call in append.call_args_list))
+                report = output / "noise_training_report.json"
+                before = (report.read_bytes(), report.stat().st_mtime_ns)
+                finalized.reset_mock()
+                experiment._prepare_V_ms.reset_mock()
+                experiment.run_noise_training(output_dir=output)
+                finalized.assert_not_called(); experiment._prepare_V_ms.assert_not_called()
+                self.assertEqual(before, (report.read_bytes(), report.stat().st_mtime_ns))
+                precursor.assert_not_called(); migrate.assert_not_called()
+                # An existing eight-level run can be extended without regenerating it.
+                saved = json.loads(report.read_text())
+                saved["configuration"]["levels"] = list(experiment.SNR_CORR_TARGETS)
+                report.write_text(json.dumps(saved))
+                for sid in list(indexed):
+                    if float(sid.rsplit("_", 1)[1]) > 100:
+                        del indexed[sid]
+                experiment.run_noise_training(output_dir=output)
+                self.assertEqual(finalized.call_count, 4)
+                self.assertEqual(json.loads(report.read_text())["configuration"]["levels"], list(experiment.NOISE_SNR_CORR_TARGETS))
+            self.assertEqual(main_index.read_text(), "{}\n")
+            self.assertEqual(old_report.read_text(), '{"failures": ["old gain failure"]}\n')
+
+
 if __name__ == "__main__":
     unittest.main()

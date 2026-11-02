@@ -27,6 +27,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.utils.class_weight import compute_sample_weight
 from ml.nn_common import parity_channels
 from ml.report import write_tabular_report
+from ml.simple_metrics import sigma_na_from_source, sigma_sna_units
 from ml.task_evaluation import evaluate_noise_robustness, evaluate_task
 from scripts.preprocessing import FitsSimulationDataset, make_simulation_dataloader, source_dataset_id
 
@@ -39,6 +40,9 @@ QA_FEATURES = (
 )
 PARITY_FEATURES = ("log1p_even_energy_over_mad2", "log1p_odd_energy_over_mad2")
 ALL_FEATURES = QA_FEATURES + PARITY_FEATURES
+# Preserve the six-column schema of existing caches; extended views opt in.
+SIMPLE_FEATURES = QA_FEATURES + ("sigma_NA", "sigma_sNA_units")
+COMBINED8_FEATURES = ALL_FEATURES + ("sigma_NA", "sigma_sNA_units")
 FEATURE_VIEWS = {"qa4": QA_FEATURES, "parity2": PARITY_FEATURES, "combined6": ALL_FEATURES}
 LOGREG_GRID = {
     "logisticregression__C": [10.0**power for power in range(-4, 5)],
@@ -61,9 +65,10 @@ class FeatureSet:
     sample_ids: tuple[str, ...]
     source_ids: tuple[str, ...]
     label_metadata: tuple[dict[str, Any], ...]
+    feature_names: tuple[str, ...] = ALL_FEATURES
 
     def view(self, names: tuple[str, ...]) -> np.ndarray:
-        return self.X[:, [ALL_FEATURES.index(name) for name in names]]
+        return self.X[:, [self.feature_names.index(name) for name in names]]
 
 
 def _nested(value: Any, keys: tuple[str, ...], *, context: str) -> Any:
@@ -84,13 +89,14 @@ def parity_features(image) -> tuple[float, float]:
     return tuple(float(value) for value in np.log1p(components.square().mean((-2, -1)).numpy()))
 
 
-def features_from_dataloader(dataloader: Any) -> FeatureSet:
+def features_from_dataloader(dataloader: Any, *, source_noise: dict[str, dict] | None = None) -> FeatureSet:
     vectors, labels, sample_ids, source_ids, metadata_rows = [], [], [], [], []
     for batch in dataloader:
-        for image, sample_id, label, qa, metadata in zip(
+
+        for row_index, (image, sample_id, label, qa, metadata) in enumerate(zip(
             batch["image"], batch["sample_id"], np.asarray(batch["label"]).tolist(),
             batch["qa"], batch["label_metadata"], strict=True,
-        ):
+        )):
             if not isinstance(qa, dict):
                 raise ValueError(f"Sample {sample_id!r} has no imaging QA metadata")
             values = []
@@ -102,13 +108,21 @@ def features_from_dataloader(dataloader: Any) -> FeatureSet:
                 if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
                     raise ValueError(f"Sample {sample_id!r} has nonfinite metric {name}")
                 values.append(float(value))
-            vectors.append([*values, *parity_features(image)])
+            vector = [*values, *parity_features(image)]
+            if source_noise is not None:
+                source_id = source_dataset_id(sample_id)
+                if source_id not in source_noise:
+                    raise ValueError(f"Sample {sample_id!r} has no source noise reference")
+                sigma_na = sigma_na_from_source(source_noise[source_id])
+                vector.extend((sigma_na, sigma_sna_units(values[1], sigma_na)))
+            vectors.append(vector)
             labels.append(int(label)); sample_ids.append(sample_id)
             source_ids.append(source_dataset_id(sample_id)); metadata_rows.append(dict(metadata))
     if not vectors:
         raise ValueError("Cannot extract features from an empty dataloader")
     return FeatureSet(np.asarray(vectors), np.asarray(labels), tuple(sample_ids),
-                      tuple(source_ids), tuple(metadata_rows))
+                      tuple(source_ids), tuple(metadata_rows),
+                      COMBINED8_FEATURES if source_noise is not None else ALL_FEATURES)
 
 
 def _loader(dataset_path: Path, partition: str, index: str = "dataset.json"):
@@ -309,5 +323,5 @@ if __name__ == "__main__":
     raise SystemExit(main())
 
 
-__all__ = ["ALL_FEATURES", "FEATURE_VIEWS", "PARITY_FEATURES", "QA_FEATURES",
+__all__ = ["ALL_FEATURES", "FEATURE_VIEWS", "PARITY_FEATURES", "QA_FEATURES", "SIMPLE_FEATURES", "COMBINED8_FEATURES",
            "FeatureSet", "features_from_dataloader", "grouped_folds", "parity_features", "tune"]

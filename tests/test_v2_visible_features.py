@@ -6,10 +6,20 @@ from astropy.wcs import WCS
 from scipy import sparse
 
 from scripts.report_fourier_toy import phase_centered_fft, run_checks, toy_header
-from scripts.report_v2_pilots import bilinear_cells, score_map, source_info, visibility_display_limits
+from scripts.report_v2_pilots import bilinear_cells, mixed_component_target, score_map, source_info, visibility_display_limits
 
 
 class VisibleFeatureTests(unittest.TestCase):
+    def test_equal_mixed_components_have_total_snr_20_and_reduced_gain(self):
+        affected_norm=662.845181214578
+        component=mixed_component_target(20.,affected_norm)
+        gain_amplitude=1-component/affected_norm
+        phase=2*np.arcsin(component/(2*affected_norm))
+        self.assertLess(gain_amplitude,1.)
+        np.testing.assert_allclose(affected_norm*abs(gain_amplitude-1),component)
+        np.testing.assert_allclose(affected_norm*abs(np.exp(1j*phase)-1),component)
+        np.testing.assert_allclose(affected_norm*abs(gain_amplitude*np.exp(1j*phase)-1),20.)
+
     def test_fft_matches_direct_sinusoids_and_scaled_power(self):
         checks = run_checks()
         self.assertEqual(len(checks), 6)

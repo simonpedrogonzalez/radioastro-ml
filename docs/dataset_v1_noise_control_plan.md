@@ -1,6 +1,15 @@
 # Dataset v1: D noise controls — minimal implementation plan
 
-Status: plan only; no samples or pipeline code changed.
+Status: the original eight-level noise controls are implemented. The held-out-only
+scope below is historical: regression now also uses an explicit training-noise
+index. On 2026-10-26 the requested noise levels were extended to **5, 10, 15, 20,
+30, 40, 50, 100, 1000, 2000, 3000, 4000**. Amplitude and phase retain their eight
+original levels. See [the current extension protocol](noise_strength_extension.md)
+for generation commands, counts, checks and experiment results. This decision
+supersedes the original restriction against increasing the noise range; the
+fixed-norm definition and original reference sigma are unchanged.
+
+## Original design (historical scope)
 
 Based on the vault note [Unseen-corruption Checking](</Users/u1528314/Documents/Obsidian Vault/Notes/Unseen-corruption Checking.md>): test whether extra noise is mistaken for amplitude/phase errors, using the existing trained model. **D is a sample family, not a fourth classifier class. Its correct label is `0` (none).** No retraining.
 

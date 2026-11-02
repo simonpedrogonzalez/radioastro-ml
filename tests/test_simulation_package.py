@@ -431,6 +431,7 @@ class PublicContractTests(unittest.TestCase):
                 "render_simulation_text",
                 "simplenoise_from_image_rms",
                 "theoretical_vla_simplenoise",
+                "theoretical_visibility_sigma",
                 "write_simulation_reports",
             },
         )

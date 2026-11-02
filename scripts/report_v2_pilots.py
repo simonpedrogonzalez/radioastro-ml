@@ -27,15 +27,16 @@ from scipy import sparse
 
 from scripts.preprocessing.fits import load_fits_plane
 from scripts.preprocessing.partitions import TRAIN_IDS, partition_for_sample
-from scripts.report_fourier_toy import OUTPUT, figure_uri, phase_centered_fft, write_html
+from scripts.report_fourier_toy import figure_uri, phase_centered_fft, write_html
 
 DATASET = ROOT / "collect/experiments/dataset_v1_20260921_all_psf"
+OUTPUT = ROOT / "collect/experiments/v2_visible_features_snr20"
+TARGET_SNR = 20.
 SOURCES = ("0005+383", "0012-399", "0201-115")
 SEEDS = (202610051, 202610052, 202610053)
 VARIANTS = ("no_gain", "amplitude", "phase", "mixture", "double_noise")
-LABELS = dict(no_gain="No gain error", amplitude="Amplitude only", phase="Phase only",
-              mixture="Amplitude + phase", double_noise="Twice the thermal σ",
-              single_baseline="Single-baseline amplitude error")
+LABELS = dict(no_gain="No error", amplitude="Amp", phase="Ph",
+              mixture="Amp+ph", double_noise="2× noise", single_baseline="Baseline amp")
 CHUNK = 512
 DISPLAY_PER_BASELINE = 96
 C = 299792458.0
@@ -217,6 +218,8 @@ def geometry(ms, info, output):
 
 
 def read_evidence(ms, evidence):
+    # Read the selected visibility samples from the measurement set.
+    # These let the report compare the same samples across pilot cases.
     from casatools import table
     tb=table();tb.open(str(ms)); result=np.zeros(len(evidence["row"]),complex)
     for start in range(0,tb.nrows(),CHUNK):
@@ -228,6 +231,8 @@ def read_evidence(ms, evidence):
 
 
 def write_gained_model(model_ms, observed_ms, antenna, gain, baseline=None):
+    # Apply a gain error to one antenna's baselines, or one chosen baseline.
+    # This creates a known corruption so we can check whether the scores locate it.
     from casatools import table
     model=table(); out=table(); model.open(str(model_ms));out.open(str(observed_ms),nomodify=False)
     for start in range(0,model.nrows(),CHUNK):
@@ -270,11 +275,29 @@ def add_shared_draw(model_ms, noise_ms, observed_ms, kappa, expected_flags, expe
 
 
 def score_map(z,h,pairs):
+    # Average Fourier power by baseline coverage, then take each antenna's median score.
+    # These scores rank baselines and antennas for inspection of possible errors.
     mass=np.asarray(h.sum(axis=1)).ravel()
     scores=np.divide(h @ (abs(z)**2).ravel(),mass,out=np.zeros(len(mass)),where=mass>0)
     antennas=np.unique(pairs[mass>0])
     ant_scores=np.array([np.median(scores[np.any(pairs==a,axis=1)&(mass>0)]) for a in antennas])
     return scores,antennas,ant_scores
+
+
+def mixed_component_target(total_snr, affected_norm):
+    """Equal pure-component SNRs whose combined reduced gain has the requested SNR."""
+    if not 0 < total_snr < affected_norm:
+        raise ValueError("The target must allow a positive reduced amplitude gain")
+    low, high = 0., total_snr
+    for _ in range(60):
+        component = (low + high) / 2
+        # For a=1-component/K and |exp(i phi)-1|=component/K,
+        # the combined visibility SNR is component*sqrt(2-component/K).
+        if component * np.sqrt(2 - component / affected_norm) < total_snr:
+            low = component
+        else:
+            high = component
+    return (low + high) / 2
 
 
 def audit_parent(sid, output, info=None):
@@ -313,7 +336,9 @@ def generate(sid, output):
     from scripts.corruption.metrics import _read_correlation_indices, _valid_mask
     out=output/sid;out.mkdir(parents=True,exist_ok=True)
     started=time.perf_counter();info=source_info(sid)
-    config=dict(source=sid,seeds=list(SEEDS),target=30.,variants=list(VARIANTS),parent=info["parent_ms"],version=1)
+    config=dict(source=sid,seeds=list(SEEDS),target=TARGET_SNR,
+        mixture="equal_component_snr_fixed_total",amplitude_sign=-1,
+        variants=list(VARIANTS),parent=info["parent_ms"],version=2)
     config_path=out/"configuration.json"
     if config_path.exists() and json.loads(config_path.read_text())!=config:
         raise ValueError("Output configuration differs; use a new output directory")
@@ -326,12 +351,18 @@ def generate(sid, output):
     h,evidence,pair_id=geometry(model_ms,info,out)
     pairs=np.array(info["pairs"]);counts=np.asarray(np.load(out/"geometry.npz")["counts"])
     active=np.unique(pairs[counts>0]); antenna=int(active[len(active)//2])
-    amp_spec=ConstantGainSpec(model_ms,antenna,"amp",30.,info["sigma0"],sign=1)
+    amp_spec=ConstantGainSpec(model_ms,antenna,"amp",TARGET_SNR,info["sigma0"],sign=-1)
     norms=measure_constant_gain_norms(amp_spec)
     amp=solve_constant_gain(amp_spec,norms)
-    phase=solve_constant_gain(ConstantGainSpec(model_ms,antenna,"phase",30.,info["sigma0"],sign=1),norms)
+    phase=solve_constant_gain(ConstantGainSpec(model_ms,antenna,"phase",TARGET_SNR,info["sigma0"],sign=1),norms)
+    component_target=mixed_component_target(TARGET_SNR,norms.V_Ak_over_sigma_L2)
+    mix_amp=solve_constant_gain(ConstantGainSpec(model_ms,antenna,"amp",component_target,
+        info["sigma0"],sign=-1),norms)
+    mix_phase=solve_constant_gain(ConstantGainSpec(model_ms,antenna,"phase",component_target,
+        info["sigma0"],sign=1),norms)
     info.update(antenna_id=antenna,antenna_name=info["antenna_names"][antenna],
-        amplitude_solution=asdict(amp),phase_solution=asdict(phase))
+        amplitude_solution=asdict(amp),phase_solution=asdict(phase),
+        mixture_amplitude_solution=asdict(mix_amp),mixture_phase_solution=asdict(mix_phase))
     # Dataclass solutions contain only numerical fields and nested numerical norms.
     model_vis=read_evidence(model_ms,evidence)
     np.savez_compressed(out/"model_evidence.npz",visibility=model_vis)
@@ -350,7 +381,8 @@ def generate(sid, output):
                 tb.getcol("FLAG_ROW",startrow=start,nrow=n),tb.getcol("DATA_DESC_ID",startrow=start,nrow=n),corr)
             valid &= (((a==baseline_pair[0])&(b==baseline_pair[1]))|((a==baseline_pair[1])&(b==baseline_pair[0])))[None,None,:]
             norm_sq+=float(np.sum(abs(d[valid].astype(complex)/info["sigma0"])**2))
-        tb.close();baseline_gain=1+30/np.sqrt(norm_sq)
+        tb.close();baseline_gain=1-TARGET_SNR/np.sqrt(norm_sq)
+        if baseline_gain <= 0:raise ValueError("Single-baseline target requires a positive gain")
     for seed in SEEDS:
         noise_ms=out/f"noise_{seed}.ms"
         pending=list(VARIANTS)+(["single_baseline"] if seed==SEEDS[0] and sid==SOURCES[0] else [])
@@ -371,14 +403,15 @@ def generate(sid, output):
             folder.mkdir();ms=folder/"observed.ms"
             t0=time.perf_counter();shutil.copytree(model_ms,ms)
             gain=1+0j;kappa=2. if variant=="double_noise" else 1.;pair=None
-            if variant in ("amplitude","mixture"):gain*=amp.g_amp
-            if variant in ("phase","mixture"):gain*=np.exp(1j*phase.phi_rad)
+            if variant=="amplitude":gain=complex(amp.g_amp)
+            if variant=="phase":gain=np.exp(1j*phase.phi_rad)
+            if variant=="mixture":gain=mix_amp.g_amp*np.exp(1j*mix_phase.phi_rad)
             if variant=="single_baseline":gain=complex(baseline_gain);pair=baseline_pair
             write_gained_model(model_ms,ms,antenna,gain,pair)
             measured_snr=(0. if variant in ("no_gain","double_noise") else
                 measure_corruption_metrics(model_ms,ms,info["sigma0"]).SNR_corr)
-            if variant in ("amplitude","phase","single_baseline"):
-                np.testing.assert_allclose(measured_snr,30.,rtol=0.01)
+            if variant in ("amplitude","phase","mixture","single_baseline"):
+                np.testing.assert_allclose(measured_snr,TARGET_SNR,rtol=0.01)
             if variant in ("no_gain","double_noise"):
                 assert measured_snr==0
             shared=add_shared_draw(model_ms,noise_ms,ms,kappa,info["flags_sha256"],info["weights_sha256"])
@@ -403,8 +436,9 @@ def generate(sid, output):
                 dirty=dirty.values,baseline_scores=scores,antennas=antennas,antenna_scores=ant_scores)
             case=dict(id=folder.name,variant=variant,seed=seed,gain_real=float(gain.real),gain_imag=float(gain.imag),
                 gain_amplitude=float(abs(gain)),gain_phase_deg=float(np.angle(gain,deg=True)),
-                target_amplitude=30. if variant in ("amplitude","mixture") else 0.,
-                target_phase=30. if variant in ("phase","mixture") else 0.,
+                target_amplitude=(component_target if variant=="mixture" else TARGET_SNR if variant=="amplitude" else 0.),
+                target_phase=(component_target if variant=="mixture" else TARGET_SNR if variant=="phase" else 0.),
+                target_total=TARGET_SNR if variant in ("amplitude","phase","mixture","single_baseline") else 0.,
                 kappa=kappa,measured_SNR_corr=measured_snr,injected_baseline=None if pair is None else list(map(int,pair)),
                 injected_antenna_rank=rank,seconds=time.perf_counter()-t0,checks=shared,
                 effective_imaging=result.effective_imaging_parameters,
@@ -445,6 +479,7 @@ def render_report(sid, output):
     assert json.loads((out/"parent_audit.json").read_text())["passed"]
     geom=np.load(out/"geometry.npz");pairs=geom["pairs"];names=info["antenna_names"]
     h=sparse.load_npz(out/"coverage.npz");mass=np.asarray(h.sum(axis=1)).ravel()
+    h.eliminate_zeros()
     antennas=np.unique(pairs[mass>0]);ant=int(info["antenna_id"])
     cases=info["cases"];arrays={c["id"]:dict(np.load(out/c["id"]/"evidence.npz")) for c in cases}
     _,u,v=phase_centered_fft(arrays[cases[0]["id"]]["residual"],info["header"],info["s0"])
@@ -455,6 +490,11 @@ def render_report(sid, output):
     visibility_limits=visibility_display_limits(arrays)
     uvlim=1.06*max(abs(geom["u"]).max(),abs(geom["v"]).max())/1000
     n=len(antennas);ant_index={int(a):i for i,a in enumerate(antennas)}
+    ny,nx=arrays[cases[0]["id"]]["fft"].shape
+    feature_counts=dict(complex_Z=ny*nx,power_P=ny*nx,
+        scored_fourier_cells=int(np.count_nonzero(h.getnnz(axis=0))),
+        baseline_B=int(np.count_nonzero(mass>0)),antenna_A=n,
+        coverage_nonzeros=int(h.nnz))
     bid=geom["baseline"]
     uv_ids=[]
     for b in range(len(pairs)):
@@ -488,10 +528,13 @@ def render_report(sid, output):
         matrix_uri=figure_uri(fig,out/"report_assets"/f"{case['id']}_baseline.png")
         vis=a["visibility"]
         data_cases.append(dict(id=case["id"],variant=case["variant"],
-            label=f"{LABELS[case['variant']]} · example {SEEDS.index(case['seed'])+1}",
+            label=f"{LABELS[case['variant']]} · ex {SEEDS.index(case['seed'])+1}",
             residual=residual_uri,power=power_uri,matrix=matrix_uri,
             real=vis.real.tolist(),imag=vis.imag.tolist(),scores=a["baseline_scores"].tolist(),
-            antenna_scores=a["antenna_scores"].tolist(),injected_baseline=case["injected_baseline"]))
+            antenna_scores=a["antenna_scores"].tolist(),injected_baseline=case["injected_baseline"],
+            gain_amplitude=case["gain_amplitude"],gain_phase_deg=case["gain_phase_deg"],
+            measured_SNR_corr=case["measured_SNR_corr"],
+            target_amplitude=case["target_amplitude"],target_phase=case["target_phase"]))
     coverage_ant=np.array([np.median(geom["counts"][np.any(pairs==x,axis=1)&(mass>0)]) for x in antennas])
     coverage_rank=int(np.flatnonzero(antennas[np.argsort(-coverage_ant,kind="stable")]==ant)[0])+1
     rank_rows=[]
@@ -529,6 +572,7 @@ main{{max-width:1800px;padding:24px}}.report-image{{display:block;margin:12px au
 .image-row img,.rank-row svg,.measurement-row canvas{{display:block;width:100%;height:auto;margin:0}}
 .rank-row h3{{font-size:16px;text-align:center;margin:4px 0}}figcaption{{font-size:13px;line-height:1.4}}
 .zoomable{{cursor:zoom-in}}select{{max-width:100%}}
+#case-description{{white-space:nowrap;overflow-x:auto}}
 dialog{{border:1px solid #cbd5e1;border-radius:10px;width:min(1500px,94vw);max-height:94vh;padding:12px}}
 dialog::backdrop{{background:#142c46bb}}#zoom-content img,#zoom-content svg{{display:block;width:100%;height:auto;max-height:82vh;object-fit:contain}}
 #zoom-close{{display:block;margin-left:auto}}
@@ -567,7 +611,18 @@ scores are calculated before taking it.</p></section>
 <p>One bar per antenna or pair, sorted from highest to lowest score; rank 1 is at the left.
 The raw and logarithmic views have the same ordering. Their y axes start at zero and fit the selected case.
 Teal bars and triangles mark the known injection. <span id='rank-truth'></span>
-Hover over a bar for its ID and both score values. Click any plot to enlarge.</p></section>
+Hover over a bar for its ID and both score values. Click any plot to enlarge.</p>
+<p><b>Feature counts per image ({nx} × {ny} pixels):</b>
+{feature_counts['complex_Z']:,} complex coefficients Z<sub>j</sub> → {feature_counts['power_P']:,} real powers P<sub>j</sub>;
+{feature_counts['scored_fourier_cells']:,} distinct Fourier cells contribute to scoring after folding opposite frequencies and excluding DC/Nyquist.
+These become <b>{feature_counts['baseline_B']:,} baseline scores B</b> and <b>{n:,} antenna scores A</b>.
+Using B and A together would give <b>{feature_counts['baseline_B']+n:,} scalar summary features</b> per image.
+They share information: A is derived from B. Mirrored matrix cells and raw/log plots add no new features;
+the complex Fourier grid also contains redundancy because the input image is real.</p>
+<p><b>Work behind these counts:</b> scoring computes a full {ny*nx:,}-cell FFT, then sums
+{feature_counts['coverage_nonzeros']:,} nonzero baseline–cell contributions and takes {n:,} antenna medians.
+The coverage weights come from {info['valid_samples']:,} valid visibility samples and are reused across cases for this observation.
+These counts describe feature extraction from an existing image; generating that image with CASA is additional work.</p></section>
 <section><h2>3. Follow a candidate into the visibility measurements</h2>
 <label>Candidate <select id='candidate-select' aria-label='Antenna or baseline candidate'></select></label>
 <p id='candidate-description'></p><p id='ranking'></p>
@@ -586,7 +641,7 @@ values for that measurement. Actual times are retained, so gaps are empty. Phase
 A pair's image score is constant along its time series; it does not locate the time of a fault.</p></section>
 <section><h2>4. Is the score useful here?</h2>
 <img class='report-image' alt='Antenna rank and antenna score by case type' src='{summary_uri}'>
-<p>In these strong-error examples, the known faulty antenna {ant} ranks first in <b>{top1}/{len(gain_rows)}</b> gain-error cases.
+<p>The known faulty antenna {ant} ranks first in <b>{top1}/{len(gain_rows)}</b> gain-error cases.
 Each dot represents a run. Both panels follow that same antenna; for no-gain cases it is only a reference,
 since there is no faulty antenna. The right panel shows its antenna score A directly, with the same
 logarithm as the candidate list; no score ratio is used.</p>
@@ -601,7 +656,7 @@ that a gain error exists. Shared uv cells can give several pairs high scores.</p
     script="const D="+json.dumps(payload,separators=(",",":"),allow_nan=False)+";\n"+PILOT_JS
     write_html(output/f"pilot_{sid}.html",f"Residual power and antenna candidates · {sid}",body,script)
     dump(out/"report_display.json",dict(residual_recipes=recipes,color_limit=color_limit,palette="Reds",
-         visibility_limits=visibility_limits,uv_samples_per_baseline=16))
+         visibility_limits=visibility_limits,uv_samples_per_baseline=16,feature_counts=feature_counts))
     dump(out/"inspection_summary.json",dict(source=sid,top1=top1,top3=top3,gain_cases=len(gain_rows),
         coverage_only_rank=coverage_rank,all_seed_top3_gate=top3==len(gain_rows),rank_rows=rank_rows,
         rank_rows_value="ln(1 + antenna score A)"))
@@ -618,7 +673,7 @@ def render_index(output):
     assert len(set(parents))==3 and len(set(projects))==3, "Review shared pilot parent observations"
     top1=sum(s["top1"] for s in summaries)
     body=f"""<p>Vault V2 Setup · section 1 only · 3 training observations · 3 noise seeds · 46 fresh simulations.</p>
-<div class='note'><b>The result:</b> the fixed injected antenna ranks first in {top1}/27 strong gain-error
+<div class='note'><b>The result:</b> the fixed injected antenna ranks first in {top1}/27 gain-error
 cases. The toy checks agree with direct dot products. This supports continuing the investigation;
 it is not a trained detector or an estimate of performance on unseen observations.</div>
 <section><h2>Read these reports in order</h2><ol>
@@ -645,14 +700,14 @@ rank ordering is expected when the same draw is scaled. Ranking alone cannot dis
 from noise. Shared uv cells and CLEAN can also spread a baseline's evidence.</p></section>
 <section><h2>What was checked and retained</h2><p>Analytical FFT sign, phase centre, rotated WCS, direct
 response, amplitude and power scaling; bilinear coverage and conjugate folding; training selection;
-exact parent sampling and flags; fixed imaging weights, WCS and PSFs; pure injection strengths near 30;
+exact parent sampling and flags; fixed imaging weights, WCS and PSFs; measured injection strengths;
 matching noise within seeds and independent draws across seeds. All 46 cases retain FITS, complex
 Fourier maps, coverage maps, sampled visibility evidence and numerical metadata.</p>
 <p>Each pilot HTML embeds its figures, data and controls and works offline. The index links to those
 files, so keep the five HTML files together when sharing. Variant MS copies were removed after saving
 evidence; the original archival data and V1 products are unchanged.</p></section>
 <div class='caution'><b>Boundary:</b> no dataset expansion, feature-bank construction, regression or physical
-gain fitting was performed. Figure 3 is deferred until fitting is authorized. Strong controlled
+gain fitting was performed. Figure 3 is deferred until fitting is authorized. Controlled
 localization is encouraging; weak errors, unfamiliar sky structure and detection thresholds remain untested.</div>"""
     write_html(output/"index.html","Making directional features visible",body)
     print(output/"index.html",flush=True)
@@ -713,8 +768,9 @@ function populate(){let c=D.cases[+cs.value],old=ca.value;ca.innerHTML='';
  ca.add(new Option('All antenna pairs','all'));
  if([...ca.options].some(o=>o.value===old))ca.value=old;
  byId('residual-panel').src=c.residual;byId('power-panel').src=c.power;byId('baseline-panel').src=c.matrix;
- let truth=c.variant==='no_gain'||c.variant==='double_noise'?'No gain error was injected.':c.injected_baseline?'Known injected fault: pair '+c.injected_baseline.join('–')+'.':'Known injected fault: antenna '+D.antenna+' ('+D.names[D.antenna]+').';
- byId('case-description').textContent=c.label+'. '+truth;
+ const fmt=x=>String(Number(x.toFixed(3)));
+ let error=c.measured_SNR_corr?(c.injected_baseline?'pair '+c.injected_baseline.map(a=>D.names[a]).join('–'):'ant '+D.names[D.antenna])+', amp '+fmt(c.gain_amplitude)+', ph '+fmt(c.gain_phase_deg)+'°':'none';
+ byId('case-description').textContent=c.label+' | Error: '+error+', SNR_corr '+fmt(c.measured_SNR_corr);
  drawRankedScores(c);
  draw();
 }

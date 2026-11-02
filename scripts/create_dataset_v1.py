@@ -42,6 +42,8 @@ THERMAL_DIR = (
 )
 DATASET_PBLIMIT = -0.1
 NOISE_CONTROL_INDEX_NAME = "dataset_noise_controls.json"
+NOISE_TRAINING_INDEX_NAME = "dataset_noise_training.json"
+NOISE_TRAINING_REPORT_NAME = "noise_training_report.json"
 NOISE_CONTROL_LABELS = {"not_corrupted": 0}
 NOISE_CONTROL_REL_TOL = 1e-5
 NOISE_CONTROL_DEFAULT_PARTITION = "val"
@@ -49,6 +51,7 @@ REPORT_SCHEMA_VERSION = 2
 REPORT_TEMPLATE = ROOT / "scripts" / "reporting" / "create_dataset_v1.qmd"
 LEGACY_SNR_CORR_TARGETS = (10.0, 30.0, 50.0, 100.0)
 SNR_CORR_TARGETS = (5.0, 10.0, 15.0, 20.0, 30.0, 40.0, 50.0, 100.0)
+NOISE_SNR_CORR_TARGETS = (*SNR_CORR_TARGETS, 1000.0, 2000.0, 3000.0, 4000.0)
 CORRUPTION_SOLINT = "10m"
 SNR_CORR_REL_TOL = 0.01
 BASE_SEED = 20260914
@@ -134,7 +137,7 @@ VARIANTS = tuple(
 )
 NOISE_CONTROLS = tuple(
     NoiseControl(target, f"noise_snr_{_target_text(target)}")
-    for target in SNR_CORR_TARGETS
+    for target in NOISE_SNR_CORR_TARGETS
 )
 LEGACY_LABELS = {
     "not_corrupted": 0,
@@ -1512,7 +1515,7 @@ def _write_comparison_plots(
     suffix_family = "noise" if family == "noise" else family
     sample_ids.extend(
         sample_id
-        for target in SNR_CORR_TARGETS
+        for target in (NOISE_SNR_CORR_TARGETS if family == "noise" else SNR_CORR_TARGETS)
         if (
             sample_id := _sample_id(
                 source_id, f"{suffix_family}_snr_{_target_text(target)}"
@@ -1567,7 +1570,7 @@ def _status_rows(
     }
     rows = []
     levels: Sequence[float | None] = (
-        (None, *SNR_CORR_TARGETS) if family != "noise" else SNR_CORR_TARGETS
+        (None, *SNR_CORR_TARGETS) if family != "noise" else NOISE_SNR_CORR_TARGETS
     )
     for target in levels:
         suffix = (
@@ -1678,6 +1681,8 @@ def _iterate_and_validate_dataset(
 def _iterate_and_validate_noise_controls(
     dataset_index: Path,
     requested_source_ids: Sequence[str],
+    *,
+    allowed_partitions: tuple[str, ...] = ("test", "val"),
 ) -> dict[str, Any]:
     from scripts.preprocessing import (
         load_dataset_manifest,
@@ -1694,7 +1699,7 @@ def _iterate_and_validate_noise_controls(
         for sample_id in _requested_noise_controls(source_id)
     }
     seen: set[str] = set()
-    counts = {"test": 0, "val": 0}
+    counts = dict.fromkeys(allowed_partitions, 0)
     for path in index.samples:
         sample = load_sample_manifest(path)
         if sample.sample_id in seen:
@@ -1704,9 +1709,9 @@ def _iterate_and_validate_noise_controls(
         seen.add(sample.sample_id)
         _assert_noise_control_sample(sample)
         partition = partition_for_sample(sample.sample_id)
-        if partition == "train":
+        if partition not in allowed_partitions:
             raise RuntimeError(
-                f"Training sample entered noise-control index: {sample.sample_id}"
+                f"Disallowed {partition} sample entered noise index: {sample.sample_id}"
             )
         counts[partition] += 1
     missing = expected - seen
@@ -1715,7 +1720,7 @@ def _iterate_and_validate_noise_controls(
             f"Noise-control index is missing {len(missing)} requested samples"
         )
     return {
-        "mode": "separate held-out noise-control index audit",
+        "mode": "separate training-noise index audit" if allowed_partitions == ("train",) else "separate held-out noise-control index audit",
         "sample_count": len(seen),
         "requested_sample_count": len(expected),
         "partition_counts": counts,
@@ -1791,7 +1796,7 @@ def _new_report_manifest(
             "corruption_solint": CORRUPTION_SOLINT,
             "SNR_corr_relative_tolerance": SNR_CORR_REL_TOL,
             "noise_control_SNR_corr_relative_tolerance": NOISE_CONTROL_REL_TOL,
-            "noise_control_levels": list(SNR_CORR_TARGETS),
+            "noise_control_levels": list(NOISE_SNR_CORR_TARGETS),
             "noise_control_default_partition": NOISE_CONTROL_DEFAULT_PARTITION,
             "noise_control_index": NOISE_CONTROL_INDEX_NAME,
             "noise_control_label": NOISE_CONTROL_LABELS,
@@ -2546,6 +2551,146 @@ def run_experiment(
     return output
 
 
+def _select_noise_training_sources(
+    baseline_sources: Sequence[str], available_sources: Sequence[str],
+    explicit_source_ids: Sequence[str] | None = None,
+) -> tuple[str, ...]:
+    return _select_noise_sources(baseline_sources, available_sources, explicit_source_ids, partition="train")
+
+
+def _select_noise_sources(baseline_sources, available_sources, explicit_source_ids=None, *, partition):
+    from scripts.preprocessing import partition_for_sample
+
+    eligible = tuple(source for source in baseline_sources
+                     if source in available_sources and partition_for_sample(source) == partition)
+    selected = tuple(explicit_source_ids) if explicit_source_ids else eligible
+    if not selected or len(selected) != len(set(selected)) or not set(selected) <= set(eligible):
+        raise ValueError(f"Noise generation requires unique {partition} sources with indexed baselines and completed precursors")
+    return selected
+
+
+def run_noise_training(*, source_run=None, output_dir=None, source_ids=None) -> Path:
+    """Add only training noise samples, preserving the existing V1 populations."""
+    return _run_noise_samples(source_run=source_run, output_dir=output_dir, source_ids=source_ids,
+                              partition="train", index_name=NOISE_TRAINING_INDEX_NAME,
+                              report_name=NOISE_TRAINING_REPORT_NAME)
+
+
+def run_noise_validation(*, source_run=None, output_dir=None, source_ids=None) -> Path:
+    """Add validation noise samples without running gain generation or repairs."""
+    return _run_noise_samples(source_run=source_run, output_dir=output_dir, source_ids=source_ids,
+                              partition="val", index_name=NOISE_CONTROL_INDEX_NAME,
+                              report_name="noise_controls_report.json")
+
+
+def _run_noise_samples(*, source_run=None, output_dir=None, source_ids=None,
+                       partition, index_name, report_name) -> Path:
+    from scripts.preprocessing import load_dataset_manifest, load_sample_manifest, partition_for_sample, source_dataset_id
+
+    output = Path(output_dir or DATASET_DIR).expanduser().resolve()
+    main_index = output / "dataset.json"
+    main = load_dataset_manifest(main_index, require_samples=False)
+    baselines = {}
+    main_ids = set()
+    for path in main.samples:
+        sample = load_sample_manifest(path, require_files=False, verify_integrity=False)
+        main_ids.add(sample.sample_id)
+        if sample.label_name == "not_corrupted" and partition_for_sample(sample.sample_id) == partition:
+            baselines[source_dataset_id(sample.sample_id)] = path
+    thermal_dir, manifest, available = find_thermal_run(source_run)
+    selected = _select_noise_sources(tuple(baselines), available, source_ids, partition=partition)
+    for source in selected:
+        load_sample_manifest(baselines[source])
+    index = output / index_name
+    indexed = _audit_noise_controls(index)
+    eligible = set(_select_noise_sources(tuple(baselines), available, partition=partition))
+    for sample_id in indexed:
+        if source_dataset_id(sample_id) not in eligible or sample_id in main_ids:
+            raise ValueError(f"Unexpected sample in {partition} noise index: {sample_id}")
+    completed = set(indexed)
+    configuration = {"schema_version": 1, "source_run": str(thermal_dir), "base_seed": BASE_SEED,
+                     "levels": list(NOISE_SNR_CORR_TARGETS), "definition": "extra-noise SNR_corr; baseline target 0",
+                     "main_index_sha256": hashlib.sha256(main_index.read_bytes()).hexdigest()}
+    report_path = output / report_name
+    report = json.loads(report_path.read_text()) if report_path.exists() else {
+        "configuration": configuration, "requested_source_ids": [], "samples": {}, "failures": {}}
+    if report["configuration"] != configuration:
+        previous = report["configuration"]
+        if (not set(previous.get("levels", [])) <= set(configuration["levels"])
+                or {k: v for k, v in previous.items() if k != "levels"}
+                != {k: v for k, v in configuration.items() if k != "levels"}):
+            raise ValueError("Noise configuration differs beyond an additive level extension")
+        report["configuration"] = configuration
+    requested_sources = sorted(set(report["requested_source_ids"]) | set(selected)
+                               | {source_dataset_id(sid) for sid in indexed})
+    if not set(requested_sources) <= eligible:
+        raise ValueError(f"Noise report contains sources outside {partition}")
+    report["requested_source_ids"] = requested_sources
+
+    def save_report():
+        serialized = json.dumps(report, indent=2, sort_keys=True, allow_nan=False) + "\n"
+        if not report_path.exists() or report_path.read_text() != serialized:
+            _atomic_write_json(report_path, report)
+
+    for source_id in selected:
+        requested = _requested_noise_controls(source_id)
+        for sample_id, control in requested.items():
+            if sample_id in completed:
+                continue
+            path = _sample_dir(output, sample_id)
+            if (path / "sample.json").exists():
+                recovered = load_sample_manifest(path / "sample.json")
+                _assert_noise_control_sample(recovered, control.SNR_corr_target)
+                if recovered.sample_id != sample_id:
+                    raise ValueError(f"Conflicting completed sample at {path}")
+                if (path / "cleanup.audit.json").is_file():
+                    # Reindex an already cleaned sample without rewriting its audit.
+                    _append_sample_to_dataset(index, recovered, completed, labels=NOISE_CONTROL_LABELS)
+                    completed.add(sample_id)
+                    indexed[sample_id] = recovered
+                    continue
+            if _recover_or_remove_sample(path, index, completed, labels=NOISE_CONTROL_LABELS,
+                                         validator=lambda sample, target=control.SNR_corr_target:
+                                         _assert_noise_control_sample(sample, target)):
+                indexed[sample_id] = load_sample_manifest(path / "sample.json")
+        pending = {sid: control for sid, control in requested.items() if sid not in completed}
+        source = _thermal_source(thermal_dir, manifest, source_id)
+        if pending:
+            _check_disk_space([source], output)
+            print(f"[{source_id}] generating {len(pending)} {partition} noise samples", flush=True)
+            try:
+                V_ms = _prepare_V_ms(source, output)
+                noise_model, noise_parameters, sigma = _noise_request(source)
+                thermal_seed = _stable_seed(source_id, "thermal_noise")
+                for sample_id, control in pending.items():
+                    try:
+                        path = _finalize_sample(source, None, None, None, None, None, V_ms,
+                                                sigma, None, noise_model, noise_parameters,
+                                                thermal_seed, output, None, noise_control=control)
+                        sample = load_sample_manifest(path)
+                        _assert_noise_control_sample(sample, control.SNR_corr_target)
+                        _append_sample_to_dataset(index, sample, completed, labels=NOISE_CONTROL_LABELS)
+                        completed.add(sample_id); indexed[sample_id] = sample
+                        report["failures"].pop(sample_id, None)
+                        report["samples"][sample_id] = _noise_control_payload(sample)
+                        save_report()
+                    except Exception as exc:
+                        report["failures"][sample_id] = f"{type(exc).__name__}: {exc}"
+                        save_report()
+                        raise
+            finally:
+                _cleanup_V_work(source, output)
+        for sample_id in requested:
+            report["samples"][sample_id] = _noise_control_payload(indexed[sample_id])
+            report["failures"].pop(sample_id, None)
+        save_report()
+    report["validation"] = _iterate_and_validate_noise_controls(index, requested_sources,
+                                                               allowed_partitions=(partition,))
+    save_report()
+    print(f"{partition} noise index: {index} ({len(completed)} samples)", flush=True)
+    return output
+
+
 def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -2570,11 +2715,24 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             "multiple sources (implies --noise-controls)"
         ),
     )
-    return parser.parse_args(argv)
+    parser.add_argument("--noise-training", action="store_true", help="Add noise variants for existing training sources only")
+    parser.add_argument("--noise-training-source", action="append", help="One training source; repeat to select several")
+    parser.add_argument("--noise-validation-only", action="store_true",
+                        help="Add validation noise variants only; skip gain generation and repairs")
+    arguments = parser.parse_args(argv)
+    if (arguments.noise_training or arguments.noise_training_source) and (arguments.noise_controls or arguments.noise_control_source_ids or arguments.noise_validation_only):
+        parser.error("Training-noise and held-out-control modes must be run separately")
+    return arguments
 
 
 def main(argv: Sequence[str] | None = None) -> Path:
     arguments = _parse_args(argv)
+    if arguments.noise_training or arguments.noise_training_source:
+        return run_noise_training(source_run=arguments.source_run, output_dir=arguments.output_dir,
+                                  source_ids=arguments.noise_training_source)
+    if arguments.noise_validation_only:
+        return run_noise_validation(source_run=arguments.source_run, output_dir=arguments.output_dir,
+                                    source_ids=arguments.noise_control_source_ids)
     return run_experiment(
         source_run=arguments.source_run,
         output_dir=arguments.output_dir,

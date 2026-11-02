@@ -225,9 +225,29 @@ def _inspect_homogeneous_sampling(ms: str | Path) -> _HomogeneousSampling:
 
 
 def _theoretical_sigma(sefd_jy: float, eta_c: float, sampling: _HomogeneousSampling) -> float:
-    return sefd_jy / (
-        eta_c * math.sqrt(2.0 * sampling.effective_bw_hz * sampling.exposure_s)
+    return theoretical_visibility_sigma(
+        sefd_jy=sefd_jy, eta_c=eta_c,
+        effective_bw_hz=sampling.effective_bw_hz, exposure_s=sampling.exposure_s,
     )
+
+
+def theoretical_visibility_sigma(
+    *, sefd_jy: float, eta_c: float, effective_bw_hz: float, exposure_s: float,
+) -> float:
+    """Baseline per-component visibility noise in Jy, from observing parameters.
+
+    This is the same radiometer equation used by the VLA simulator. It does not
+    use the injected perturbation, final MS weights, or measured image noise.
+    """
+    for name, value in (("sefd_jy", sefd_jy), ("eta_c", eta_c),
+                        ("effective_bw_hz", effective_bw_hz), ("exposure_s", exposure_s)):
+        if isinstance(value, bool):
+            raise ValueError(f"{name} must be a finite positive number")
+    sefd = _positive_float(sefd_jy, name="sefd_jy")
+    efficiency = _positive_float(eta_c, name="eta_c")
+    bandwidth = _positive_float(effective_bw_hz, name="effective_bw_hz")
+    exposure = _positive_float(exposure_s, name="exposure_s")
+    return sefd / (efficiency * math.sqrt(2.0 * bandwidth * exposure))
 
 
 def theoretical_vla_simplenoise(

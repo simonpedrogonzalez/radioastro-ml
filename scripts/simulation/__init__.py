@@ -10,6 +10,7 @@ from .noise import (
     natural_image_rms_from_simplenoise,
     simplenoise_from_image_rms,
     theoretical_vla_simplenoise,
+    theoretical_visibility_sigma,
 )
 from .simulations import (
     SimulationResult,
@@ -41,5 +42,6 @@ __all__ = [
     "render_simulation_text",
     "simplenoise_from_image_rms",
     "theoretical_vla_simplenoise",
+    "theoretical_visibility_sigma",
     "write_simulation_reports",
 ]
