@@ -1,6 +1,6 @@
 # Dataset v2: proposed update
 
-**Status (2026-11-05): implemented; one-source smoke and training sampling preview run; no full train/val simulation launched.** See §6. This revises the sampling, retention, parallel execution, and candidate targets/features in [the existing design](dataset_v2_three_task_design.md). Preserve historical runs and use a fresh versioned run for implementation.
+**Status (2026-11-05): implemented; one-source smoke and training sampling preview run; no full train/val simulation launched.** See §7 for generation smoke and §6 for ML integration. This revises the sampling, retention, parallel execution, and candidate targets/features in [the existing design](dataset_v2_three_task_design.md). Preserve historical runs and use a fresh versioned run for implementation.
 
 **Motivation:** the [snapshot audit](../ml/runs/20261105_damage_audit/report.html) reduced pooled validation RMSE from 0.1447 to 0.1020 using saved CLEAN diagnostics and target scaling. This is exploratory validation evidence. New sampling and dirty-image targets remain untested. Pooled RMSE mixes active and absent rows; reports for this plan always also give active-row and absent-row RMSE per damage type (§5).
 
@@ -100,7 +100,19 @@ No PSF-sidelobe, centroid, moment or generic observation-context features are pr
 2. Compare combined8, combined8 + dirty6, combined8 + model6, and combined8 + dirty6 + model6 (20 features) using source-grouped training folds, on the primary target `dC_k`. Fit regression targets in training-only RMS units and decode predictions for reporting.
 3. Report, per damage type and in damage units (RMSE): active-row error (injection present), absent-row error (injection absent, true damage 0), pooled error, training-constant baselines, mixture/severity slices, and source-bootstrap uncertainty. Include the **leakage metric**: predicted damage of one type on rows where that type is absent but another is present, in particular predicted amp damage on rows with a phase error and no amp error, and predicted phase damage on rows with an amp error and no phase error. Freeze features/ranges/model selection before reserved-test evaluation. Scale generation only after the pilot establishes useful target coverage and affordable retention.
 
-## 6. Implementation and smoke (2026-11-05)
+## 6. ML integration
+
+`ml.multitask` accepts the matched NPZ schema (`eC` maps to the existing total-error head `y_all`), retaining signed CLEAN damage as the damage target. Choose `--feature-view combined8`, `combined8_dirty6`, `combined8_model6`, or `all20`. All five model families and their binders use the selected input width. MLP missing-input means, standardization, and target RMS scales are fitted on training rows only and saved with the model; XGBoost uses native missing values. Dirty targets remain stored diagnostics.
+
+```
+bin/run ml python -m ml.matched_comparison --dataset TRAIN_RUN --output NEW_COMPARISON --folds 3 --jobs 4
+bin/run ml python -m ml.multitask --train TRAIN_RUN --val VAL_RUN --output NEW_MODELS --feature-view all20 --jobs 4
+bin/run ml python -m ml.multitask --train TRAIN_RUN --val VAL_RUN --output NEW_MODELS --report-only
+```
+
+The comparison command evaluates all four feature views and five model families using outer source-held-out folds. Each outer training partition reserves separate sources for tuning; frozen models are then evaluated on the outer held-out sources. Fold models are not refitted on their tuning sources. With three outer folds, at least six training sources are required; the one-source CASA smoke cannot establish model performance. Reports include training-constant/zero baselines, active/absent/pooled damage RMSE, source-bootstrap intervals, and JSON scores sliced by mask, amplitude strength, absolute phase, and noise ratio `r` (the latter reconstructed from plan metadata). Leakage RMSE conditions on an absent type and another present type. Bootstrap intervals condition on fitted predictions, excluding model-refitting uncertainty. Saved folds record fitting/tuning/evaluation source IDs; all model files and OOF predictions are retained. Test evaluation remains a separate explicit frozen-model command.
+
+## 7. Implementation and smoke (2026-11-05)
 
 **Code.** The previous generator is kept unchanged for the provenance of `runs/dataset-v2-20261105`; its per-source preparation was only moved into `prepare_source` (same behaviour).
 

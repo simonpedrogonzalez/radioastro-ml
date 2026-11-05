@@ -1,5 +1,6 @@
 import math
 import unittest
+from pathlib import Path
 
 import numpy as np
 from astropy.io import fits
@@ -130,6 +131,54 @@ class Features(unittest.TestCase):
         self.assertAlmostEqual(q[2], m.peak_over_scaled_mad)
         self.assertAlmostEqual(q[0], image.max() / m.scaled_mad_jy_per_beam)
         self.assertEqual(parity2(image), list(_parity_residual(torch.from_numpy(image.astype(np.float32)))))
+
+
+class Defects(unittest.TestCase):
+    def test_missing_tclean_model_flux_is_none_not_an_error(self):
+        from scripts.dataset_v2_matched_extract import tclean_model_flux
+        self.assertIsNone(tclean_model_flux({"final_model_flux_jy": None}))
+        self.assertIsNone(tclean_model_flux({}))
+        self.assertIsNone(tclean_model_flux({"final_model_flux_jy": float("nan")}))
+        self.assertEqual(tclean_model_flux({"final_model_flux_jy": .5}), .5)
+
+    def test_missing_feature_is_json_null_then_nan(self):
+        import json
+        from scripts.create_dataset_v2_matched import features_array
+        from scripts.dataset_v2_matched_extract import json_features
+        from scripts.preprocessing.schema import atomic_write_json
+        import tempfile
+        X = json_features([1., 2., float("nan")])
+        self.assertEqual(X, [1., 2., None])
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "x.json"
+            atomic_write_json(path, dict(X=X))
+            back = json.loads(path.read_text())["X"]
+        array = features_array([dict(X=back)])
+        self.assertTrue(np.isnan(array[0, 2]) and array[0, 0] == 1.)
+
+    def test_verify_rejects_missing_or_changed_products(self):
+        import tempfile
+        from scripts.create_dataset_v2 import file_sha
+        from scripts.create_dataset_v2_matched import check_products
+        keys = ("dirty", "clean", "residual", "psf", "model", "support")
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            products = {k: f"case/{k}.bin" for k in keys}
+            (root / "case").mkdir()
+            for k in keys:
+                (root / products[k]).write_bytes(k.encode())
+            hashes = {k: file_sha(root / products[k]) for k in keys}
+            check_products(root, products, hashes, "ok")
+            (root / products["dirty"]).write_bytes(b"doubled")
+            with self.assertRaisesRegex(ValueError, "dirty product changed"):
+                check_products(root, products, hashes, "changed")
+            (root / products["dirty"]).write_bytes(b"dirty")
+            (root / products["model"]).unlink()
+            with self.assertRaisesRegex(ValueError, "model product is missing"):
+                check_products(root, products, hashes, "missing")
+            with self.assertRaisesRegex(ValueError, "incomplete"):
+                check_products(root, {k: v for k, v in products.items() if k != "model"},
+                               {k: v for k, v in hashes.items() if k != "model"}, "omitted")
 
 
 if __name__ == "__main__":

@@ -244,3 +244,6 @@ slurm/logs/
 /collect/experiments
 /collect/extracted
 /collect/downloads
+
+# CASA temporary working lattices (created in the working directory by tclean/image tools)
+TempLattice*/

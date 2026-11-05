@@ -17,15 +17,33 @@ from scripts.preprocessing.schema import atomic_write_json
 
 NAMES = ("mlp", "xgb_shared", "xgb_independent", "xgb_xgb", "xgb_mlp")
 OUTPUTS = ("d_amp", "d_phase", "d_noise", "y_all", "p_amp", "p_phase", "p_noise")
+FEATURE_VIEWS = ("combined8", "combined8_dirty6", "combined8_model6", "all20")
 
 
-def load_split(root, split):
+def load_split(root, split, feature_view="combined8"):
     with np.load(root / f"{split}.npz", allow_pickle=False) as z:
         data = {key: z[key] for key in z.files}
     n = len(data["X"])
-    if data["X"].shape != (n, 8) or data["d"].shape != (n, 3) or data["o"].shape != (n, 3) or data["pi"].shape != (n, 3) or data["b"].shape != (n, 3):
+    if "eC" in data:
+        data["y_all"] = data["eC"]
+        plan_path = root / "plan.json"
+        if plan_path.exists() and "params" in data:
+            plan = json.loads(plan_path.read_text())
+            snr = {p["id"]: p["nominal_source_snr"] for p in plan["prepared_sources"]}
+            # Severity metadata for reporting only; never appended to X.
+            data["noise_ratio"] = data["params"][:, 2] / np.asarray([snr[str(s)] for s in data["source_ids"]])
+    names = tuple(map(str, data.get("feature_names", COMBINED8_FEATURES)))
+    if feature_view not in FEATURE_VIEWS:
+        raise ValueError(f"Unknown feature view: {feature_view}")
+    from scripts.dataset_v2_matched_extract import DIRTY6, MODEL6
+    selected = tuple(COMBINED8_FEATURES) + (DIRTY6 if feature_view in ("combined8_dirty6", "all20") else ()) + (MODEL6 if feature_view in ("combined8_model6", "all20") else ())
+    if data["X"].shape != (n, len(names)) or not set(selected) <= set(names) or len(set(names)) != len(names):
+        raise ValueError("Feature schema does not contain the requested view")
+    data["X"] = data["X"][:, [names.index(name) for name in selected]]
+    data["feature_names"] = np.asarray(selected)
+    if data["d"].shape != (n, 3) or data["o"].shape != (n, 3) or data["pi"].shape != (n, 3) or data["b"].shape != (n, 3):
         raise ValueError("Invalid v2 tabular shapes")
-    if not np.isfinite(data["X"]).all() or not np.isfinite(data["y_all"]).all():
+    if np.isinf(data["X"]).any() or not np.isfinite(data["y_all"]).all():
         raise ValueError("Nonfinite full-case features or total error")
     if not np.isfinite(data["d"][data["o"] == 1]).all() or not np.isnan(data["d"][data["o"] == 0]).all():
         raise ValueError("Sparse damage encoding changed")
@@ -162,6 +180,11 @@ def fit_mlp(x, train, val_x, val, *, seed=42, max_epochs=300, patience=20, fixed
     from torch import nn
 
     torch.manual_seed(seed)
+    # Missing model/peak ratios are imputed using fitting rows only, including OOF folds.
+    count = np.isfinite(x).sum(0)
+    fill = np.divide(np.nansum(x, axis=0), count, out=np.zeros(x.shape[1]), where=count > 0)
+    x = np.where(np.isnan(x), fill, x)
+    val_x = np.where(np.isnan(val_x), fill, val_x)
     scaler = StandardScaler().fit(x)
     xx = torch.tensor(scaler.transform(x), dtype=torch.float32)
     vx = torch.tensor(scaler.transform(val_x), dtype=torch.float32)
@@ -199,11 +222,12 @@ def fit_mlp(x, train, val_x, val, *, seed=42, max_epochs=300, patience=20, fixed
     else:
         best_epoch = fixed_epochs
     model.eval()
-    return dict(model=model, scaler=scaler, scale=scale, best_epoch=best_epoch)
+    return dict(model=model, scaler=scaler, fill=fill, scale=scale, best_epoch=best_epoch)
 
 
 def predict_mlp(fitted, x):
     import torch
+    x = np.where(np.isnan(x), fitted.get("fill", np.zeros(x.shape[1])), x)
     with torch.no_grad():
         return fitted["model"](torch.tensor(fitted["scaler"].transform(x), dtype=torch.float32)).numpy().astype(float)
 
@@ -216,14 +240,14 @@ def load_frozen(output, name):
         import torch
         from torch import nn
         saved = torch.load(output / f"{name}.pt", map_location="cpu", weights_only=False)
-        features = 22 if name == "xgb_mlp" else 8
+        features = saved["state"]["0.weight"].shape[1]
         model = nn.Sequential(nn.Linear(features, 64), nn.ReLU(), nn.Linear(64, 64), nn.ReLU(), nn.Linear(64, 7))
         model.load_state_dict(saved["state"]); model.eval()
         scaler = StandardScaler()
         scaler.mean_ = saved["mean"]; scaler.scale_ = saved["std"]
         scaler.var_ = scaler.scale_**2; scaler.n_features_in_ = features
         np.testing.assert_array_equal(scale, saved["scale"])
-        return dict(model=model, scaler=scaler, scale=scale)
+        return dict(model=model, scaler=scaler, fill=saved.get("fill", np.zeros(features)), scale=scale)
     import xgboost as xgb
     count = 7 if name == "xgb_independent" else 1
     models = []
@@ -272,7 +296,12 @@ def task_metrics(prediction, data):
                                   mae=float(np.sum(wk * np.abs(ek)) / keep.sum()),
                                   r2=None if label == "absent" or sub_var <= 1e-15 else float(1 - np.sum(wk * ek**2) / sub_var),
                                   mean_prediction=float(np.mean(prediction[keep, k])))
-        metrics[kind] = dict(damage_mae=mae, damage_rmse=math.sqrt(mse), damage_r2=r2,
+        leakage = {}
+        for j, other in enumerate(("amp", "phase", "noise")):
+            if j == k: continue
+            keep = ~b & data["b"][:, j].astype(bool)
+            leakage[other] = dict(rows=int(keep.sum()), rmse=float(np.sqrt(np.mean(prediction[keep, k]**2))) if keep.any() else None)
+        metrics[kind] = dict(damage_mae=mae, damage_rmse=math.sqrt(mse), damage_r2=r2, leakage=leakage,
                              damage_active=subsets["active"], damage_absent=subsets["absent"],
                              observed_damage=int(observed.sum()), observed_active=int((observed & b).sum()),
                              known_active=int(b.sum()), precision=precision, recall=recall, f1=f1,
@@ -301,7 +330,7 @@ def write_report(output, train, val, predictions, summary):
               for split, key in columns}
     parts = ["<!doctype html><html><head><meta charset='utf-8'><title>Dataset v2 three-task models</title>",
              "<style>body{font:15px system-ui;max-width:1400px;margin:auto;padding:1.5rem;color:#1b2932}table{border-collapse:collapse}th,td{border:1px solid #ccd;padding:.4rem;text-align:right}th:first-child,td:first-child{text-align:left}img{max-width:100%}</style></head><body>",
-             "<h1>Dataset v2: three-task models</h1><p>Train and validation only. Damage labels are observed sparsely in both splits; "
+             "<h1>Dataset v2: three-task models</h1><p>Train and validation only. Fully observed and sparse damage labels are supported; "
              "J uses training-only RMS scales. Validation selected hyperparameters. Binder train scores use source-held-out expert inputs.</p>",
              "<p><a href='results.json'>Results and selected settings</a> · <a href='stage_features.npz'>Saved OOF expert inputs</a></p>",
              "<h2>Summary of all tasks</h2><table><tr><th>Model</th>" + "".join(f"<th>{s} {k}</th>" for s,k in columns) + "</tr>"]
@@ -313,6 +342,14 @@ def write_report(output, train, val, predictions, summary):
             if value == minima[(split, key)]: text = f"<strong>{text}</strong>"
             cells.append(f"<td>{text}</td>")
         parts.append(f"<tr><td>{html.escape(name)}</td>{''.join(cells)}</tr>")
+    parts.append("</table>")
+    parts.append("<h2>False damage attributed to an absent type</h2><p>RMSE in damage units, conditional on another type being present.</p><table><tr><th>Model</th><th>Split</th><th>Absent type</th><th>Present type</th><th>Rows</th><th>RMSE</th></tr>")
+    for split in ("val", "train"):
+        for name in (*NAMES, "zero_baseline", "training_constant"):
+            for kind in ("amp", "phase", "noise"):
+                for other, metric in summary["metrics"][split][name][kind].get("leakage", {}).items():
+                    score = "—" if metric["rmse"] is None else f"{metric['rmse']:.4g}"
+                    parts.append(f"<tr><td>{name}</td><td>{split}</td><td>{kind}</td><td>{other}</td><td>{metric['rows']}</td><td>{score}</td></tr>")
     parts.append("</table>")
     parts.append("<h2>Damage error on active and absent rows</h2><p>Physical-unit RMSE per damage output. "
                  "<em>Active</em>: rows where that error type was injected (b=1); sparse labels use inverse-observation weights "
@@ -386,7 +423,7 @@ def write_report(output, train, val, predictions, summary):
 
 def subset(data, indices):
     n = len(data["X"])
-    return {key: value[indices] if getattr(value, "shape", ())[:1] == (n,) else value for key, value in data.items()}
+    return {key: value[indices] if key != "feature_names" and getattr(value, "shape", ())[:1] == (n,) else value for key, value in data.items()}
 
 
 def _fit_tree_family(train, val, name, jobs):
@@ -408,10 +445,19 @@ def _expert_matrix(independent, shared, x):
                             decode(predict_xgb(shared["model"], x), shared["scale"])))
 
 
-def fit(train_root, val_root, output, jobs=4):
-    train, val = load_split(train_root, "train"), load_split(val_root, "val")
+def fit(train_root, val_root, output, jobs=4, feature_view="combined8"):
+    train, val = load_split(train_root, "train", feature_view), load_split(val_root, "val", feature_view)
+    return fit_data(train, val, output, jobs, feature_view)
+
+
+def fit_data(train, val, output, jobs=4, feature_view="combined8"):
     if set(train["source_ids"]) & set(val["source_ids"]):
         raise ValueError("Train/validation sources overlap")
+    if len(set(train["source_ids"])) < 3:
+        raise ValueError("Five-family fitting requires at least three training sources for OOF binders")
+    if not np.array_equal(train["feature_names"], val["feature_names"]):
+        raise ValueError("Train/validation feature schemas differ")
+    width = train["X"].shape[1]
     output.mkdir(parents=True, exist_ok=True)
     fitted = {}
     for name in ("xgb_independent", "xgb_shared"):
@@ -436,12 +482,12 @@ def fit(train_root, val_root, output, jobs=4):
     stage_train = dict(train, X=np.column_stack((train["X"], oof)))
     stage_val = dict(val, X=np.column_stack((val["X"], _expert_matrix(
         fitted["xgb_independent"], fitted["xgb_shared"], val["X"]))))
-    if stage_train["X"].shape[1] != 22 or stage_val["X"].shape[1] != 22:
-        raise ValueError("Binder must receive 22 features")
+    if stage_train["X"].shape[1] != width + 14 or stage_val["X"].shape[1] != width + 14:
+        raise ValueError("Binder must receive input features plus 14 expert predictions")
     fitted["xgb_xgb"] = _fit_tree_family(stage_train, stage_val, "xgb_shared", jobs)
     fitted["xgb_mlp"] = fit_mlp(stage_train["X"], stage_train, stage_val["X"], stage_val)
     np.savez_compressed(output / "stage_features.npz", train_oof=oof,
-                        val_experts=stage_val["X"][:, 8:],
+                        val_experts=stage_val["X"][:, width:],
                         train_row_ids=train["row_ids"], val_row_ids=val["row_ids"])
     predictions = {}
     results = {}
@@ -480,13 +526,13 @@ def fit(train_root, val_root, output, jobs=4):
     for name, obj in fitted.items():
         if name in ("mlp", "xgb_mlp"):
             torch.save(dict(state=obj["model"].state_dict(), mean=obj["scaler"].mean_,
-                            std=obj["scaler"].scale_, scale=obj["scale"], epoch=obj["best_epoch"]),
+                            std=obj["scaler"].scale_, fill=obj["fill"], scale=obj["scale"], epoch=obj["best_epoch"]),
                        output / f"{name}.pt")
         else:
             models = obj["model"] if isinstance(obj["model"], list) else [obj["model"]]
             for j, model in enumerate(models):
                 model.save_model(output / f"{name}_{j}.json")
-    summary = dict(models=list(NAMES), outputs=list(OUTPUTS), feature_names=list(COMBINED8_FEATURES),
+    summary = dict(models=list(NAMES), outputs=list(OUTPUTS), feature_names=train["feature_names"].tolist(), feature_view=feature_view,
                    train_rows=len(train["X"]), val_rows=len(val["X"]),
                    train_sources=len(set(train["source_ids"])), val_sources=len(set(val["source_ids"])),
                    train_source_ids=sorted(set(map(str, train["source_ids"]))),
@@ -509,8 +555,9 @@ def fit(train_root, val_root, output, jobs=4):
 
 
 def report_only(train_root, val_root, output):
-    train, val = load_split(train_root, "train"), load_split(val_root, "val")
     summary = json.loads((output / "results.json").read_text())
+    view = summary.get("feature_view", "combined8")
+    train, val = load_split(train_root, "train", view), load_split(val_root, "val", view)
     predictions = {}
     for split, data in (("train", train), ("val", val)):
         predictions[split] = {}
@@ -530,8 +577,8 @@ def report_only(train_root, val_root, output):
 
 def evaluate_test(test_root, output):
     """One explicit frozen-model test evaluation, without selection or fitting."""
-    test = load_split(test_root, "test")
     summary = json.loads((output / "results.json").read_text())
+    test = load_split(test_root, "test", summary.get("feature_view", "combined8"))
     if set(test["source_ids"]) & (set(summary["train_source_ids"]) | set(summary["val_source_ids"])):
         raise ValueError("Test shares a parent source with development data")
     target = output / "test_results.json"
@@ -563,6 +610,7 @@ def main():
     p.add_argument("--test", type=Path)
     p.add_argument("--output", type=Path, required=True)
     p.add_argument("--jobs", type=int, default=4)
+    p.add_argument("--feature-view", choices=FEATURE_VIEWS, default="combined8")
     p.add_argument("--report-only", action="store_true")
     p.add_argument("--evaluate-test", action="store_true")
     a = p.parse_args()
@@ -575,7 +623,7 @@ def main():
         report_only(a.train, a.val, a.output)
     else:
         if not a.train or not a.val: p.error("Fit requires --train and --val")
-        fit(a.train, a.val, a.output, a.jobs)
+        fit(a.train, a.val, a.output, a.jobs, a.feature_view)
 
 
 if __name__ == "__main__":

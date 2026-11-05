@@ -383,6 +383,23 @@ def execute_unit(output, unit_id, scratch_root):
 
 # ---------------------------------------------------------------- stage 4: verify
 
+def check_products(output, products, hashes, label):
+    """Every retained product a label or feature was computed from must exist unchanged."""
+    if set(products) != set(hashes) or not {"dirty", "clean", "residual", "psf", "model", "support"} <= set(products):
+        raise ValueError(f"{label}: product list and stored hashes differ or are incomplete")
+    for key, rel in products.items():
+        path = output / rel
+        if not path.is_file():
+            raise ValueError(f"{label}: retained {key} product is missing: {path}")
+        if file_sha(path) != hashes[key]:
+            raise ValueError(f"{label}: retained {key} product changed: {path}")
+
+
+def features_array(rows):
+    """JSON null (missing feature) becomes NaN in the numeric dataset."""
+    return np.asarray([[np.nan if x is None else float(x) for x in r["X"]] for r in rows], np.float64)
+
+
 def verify_stage(output):
     from astropy.io import fits
     from scripts.dataset_v2_matched_extract import FEATURES
@@ -408,7 +425,14 @@ def verify_stage(output):
             rec = json.loads(path.read_text())
             if rec["plan_sha256"] != plan_hash or rec["feature_names"] != list(FEATURES):
                 raise ValueError(f"Case belongs to another plan/schema: {path}")
+            check_products(output, rec["products"], rec["product_sha256"], f"case {case_id}")
             records[case_id] = rec
+    for prepared in plan_data["prepared_sources"]:
+        sid = prepared["id"]
+        reference = json.loads((output / "sources" / sid / "recovery/noiseless/record.json").read_text())
+        check_products(output, reference["products"], reference["sha256"], f"reference {sid}")
+        if file_sha(output / prepared["reference_masks"]) != prepared["reference_sha256"]:
+            raise ValueError(f"reference {sid}: fixed masks changed")
     # Pairing: every unit of a source/slot rebuilt bit-identical V and nominal noise.
     for sp in plan_data["source_plans"]:
         for slot in range(len(sp["noise_seeds"])):
@@ -448,7 +472,7 @@ def verify_stage(output):
         return [r["A"] if r and m & 1 else 1., r["phi_deg"] if r and m & 2 else 0., r["a"] if r and m & 4 else 1.]
 
     out = output / f"{plan_data['split']}.npz"
-    np.savez_compressed(out, X=np.asarray([r["X"] for r in rows], np.float64), feature_names=np.asarray(FEATURES),
+    np.savez_compressed(out, X=features_array(rows), feature_names=np.asarray(FEATURES),
                         b=np.asarray([r["b"] for r in rows], np.int8), mask=np.asarray([r["mask"] for r in rows], np.int8),
                         eC=np.asarray([r["eC"] for r in rows]), eD=np.asarray([r["eD"] for r in rows]),
                         d=np.asarray([r["d"] for r in rows]), p=np.asarray([r["p"] for r in rows]),

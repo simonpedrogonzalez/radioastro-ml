@@ -58,6 +58,21 @@ def model6(model, omega, header, restored_peak):
             float(M[inside].sum()), float(M[outside].sum()), ratio], dict(F=F, inside_pixels=int(inside.sum()))
 
 
+def tclean_model_flux(convergence):
+    """CASA modelFlux summary, or None when CASA reports none (e.g. an empty model)."""
+    value = convergence.get("final_model_flux_jy")
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return None
+    return value if math.isfinite(value) else None
+
+
+def json_features(X):
+    """Missing feature values (nonfinite) are stored as JSON null."""
+    return [float(x) if x is not None and math.isfinite(float(x)) else None for x in X]
+
+
 def extract(root, record, masks_path, nominal_rms, reference_record):
     def plane(path):
         with fits.open(root / path, memmap=False) as hdul:
@@ -96,13 +111,16 @@ def extract(root, record, masks_path, nominal_rms, reference_record):
     dirty_features = image_qa4(dirty, masks_by["dirty"], dirty, masks_by["dirty"], header) + parity2(dirty)
     restored_peak = float(np.max(clean[masks_by["clean"] & np.isfinite(clean)]))
     m6, info = model6(model, omega, header, restored_peak)
-    summary = float(record["convergence"].get("final_model_flux_jy", float("nan")))
+    # The direct sums are the features; the CASA summary is only a cross-check when present.
+    summary = tclean_model_flux(record["convergence"])
     whole = float(model[np.isfinite(model)].sum())
-    if math.isfinite(summary) and abs(whole - summary) > 1e-3 * max(abs(summary), 1e-6):
+    if summary is not None and abs(whole - summary) > 1e-3 * max(abs(summary), 1e-6):
         raise ValueError(f"Model flux sum {whole} disagrees with tclean modelFlux {summary}")
     X = [*c8.tolist(), *dirty_features, *m6]
+    # Only the flux/peak ratio may be missing (restored peak <= 0 or nonfinite).
     if len(X) != len(FEATURES) or not all(math.isfinite(v) for v in X[:-1]):
         raise ValueError("Nonfinite matched v2 features")
+    X = json_features(X)
     if not (math.isfinite(eC) and math.isfinite(eD)):
         raise ValueError("Invalid targets")
     return dict(eC=eC, eD=eD, X=X, feature_names=list(FEATURES),

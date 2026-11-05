@@ -162,7 +162,11 @@ def compare_runs(run, other):
     identical = 0
     for cid in common:
         da = abs(a[cid]["eC"] - b[cid]["eC"]), abs(a[cid]["eD"] - b[cid]["eD"])
-        dx = float(np.nanmax(np.abs(np.subtract(a[cid]["X"], b[cid]["X"]))))
+        xa, xb = (np.asarray([np.nan if v is None else v for v in r[cid]["X"]], float) for r in (a, b))
+        if not np.array_equal(np.isnan(xa), np.isnan(xb)):
+            dx = float("inf")
+        else:
+            dx = float(np.max(np.abs(xa - xb)[~np.isnan(xa)], initial=0.))
         diff = dict(eC=max(diff["eC"], da[0]), eD=max(diff["eD"], da[1]), X=max(diff["X"], dx))
         identical += a[cid]["eC"] == b[cid]["eC"] and a[cid]["eD"] == b[cid]["eD"] and a[cid]["X"] == b[cid]["X"]
     hashes = {(json.loads(p.read_text())["v_sha256"], json.loads(p.read_text())["nominal_noise_sha256"])
@@ -238,9 +242,10 @@ def report(run, compare=None):
              _table(["Type", "Active rows", "min d", "median d", "max d", "negative d", "median p"], stats),
              "<img src='report_assets/d_by_parameter.png'><img src='report_assets/p_by_parameter.png'>",
              "<p class='note'>d_k = eC(case) − eC(case without k). p_k = ‖D(case) − D(case without k)‖ / ‖D0‖. "
-             "Colour is the presence mask, identical in every panel. Dirty-change points of different masks largely overlap: "
-             "the dirty image is linear in the visibilities, so removing one corruption changes it almost independently of the "
-             "others (exactly so for noise, which is added after the gains with the same realization).</p>",
+             "Colour is the presence mask, identical in every panel. With fixed imaging weights and paired noise, "
+             "the dirty change from removing added noise is independent of the gains. Amplitude and phase interact: "
+             "on their shared antenna, p_phase(amp+phase) = A × p_phase(phase), up to storage rounding. "
+             "Linearity of dirty imaging does not make these gain effects independent.</p>",
              "<h2>Features (20)</h2>", _table(["Feature", "min", "median", "max", "nonfinite"], feature_rows),
              "<h2>Resources per unit</h2>",
              _table(["Measure", "Value"], [
