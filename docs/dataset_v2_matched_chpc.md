@@ -50,6 +50,30 @@ bin/submit ml-cpu python -m scripts.report_dataset_v2_matched --dataset $RUN
 
 For the validation split, use a separate `RUN` and a prepare-stage config file containing `{"split": "val"}`.
 
+## ML experiments
+
+Run these on CHPC too, after `--verify` has written `train.npz` and `val.npz`. Train and val must come from the same CASA environment, because local and CHPC runs draw different noise from the same seed. The models are tabular, so the CPU profile is enough.
+
+```bash
+TRAIN=runs/dataset-v2-matched-train; VAL=runs/dataset-v2-matched-val
+
+# Feature-view comparison on the training split; outer folds hold out whole sources.
+bin/submit ml-cpu python -m ml.matched_comparison --dataset $TRAIN \
+  --output ml/runs/matched-v2-feature-comparison --folds 3 --jobs 8
+
+# Fit on train, evaluate on val (one job per feature view; they are independent).
+for v in combined8 combined8_dirty6 combined8_model6 all20; do
+  bin/submit ml-cpu python -m ml.multitask --train $TRAIN --val $VAL \
+    --output ml/runs/matched-v2-multitask-$v --feature-view $v --jobs 8
+done
+```
+
+- Output directories must be new; `matched_comparison` refuses an existing one.
+- `multitask` needs at least 3 training sources and no source shared between train and val. With 3 folds, `matched_comparison` needs at least 4 training sources in each fold.
+- Keep `--jobs` at or below `ML_CPU_CPUS`.
+- `bin/sync-reports` mirrors the resulting reports to `reports/ml-runs/`.
+- These were checked only locally, on relabeled copies of the smoke data. Runtimes on CHPC are not measured.
+
 ## Notes
 
 - **Split stages:** the prepare stage uses the shard count only to divide sources; `--plan --num-shards N` sets the execution assignment. To change `N` later, stop all jobs and rerun `--plan` with the new `N`; the plan itself does not change.
