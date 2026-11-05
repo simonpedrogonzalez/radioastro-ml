@@ -1,6 +1,6 @@
 # Dataset v2: proposed update
 
-**Status: proposal only; no generator changes or simulation launch.** This revises the sampling, retention, parallel execution, and candidate targets/features in [the existing design](dataset_v2_three_task_design.md). Preserve historical runs and use a fresh versioned run for implementation.
+**Status (2026-11-05): implemented; one-source smoke and training sampling preview run; no full train/val simulation launched.** See §6. This revises the sampling, retention, parallel execution, and candidate targets/features in [the existing design](dataset_v2_three_task_design.md). Preserve historical runs and use a fresh versioned run for implementation.
 
 **Motivation:** the [snapshot audit](../ml/runs/20261105_damage_audit/report.html) reduced pooled validation RMSE from 0.1447 to 0.1020 using saved CLEAN diagnostics and target scaling. This is exploratory validation evidence. New sampling and dirty-image targets remain untested. Pooled RMSE mixes active and absent rows; reports for this plan always also give active-row and absent-row RMSE per damage type (§5).
 
@@ -99,3 +99,37 @@ No PSF-sidelobe, centroid, moment or generic observation-context features are pr
 1. Pilot matched groups on several training sources spanning SNR/UV coverage; repeat noise seeds on a subset. Verify gain/noise pairing, complete removal joins, absent-type zeros, fixed geometry, retained products, and that sharded runs with different `N`/`P` in separate output directories give identical scientific unit outputs. Measure retained storage, peak scratch and memory before setting production concurrency.
 2. Compare combined8, combined8 + dirty6, combined8 + model6, and combined8 + dirty6 + model6 (20 features) using source-grouped training folds, on the primary target `dC_k`. Fit regression targets in training-only RMS units and decode predictions for reporting.
 3. Report, per damage type and in damage units (RMSE): active-row error (injection present), absent-row error (injection absent, true damage 0), pooled error, training-constant baselines, mixture/severity slices, and source-bootstrap uncertainty. Include the **leakage metric**: predicted damage of one type on rows where that type is absent but another is present, in particular predicted amp damage on rows with a phase error and no amp error, and predicted phase damage on rows with an amp error and no phase error. Freeze features/ranges/model selection before reserved-test evaluation. Scale generation only after the pilot establishes useful target coverage and affordable retention.
+
+## 6. Implementation and smoke (2026-11-05)
+
+**Code.** The previous generator is kept unchanged for the provenance of `runs/dataset-v2-20261105`; its per-source preparation was only moved into `prepare_source` (same behaviour).
+
+| File | Role |
+|---|---|
+| `scripts/dataset_v2_matched.py` | Pure recipes (stratified amp branch × phase sign, LHS in amp/phase/noise, weak bands), units, rows, shard assignment, joins |
+| `scripts/create_dataset_v2_matched.py` | Stages: `--prepare`, `--plan`, `--execute`, `--verify` (ML driver); CASA workers `--prepare-source` / `--unit` |
+| `scripts/dataset_v2_matched_extract.py` | eC, eD and the 20 features (combined8 + dirty6 + model6) |
+| `scripts/report_dataset_v2_matched.py` | `--preview` sampling report; `--dataset RUN [--compare OTHER]` labels/features/resources/determinism |
+| `tests/test_dataset_v2_matched.py` | Recipes, matched removals, seeds, shards, joins, feature identities |
+
+**Usage.**
+
+```
+bin/run ml python -m scripts.create_dataset_v2_matched --output RUN [--config C.json] --prepare --num-shards N --shard i --parallel P
+bin/run ml python -m scripts.create_dataset_v2_matched --output RUN --plan --num-shards N
+bin/run ml python -m scripts.create_dataset_v2_matched --output RUN --execute --num-shards N --shard i --parallel P [--scratch-root DIR]
+bin/run ml python -m scripts.create_dataset_v2_matched --output RUN --verify
+bin/run ml python -m scripts.report_dataset_v2_matched --dataset RUN
+```
+
+Configuration keys (JSON overrides of `DEFAULT`): `split`, `source_ids`, `recipes_per_source` (default 12, multiple of 4), `noise_slots`, `weak_fraction` (0.25), `ranges`, `weak_ranges`, `seed`. Weak bands are provisional (attenuation 0.664–0.98, amplification 1.02–1.431, |phase| 2–23.8°) until frozen from a training-only pilot.
+
+**Implementation choices.**
+- Each unit rebuilds the noiseless V and the nominal-noise realization in its own scratch. It records hashes of both, and `--verify` requires one hash pair per source/slot, which proves the pairing across units and shards.
+- Retained per case under `cases/<id>/`: FITS (dirty, clean, residual, psf, model), all native CASA tables (`clean.*`, `dirty.*`, including pb/sumwt/mask/psf/model), QA, support, record and `case.json`. Only per-case Measurement Set copies and scratch are deleted.
+- The dirty6 residual-path cross-check reproduces CASA `qa.json` to rtol 1e-5 for every case, so dirty6 uses the same functions and region. The model-flux sum is checked against tclean `modelFlux` (agreement ~1e-8 Jy).
+- The beam aperture is centred on the image reference direction (CRVAL), which is the tclean phase centre.
+- `<split>.npz` holds X (20), feature_names, b, mask, eC, d, eD, p, o = 1, π = 1, parameters, slot, and row/case/recipe/source ids.
+
+**Smoke** (`runs/dataset-v2-matched-smoke-20261105`, source 0449+113, R = 12): 13 units, 85 cases = 85 rows, no failures. Absent labels are exact zeros; 11/4/5 active amp/phase/noise damages are negative and kept. A second run with different sharding (`…-shards`: N = 2 × P = 2 versus N = 1 × P = 3) gave **85/85 bit-identical** eC, eD and X, and one (V, noise) hash pair over all 26 units. Measured per unit (7 images, 7 concurrent CASA processes on 10 cores): 253 s median wall time; peak scratch 635 MB for this 67 MB original MS (about 3× the simulation MS); peak RSS 590 MB. Retained storage is **7.3 MB per case** with CASA tables, about 75 GB for train + val at R = 12. Training preview: `runs/dataset-v2-matched-preview-20261105/sampling_preview.html` (100 sources, 8,500 rows).
+

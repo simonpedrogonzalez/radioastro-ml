@@ -1,7 +1,7 @@
 """Shared recovery imaging/checkpoints; CASA is imported only when invoked."""
 from __future__ import annotations
 
-def recovery_products(output, folder, source, sky, sigma, settings_hash, v=None):
+def recovery_products(output, folder, source, sky, sigma, settings_hash, v=None, retain_casa_tables=False):
     import hashlib
     import json
     import math
@@ -133,8 +133,9 @@ def recovery_products(output, folder, source, sky, sigma, settings_hash, v=None)
         if metadata is not None: record.update(metadata)
         atomic_write_json(cell/'record.json',record)
         # Retain compressed products and metadata, remove only generated CASA
-        # temporary tables/PNGs listed by the completed imaging result.
-        for path in directory.iterdir():
+        # temporary tables/PNGs listed by the completed imaging result, unless
+        # the caller retains every native CASA image table as well.
+        for path in ([] if retain_casa_tables else directory.iterdir()):
             if path.name.endswith('.fits.gz') or path.name in ('qa.json','qa.txt','support.npz'): continue
             if path.name.startswith(('clean.','dirty.','firstpass.','first_pass.')):
                 if path.is_dir(): shutil.rmtree(path)

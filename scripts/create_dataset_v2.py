@@ -186,11 +186,6 @@ def import_prepared(output, source_dir, sid, config):
 
 
 def prepare(output, config, *, smoke=False, workers=1, worker=0, import_from=None):
-    from casatools import table
-    from scripts.corruption import ConstantGainSpec, measure_constant_gain_norms
-    from scripts.recovery_products import recovery_products
-    from scripts.simulation import initialize_weights
-
     output = output.resolve()
     output.mkdir(parents=True, exist_ok=True)
     pilot = Path(config["pilot_root"]).resolve()
@@ -205,68 +200,78 @@ def prepare(output, config, *, smoke=False, workers=1, worker=0, import_from=Non
     sizes = {sid: ms_bytes(thermal_entries[sid]["original_ms"]) for sid in source_ids}
     (output / "prepared").mkdir(exist_ok=True)
     for sid in worker_sources(source_ids, sizes, workers, worker):
-        target = output / "prepared" / f"{sid}.json"
-        if not target.exists() and import_from and import_prepared(output, import_from, sid, config):
-            pass
-        if target.exists():
-            existing = json.loads(target.read_text())
-            if existing["configuration_hash"] != digest(config) or file_sha(output / existing["reference_masks"]) != existing["reference_sha256"]:
-                raise ValueError(f"Prepared source changed: {sid}")
-            continue
-        require_free_disk(output, 3 * sizes[sid] + 2_000_000_000, f"preparing {sid}")
-        manifest = json.loads((g.THERMAL_DIR / "report.json").read_text())
-        source = g._thermal_source(g.THERMAL_DIR, manifest, sid)
-        if tuple(source.imsize) != (256, 256):
-            raise ValueError(f"{sid}: combined8 requires native 256×256 images")
-        flux_spec = original_flux_spec(source)
-        sky = flux_spec["sky"]
-        _, _, sigma = g._noise_request(source)
-        folder = output / "sources" / sid / "recovery"
-        folder.mkdir(parents=True, exist_ok=True)
-        from scripts.injection_bounds_pilot import prepare_v
-        v = prepare_v(source, folder, sky, v2=True)
-        initialize_weights(v, sigma)
-        norms = {}
-        for ant, name in g._unflagged_antenna_choices(v):
-            try:
-                n = measure_constant_gain_norms(ConstantGainSpec(v, ant, "amp", 1, sigma, sign=1))
-            except ValueError as exc:
-                if "No finite positive visibility norm" in str(exc):
-                    continue
-                raise
-            norms[str(ant)] = dict(name=name, **asdict(n))
-        if not norms:
-            raise ValueError(f"{sid}: no eligible antennas")
-        spec = dict(schema=1, source=sid, configuration_hash=digest(config),
-                    pilot_plan_sha256=file_sha(pilot / "plan.json"),
-                    thermal_metadata_sha256=file_sha(source.simulation_metadata),
-                    sky=sky, flux_spec=flux_spec, sigma0_jy=sigma)
-        settings_hash = digest(spec)
-        atomic_write_json(folder / "settings.json", spec)
-        _, image_cell = recovery_products(output, folder, source, sky, sigma, settings_hash, v)
-        reference_cell = folder / "noiseless"
-        image_cell(reference_cell, v, 0., None, None)
-        reference = json.loads((folder / "reference.json").read_text())
-        masks_rel = str((folder / "reference_masks.npz").relative_to(output))
-        # The normal preparation path owns its scratch MS; retained reference
-        # FITS are the one-per-source fixed imaging infrastructure.
-        work = folder / "work"
-        if work.exists() and work.resolve().parent == folder.resolve():
-            shutil.rmtree(work)
-        data = dict(id=sid, split=config["split"], configuration_hash=digest(config),
-                    settings_hash=settings_hash, nominal_source_snr=flux_spec["nominal_source_snr"], flux_spec=flux_spec,
-                    nominal_rms=source.predicted_image_rms_jy_per_beam,
-                    sigma0_jy=sigma, norms=norms, reference_masks=masks_rel,
-                    reference_sha256=file_sha(output / masks_rel),
-                    reference_grid=str((folder / "reference_grid.json").relative_to(output)),
-                    reference_beam=reference["beam"],
-                    thermal_metadata_sha256=file_sha(source.simulation_metadata),
-                    parent_ms=str(source.simulation_ms), parent_original_ms=thermal_entries[sid]["original_ms"],
-                    parent_original_ms_sha256=tree_sha(thermal_entries[sid]["original_ms"]),
-                    grid_shape=list(source.imsize))
-        atomic_write_json(target, data)
-        print("PREPARED", sid, len(norms), flush=True)
+        prepare_source(output, config, sid, thermal_entries[sid], sizes[sid], pilot, import_from)
     return source_ids
+
+
+def prepare_source(output, config, sid, thermal_entry, size, pilot, import_from=None, retain_casa_tables=False):
+    """CASA preparation of one source: noiseless V, antenna norms and fixed reference."""
+    from scripts.corruption import ConstantGainSpec, measure_constant_gain_norms
+    from scripts.recovery_products import recovery_products
+    from scripts.simulation import initialize_weights
+
+    target = output / "prepared" / f"{sid}.json"
+    if not target.exists() and import_from and import_prepared(output, import_from, sid, config):
+        pass
+    if target.exists():
+        existing = json.loads(target.read_text())
+        if existing["configuration_hash"] != digest(config) or file_sha(output / existing["reference_masks"]) != existing["reference_sha256"]:
+            raise ValueError(f"Prepared source changed: {sid}")
+        return
+    require_free_disk(output, 3 * size + 2_000_000_000, f"preparing {sid}")
+    manifest = json.loads((g.THERMAL_DIR / "report.json").read_text())
+    source = g._thermal_source(g.THERMAL_DIR, manifest, sid)
+    if tuple(source.imsize) != (256, 256):
+        raise ValueError(f"{sid}: combined8 requires native 256×256 images")
+    flux_spec = original_flux_spec(source)
+    sky = flux_spec["sky"]
+    _, _, sigma = g._noise_request(source)
+    folder = output / "sources" / sid / "recovery"
+    folder.mkdir(parents=True, exist_ok=True)
+    from scripts.injection_bounds_pilot import prepare_v
+    v = prepare_v(source, folder, sky, v2=True)
+    initialize_weights(v, sigma)
+    norms = {}
+    for ant, name in g._unflagged_antenna_choices(v):
+        try:
+            n = measure_constant_gain_norms(ConstantGainSpec(v, ant, "amp", 1, sigma, sign=1))
+        except ValueError as exc:
+            if "No finite positive visibility norm" in str(exc):
+                continue
+            raise
+        norms[str(ant)] = dict(name=name, **asdict(n))
+    if not norms:
+        raise ValueError(f"{sid}: no eligible antennas")
+    spec = dict(schema=1, source=sid, configuration_hash=digest(config),
+                pilot_plan_sha256=file_sha(pilot / "plan.json"),
+                thermal_metadata_sha256=file_sha(source.simulation_metadata),
+                sky=sky, flux_spec=flux_spec, sigma0_jy=sigma)
+    settings_hash = digest(spec)
+    atomic_write_json(folder / "settings.json", spec)
+    _, image_cell = recovery_products(output, folder, source, sky, sigma, settings_hash, v,
+                                      retain_casa_tables=retain_casa_tables)
+    reference_cell = folder / "noiseless"
+    image_cell(reference_cell, v, 0., None, None)
+    reference = json.loads((folder / "reference.json").read_text())
+    masks_rel = str((folder / "reference_masks.npz").relative_to(output))
+    # The normal preparation path owns its scratch MS; retained reference
+    # FITS are the one-per-source fixed imaging infrastructure.
+    work = folder / "work"
+    if work.exists() and work.resolve().parent == folder.resolve():
+        shutil.rmtree(work)
+    data = dict(id=sid, split=config["split"], configuration_hash=digest(config),
+                settings_hash=settings_hash, nominal_source_snr=flux_spec["nominal_source_snr"], flux_spec=flux_spec,
+                nominal_rms=source.predicted_image_rms_jy_per_beam,
+                sigma0_jy=sigma, norms=norms, reference_masks=masks_rel,
+                reference_sha256=file_sha(output / masks_rel),
+                reference_grid=str((folder / "reference_grid.json").relative_to(output)),
+                reference_beam=reference["beam"],
+                thermal_metadata_sha256=file_sha(source.simulation_metadata),
+                parent_ms=str(source.simulation_ms), parent_original_ms=thermal_entry["original_ms"],
+                parent_original_ms_sha256=tree_sha(thermal_entry["original_ms"]),
+                grid_shape=list(source.imsize))
+    atomic_write_json(target, data)
+    print("PREPARED", sid, len(norms), flush=True)
 
 
 def plan(output, config, *, smoke=False):
