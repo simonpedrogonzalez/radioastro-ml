@@ -28,7 +28,9 @@ class FixedGrid:
         return replace(self.reference, first_pass_imagename=Path(workspace) / 'firstpass')
 
 
-def run(output: Path, source_id: str = '2241+098', *, no_noise: bool = False):
+def run(output: Path, source_id: str = '2241+098', *, no_noise: bool = False, noise_only: bool = False):
+    if no_noise and noise_only:
+        raise ValueError('Choose either no_noise or noise_only')
     output=output.resolve()
     if output.exists():
         raise FileExistsError(output)
@@ -49,6 +51,25 @@ def run(output: Path, source_id: str = '2241+098', *, no_noise: bool = False):
         injected=_apply_noise_control(source,control,v_ms,ms,sigma,model,params,seed)
         add_thermal_noise_inplace(ms,noise_model=model,noise_parameters=params,seed=seed)
         initialize_weights(ms,injected['final_total_sigma_jy'])
+        if noise_only:
+            # Pair this experiment with the exact SNR_corr=50 realization.
+            # Subtract the noiseless sky after both thermal draws, retaining its
+            # flags, UVW, weights, and finite-precision stored noise.
+            sky, observed = table(), table()
+            sky.open(str(v_ms), nomodify=True)
+            observed.open(str(ms), nomodify=False)
+            try:
+                assert sky.nrows() == observed.nrows()
+                for start in range(0, sky.nrows(), 4096):
+                    count = min(4096, sky.nrows() - start)
+                    for column in ('DATA', 'CORRECTED_DATA'):
+                        if column not in observed.colnames():
+                            continue
+                        delta = observed.getcol(column, startrow=start, nrow=count).astype(np.complex128)
+                        delta -= sky.getcol(column, startrow=start, nrow=count).astype(np.complex128)
+                        observed.putcol(column, delta, startrow=start, nrow=count)
+            finally:
+                observed.close(); sky.close()
     original=json.loads((DATASET_DIR/'samples'/f'{source_id}_noise_snr_50'/'imaging'/'qa.json').read_text())
     tb=table();tb.open(str(ms),nomodify=True)
     try:
@@ -67,7 +88,7 @@ def run(output: Path, source_id: str = '2241+098', *, no_noise: bool = False):
     region=BeamRegion(min_radius_beams=source.metric_min_radius_beams,max_radius_beams=source.metric_max_radius_beams)
     fixed_config = DefaultImagingConfig
     reference_grid = None
-    if no_noise:
+    if no_noise or noise_only:
         from scripts.imaging.models import ImageGrid, ResolvedGrid
         d=json.loads(Path('runs/uv-angular-2241-noise50-final/remove_00/imaging/qa.json').read_text())['resolved_config']['grid']
         reference_grid=ResolvedGrid(Beam(**d['beam']),ImageGrid(**d['image_grid']),Path(d['first_pass_imagename']))
@@ -84,7 +105,7 @@ def run(output: Path, source_id: str = '2241+098', *, no_noise: bool = False):
                 result[name]=digest.hexdigest()
             return result
         finally:tb.close()
-    before=fingerprints() if no_noise else None
+    before=fingerprints() if no_noise or noise_only else None
     uv_usable=np.any(~baseline_flags,axis=(0,1)) & ~row_flags
     extent=float(np.percentile(np.hypot(uvw[0][uv_usable],uvw[1][uv_usable]),99.5))*1.1
     np.savez_compressed(output/'uvw_initial.npz',u=uvw[0],v=uvw[1],usable=uv_usable,extent=extent)
@@ -133,16 +154,18 @@ def run(output: Path, source_id: str = '2241+098', *, no_noise: bool = False):
         (output/'results.json').write_text(json.dumps({'source':source_id,'baseline_seed':None if no_noise else seed,
             'extra_seed':injected['extra_noise_seed'],'measured_snr_corr':injected['SNR_corr_measured'],
             'sigma_reference_jy':sigma,'original_qa':original['metrics']['residual'],
-            'noise_mode':'none' if no_noise else 'baseline_plus_extra',
+            'noise_mode':'none' if no_noise else 'baseline_plus_extra_no_source' if noise_only else 'baseline_plus_extra',
+            'source_flux_jy':0.0 if noise_only else None,
             'injected_noise_sigma_jy':0. if no_noise else injected['final_total_sigma_jy'],
-            'grid_reference':'original SNR50 report 0% grid and mask' if no_noise else 'current 0% row',
+            'grid_reference':'original SNR50 report 0% grid and mask' if no_noise or noise_only else 'current 0% row',
             'mask':'atan2(v,u) mod 180 degrees; remove [0, 180*p/100) and conjugate',
             'rows':rows},indent=2)+'\n')
         print('Completed',pct,'actual removed',record['actual_usable_removed_percent'],flush=True)
-    if no_noise:
+    if no_noise or noise_only:
         from scripts.noise_snr_audit import measure_pair
-        measured=measure_pair(v_ms,ms,sigma)
-        assert measured['SNR_corr_actual']==0.
+        measured=measure_pair(v_ms,ms,sigma) if no_noise else None
+        if no_noise:
+            assert measured['SNR_corr_actual']==0.
         after=fingerprints();assert before==after
         tb.open(str(ms),nomodify=True)
         try:
@@ -150,7 +173,10 @@ def run(output: Path, source_id: str = '2241+098', *, no_noise: bool = False):
             np.testing.assert_array_equal(tb.getcol('FLAG_ROW'),row_flags | selected)
         finally:tb.close()
         (output/'validation.json').write_text(json.dumps(dict(rows=len(rows),
-            no_regular_or_extra_noise_added=True,measured_final_thermal_SNR_corr=0.,
+            no_regular_or_extra_noise_added=no_noise,
+            measured_final_thermal_SNR_corr=0. if no_noise else None,
+            source_visibility_subtracted=noise_only,
+            extra_thermal_SNR_corr=injected['SNR_corr_measured'],
             data_weights_unchanged_across_cuts=True,identical_column_hashes=after,
             final_flags_exact_original_or_90_percent_wedge=True,
             grid_and_clean_mask_pinned_to_original_report=True,
@@ -161,4 +187,5 @@ def run(output: Path, source_id: str = '2241+098', *, no_noise: bool = False):
 if __name__=='__main__':
     p=argparse.ArgumentParser(description=__doc__);p.add_argument('--output',type=Path,required=True);p.add_argument('--source',default='2241+098')
     p.add_argument('--no-noise',action='store_true',help='Sky only: neither baseline nor extra thermal noise; pin original report grid')
-    a=p.parse_args();run(a.output,a.source,no_noise=a.no_noise)
+    p.add_argument('--noise-only',action='store_true',help='SNR_corr=50 noise with the predicted source visibility removed')
+    a=p.parse_args();run(a.output,a.source,no_noise=a.no_noise,noise_only=a.noise_only)

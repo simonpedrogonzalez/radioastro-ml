@@ -326,6 +326,7 @@ class ImagingConfig:
     savemodel: str = "none"
     interactive: bool = False
     parallel: bool = False
+    restoring_beam: Optional[Beam] = None
 
     def __post_init__(self) -> None:
         if self.datacolumn not in ("corrected", "data"):
@@ -336,6 +337,12 @@ class ImagingConfig:
             raise ValueError("gain must be positive")
         if self.mask_nbeams is not None and self.mask_nbeams <= 0:
             raise ValueError("mask_nbeams must be positive or None")
+        if self.restoring_beam is not None:
+            beam = self.restoring_beam
+            if not isinstance(beam, Beam) or not all(math.isfinite(v) for v in (
+                beam.major_arcsec, beam.minor_arcsec, beam.position_angle_deg
+            )) or beam.major_arcsec <= 0 or beam.minor_arcsec <= 0:
+                raise ValueError("restoring_beam must be a finite positive Beam")
 
     def _base_parameters(self) -> Dict[str, Any]:
         result: Dict[str, Any] = {
@@ -354,6 +361,11 @@ class ImagingConfig:
         }
         if self.deconvolver == "mtmfs":
             result["nterms"] = self.nterms
+        if self.restoring_beam is not None:
+            beam = self.restoring_beam
+            result["restoringbeam"] = [f"{beam.major_arcsec:.15g}arcsec",
+                                      f"{beam.minor_arcsec:.15g}arcsec",
+                                      f"{beam.position_angle_deg:.15g}deg"]
         return result
 
     def resolve(

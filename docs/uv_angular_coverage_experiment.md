@@ -35,3 +35,21 @@ flags and unchanged DATA/noise-weight column hashes across cuts. The retained
 independent `validate.py` checks every stored visibility against the noiseless
 sky (including flagged samples), all 30 FITS for finiteness, original grids and
 measurement masks, and recalculates annulus MAD/peak/tail statistics.
+
+## Noise-only replication (no source)
+
+The [noise-only SNR_corr=50 report](../runs/uv-angular-2241-no-source-noise50-20261104/report.html)
+uses the same `2241+098` template and the original extra-noise target of 50.
+The ordinary baseline noise is also present. After generating the paired noisy
+sample, subtract its predicted point-source visibilities from `DATA` and
+`CORRECTED_DATA`. Keep the original flags, weights, UVW, noise realization,
+fixed image grid, CLEAN mask and residual measurement annulus. Image the same
+0–90% angular cuts and report the same dirty/CLEAN/residual products and
+residual scaled MAD, absolute peak and P99.5/MAD statistics.
+
+```sh
+bin/run casa scripts/uv_angular_coverage_experiment.py \
+  --output runs/uv-angular-2241-no-source-noise50-20261104 --noise-only
+ml/.venv/bin/python -m scripts.uv_angular_coverage_report \
+  runs/uv-angular-2241-no-source-noise50-20261104
+```

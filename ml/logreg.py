@@ -80,13 +80,36 @@ def _nested(value: Any, keys: tuple[str, ...], *, context: str) -> Any:
 
 
 def parity_features(image) -> tuple[float, float]:
-    residual = image[2]
+    return _parity_residual(image[2])
+
+
+def _parity_residual(residual) -> tuple[float, float]:
     values = residual.numpy()[_ANNULUS]
     scale = float(1.4826 * np.median(np.abs(values - np.median(values))))
     if not math.isfinite(scale) or scale <= 0:
         raise ValueError("Residual annulus has nonpositive/nonfinite MAD scale")
     components = parity_channels(residual)[:, 1:, 1:].double() / scale
     return tuple(float(value) for value in np.log1p(components.square().mean((-2, -1)).numpy()))
+
+
+def combined8_from_products(qa: dict[str, Any], residual: np.ndarray, sigma_na: float) -> np.ndarray:
+    """Extract the existing combined8 view from one full-case image and QA."""
+    import torch
+
+    if residual.shape != (256, 256) or not np.isfinite(residual).all():
+        raise ValueError("combined8 requires a finite native 256×256 residual")
+    values = []
+    for name in QA_FEATURES:
+        keys = tuple(name.split("."))[1:]
+        if _nested(qa.get("metric_validity"), keys, context=f"validity for {name}") is not True:
+            raise ValueError(f"Invalid combined8 QA metric: {name}")
+        value = _nested(qa.get("metrics"), keys, context=name)
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+            raise ValueError(f"Nonfinite combined8 QA metric: {name}")
+        values.append(float(value))
+    values.extend(_parity_residual(torch.from_numpy(np.asarray(residual, dtype=np.float32))))
+    values.extend((float(sigma_na), sigma_sna_units(values[1], float(sigma_na))))
+    return np.asarray(values, dtype=np.float64)
 
 
 def features_from_dataloader(dataloader: Any, *, source_noise: dict[str, dict] | None = None) -> FeatureSet:
@@ -108,13 +131,14 @@ def features_from_dataloader(dataloader: Any, *, source_noise: dict[str, dict] |
                 if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
                     raise ValueError(f"Sample {sample_id!r} has nonfinite metric {name}")
                 values.append(float(value))
-            vector = [*values, *parity_features(image)]
             if source_noise is not None:
                 source_id = source_dataset_id(sample_id)
                 if source_id not in source_noise:
                     raise ValueError(f"Sample {sample_id!r} has no source noise reference")
                 sigma_na = sigma_na_from_source(source_noise[source_id])
-                vector.extend((sigma_na, sigma_sna_units(values[1], sigma_na)))
+                vector = combined8_from_products(qa, image[2].numpy(), sigma_na)
+            else:
+                vector = [*values, *parity_features(image)]
             vectors.append(vector)
             labels.append(int(label)); sample_ids.append(sample_id)
             source_ids.append(source_dataset_id(sample_id)); metadata_rows.append(dict(metadata))
@@ -323,5 +347,5 @@ if __name__ == "__main__":
     raise SystemExit(main())
 
 
-__all__ = ["ALL_FEATURES", "FEATURE_VIEWS", "PARITY_FEATURES", "QA_FEATURES", "SIMPLE_FEATURES", "COMBINED8_FEATURES",
+__all__ = ["ALL_FEATURES", "FEATURE_VIEWS", "PARITY_FEATURES", "QA_FEATURES", "SIMPLE_FEATURES", "COMBINED8_FEATURES", "combined8_from_products",
            "FeatureSet", "features_from_dataloader", "grouped_folds", "parity_features", "tune"]

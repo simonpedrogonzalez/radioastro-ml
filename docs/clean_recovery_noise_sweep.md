@@ -1,55 +1,34 @@
-# CLEAN recovery metrics: implementation plan
+# CLEAN recovery metric comparison
 
-Implement the experiment defined in [the vault note](</Users/u1528314/Documents/Obsidian Vault/Notes/CLEAN Recovery Metrics and Thermal Noise Sweep.md>). This document is a plan only. Use a fresh run directory and preserve existing experiments and ML targets.
+[Completed original-flux report](../runs/clean-recovery-original-flux-20261104/report.html): 171/171 images, 180 paired metric rows, no invalid cases.
 
-## Reuse and required changes
+The current experiment is the original-flux thermal-noise comparison. The earlier [2026-11-02 pilot](../runs/clean-recovery-pilot-20261102/report.html) used the Dataset v1 SNR-preserving simulated flux and is retained as a historical run. It must not be resumed with the new protocol. The stopped training run is also historical.
 
-| Existing code | Use for this experiment |
-| --- | --- |
-| `scripts/noise_uv_experiments.py` | Extend its existing `source_run` with an optional recovery mode and explicit seeds. Reuse source lookup, sky construction, paired noise scaling, checkpoint records and scratch-MS cleanup. Default behavior stays unchanged. |
-| `scripts/create_dataset_v1.py` | Reuse `_noise_request`, `_simulation_payload`, `_prepare_V_ms`, `_rescale_visibility_delta` and `_cleanup_V_work`. |
-| `scripts/uv_angular_coverage_experiment.py::FixedGrid` | Freeze the grid and CLEAN-mask reference beam across all seeds and levels. |
-| `scripts/imaging/imaging.py::image_ms` | Use `keep_intermediate_products=True` until raw model and valid support are exported. Current default cleanup deletes these products. |
-| `scripts/imaging/config.py::ImagingConfig` | Add an optional restoring-beam setting, default unset, forwarded to CASA. `FixedGrid` alone does not fix the actual restoring beam. |
-| `scripts/imaging/fits.py::export_casa_fits` | Reuse compressed atomic export for the model. First extend the single-plane loader in `scripts/preprocessing/fits.py` to accept `Jy/pixel`, which it currently rejects. Keep image-triplet checks requiring `Jy/beam`. |
-| `scripts/noise_uv_report.py` | Reuse HTML/table and FITS plotting patterns in a small dedicated recovery report module. Its current plots are hard-coded to uv cuts, different metrics and independently scaled panels. |
+## Scientific setup
 
-Add one recovery metrics/report module using NumPy, Astropy, Matplotlib and **[kneed](https://github.com/arvkevi/kneed)**. Add `kneed` to the existing ML environment's dependencies in `ml/pyproject.toml` and record the installed version. Use the package implementation, not a custom knee detector.
+For each source, take the point-source position from the existing thermal simulation metadata and the **flux from the original CASA image's `tclean_summary.final_model_flux_jy`** in `collect/experiments/extracted_thermal_simulation_comparison_20260909T005739/<source>/original/default_imaging/qa.json`. This is the integrated CLEAN model estimate of the original point-source flux. Record its original restored-image peak as a cross-check. For 2241+098, these are 0.1498904526 Jy and 0.1493805349 Jy/beam, respectively; the old SNR-preserving simulation used 0.0921665222 Jy. Predict fresh noiseless visibilities from the *original input Measurement Set*, with the original flux and position. The original data remain read-only.
 
-## Generate only the required runs
+Keep the theoretical ideal thermal-noise request and nominal visibility weights from the prior protocol. One noiseless image is shared. For each of ten independent seeds, make a regular-noise realization at `a=1`, then scale that same additive realization to `a=2.5,5,10,15,20,30,40,50,100,200,400,700,1000,2000,3000,4000`. Image the noiseless case first and freeze its grid, beam, CLEAN search mask and valid evaluation support. Store settings, flux provenance, seed map, products and hashes in run-owned checkpoints. A changed settings hash requires a new run directory.
 
-1. Start with `2241+098`, original flags and `cuts=[0]`. Use its stored point-source flux and phase-centre coordinates. Run levels `[0,1,2.5,5,10,15,20,30,40,50,100,200,400,700,1000,2000,3000,4000]` and noise seeds `0..9`. One noiseless run is shared by all seeds: 171 unique images initially.
-2. Reuse the generator's `V + a*n_seed` scaling. The current script uses one source-derived seed and no seed directory, so add explicit seed handling and seed-aware checkpoints. Build one `regular.ms` per seed, and reuse its noise realization across levels. In recovery mode initialize every MS with the same nominal `sigma0` weights, including zero noise. The current uv sweep instead scales absolute weights with `a`.
-3. Image the noiseless source first. Save its resolved grid, central CLEAN mask, final restoring beam, metric annulus and valid image support. Reuse them for every remaining run. Preserve `DefaultImagingConfig`: MTMFS with `nterms=1`, Briggs 0.5, gain 0.1, six-beam mask diameter, and its existing `nsigma`/dirty-peak stopping policy. Record each resolved threshold and convergence summary.
-4. Save `dirty`, `clean`, `residual`, `psf`, **raw model** (`.model.tt0`, Jy/pixel) and reference support masks before deleting temporary CASA products. Obtain validity from CASA masks and normalization support, including the configured PB cutoff. Do not infer support from nonzero pixels or the CLEAN search mask. Current zero-filled FITS cannot distinguish invalid support from genuine zeros.
-5. Write source/seed/level records atomically, including product paths, exact flux, sigma0, seed, actual imaging configuration and geometry. A completed record must include the required model/support products and matching settings. Existing uv-sweep records alone do not satisfy this experiment. Resume only matching complete runs.
+Define the thermal coordinate as in the [simulation parametrization note](</Users/u1528314/Documents/Obsidian Vault/Notes/Simulation Parametrization Pilot.md>):
 
-Use the existing CASA launcher (`bin/run casa`) for generation and `ml/.venv/bin/python` for report generation. The current `run_noise_uv_experiments.py` automatically queues training sources and the old report, so do not use that queue unchanged for the single-source pilot. Extend its configuration only when launching the later training-source batch.
+$$\mathrm{SNR}_0=F/\sigma_{\mathrm{img},0},\qquad r=a/\mathrm{SNR}_0.$$
 
-## Compute the specified metrics
+Here $F$ is the original imaging model flux estimate and $\sigma_{\mathrm{img},0}$ is the stored *predicted nominal image RMS*. `r` and `a` are both saved per metric row. The noiseless image has `a=r=0`; the regular thermal control has `a=1` and `r=1/SNR0`.
 
-Load matching planes with Astropy. Use the full fixed valid image region `Omega`. Use celestial WCS and beam position angle to obtain major/minor-axis offsets `u,v` in arcsec. With beam FWHM `bmaj,bmin`, compute `rho²=(u/bmaj)²+(v/bmin)²`, source region `S = Omega & (rho<=1)`, and true restored image `T=F*exp(-4*ln(2)*rho²)`. The source centre is the stored true position, not the brightest pixel.
+## Metrics and report
 
-The direct imaging code uses ordinary restoration and exports image/residual without residual rescaling, so obtain the smoothed model as `C=I-R`. Keep the raw model `M` for flux sums. All norms below use `Omega` and denominators from `T`:
+Let $I$ be restored image, $R$ residual, $C=I-R$ smoothed CLEAN model, $M$ raw CLEAN model, and $T$ the analytic point source restored by the fixed peak-one beam. Evaluate on the fixed valid pixel support $\Omega$. Use $D_1(X,Y)=\sum_\Omega|X-Y|/\sum_\Omega|T|$ and $D_2(X,Y)=\sqrt{\sum_\Omega(X-Y)^2/\sum_\Omega T^2}$. For same-seed regular images $I_1,C_1$, save $e_{TI,p}=D_p(I,T)$, $e_{TM,p}=D_p(C,T)$, $e_{II,p}=D_p(I,I_1)$ and $e_{MM,p}=D_p(C,C_1)$ for $p=1,2$. The CSV also retains raw-model flux, position and residual-RMS diagnostics. The noiseless paired metrics are repeated for each seed because the regular comparator differs.
 
-| CSV keys / note symbols | Calculation |
-| --- | --- |
-| `e_TI_1`, `e_TI_2` / $e_{TI,p}$ | `D_p(I,T)` |
-| `e_TM_1`, `e_TM_2` / $e_{TM,p}$ | `D_p(C,T)` |
-| `e_II_1`, `e_II_2` / $e_{II,p}$ | `D_p(I,I_regular_same_seed)` |
-| `e_MM_1`, `e_MM_2` / $e_{MM,p}$ | `D_p(C,C_regular_same_seed)` |
-| `e_Fin` / $e_{\text{Fin}}$ | `abs(sum(M[S])-F)/F`, also save signed flux error |
-| `e_Fout` / $e_{\text{Fout}}$ | `sum(abs(M[Omega & ~S]))/F` |
-| `e_pos` / $e_{\rm pos}$ | `rho` at the brightest `C` pixel in `Omega`, using the note's tie and missing-detection rules |
+The report has one contiguous seven-row, two-column figure. The first four rows show TI, TM, II and MM with $L_2$ at left and $L_1$ at right. The fifth row shows $e_{\mathrm{Fin}}$ and $e_{\mathrm{Fout}}$. Position error occupies the sixth row at left, and robust residual RMS occupies a dedicated seventh row at left; unused right-side panels are hidden. Axes share the thermal coordinate and have a light grid. Each visible panel has its own labeled y scale; right-column y ticks appear on the right. Interior x tick labels are hidden. Bottom ticks label `r` with the corresponding `a` in parentheses; zero appears on the same symmetric-log x axis. Thin lines show seeds, and the dark mean with a one-standard-deviation band summarizes each injection level. Position values flagged as unreliable for empty raw models remain in the CSV but are omitted from the plot and its summary. No knee detection, extra zero-point subplot or image gallery is generated. Full image/model products remain linked through checkpoint records. `metrics.csv`, `progress.json` and `report_status.json` document data and missing cases.
 
-Here `D_1(X,Y)=sum(abs(X-Y))/sum(abs(T))` and `D_2(X,Y)=sqrt(sum((X-Y)**2)/sum(T**2))`. Use float64 arithmetic. Compute the shared noiseless reconstruction once, but pair it with each seed's regular image when calculating `e_II`/`e_MM`. Reuse `beam_region_mask` and `summarize_residual_pixels` for the existing annulus robust RMS. Save all metrics, masks and missing/failed-run status. Newly nonfinite pixels inside `Omega` invalidate the run.
+## Run
 
-## Report and knee markers
+Use a fresh output directory; the coordinator writes `recovery_flux_mode.json` before launching CASA, which prevents accidentally using the old SNR-preserving flux path. It refreshes the report during generation:
 
-Produce `report.html`, `metrics.csv` and `knees.json`. For each metric plot individual seeds, the median and the 10th–90th percentile band, with **log noise multiplier on x and untransformed error on linear y**. Show zero noise separately. Report seed counts at each level and missing position detections. For image comparisons use shared scales within each product, with separate Jy/pixel scales for raw models.
+```sh
+ml/.venv/bin/python -m scripts.run_clean_recovery \
+  --output runs/clean-recovery-original-flux-20261104
+```
 
-Run `kneed.KneeLocator(log10(a), metric, curve="convex", direction="increasing", S=1.0, interp_method="interp1d", online=False)` on the median and each seed, using finite metric values at `a>1`. Keep zero error values. Require three usable levels and variation in both axes. Convert `.knee` back with `10**locator.knee`. Record `None` as no knee, and flag curves whose shape is unsuitable for the increasing-convex assumption.
-
-**Mark every detected median knee** with a prominent point, dashed vertical line and numeric noise-multiplier label on its metric plot. Mark seed knees as smaller points on their own curves. If no knee is found, say so on the plot. Include linked image/model/residual panels at regular noise, detected knees and the largest noise. Cite [Kneedle (Satopää et al., 2011)](https://raghavan.usc.edu/papers/kneedle-simplex11.pdf) and [kneed](https://github.com/arvkevi/kneed) in the report.
-
-The axes and range define the knee being sought. On log-x/linear-y axes even a smooth power law can be curved. Report candidate knees, not proven CLEAN failures. After the pilot, reuse the same implementation per training source without changing source splits or fitting ML models as part of this experiment.
+A smaller validation run can be made by writing `{"mode":"original_imaging_model_flux"}` to `recovery_flux_mode.json` in a fresh run directory, then invoking `bin/run casa scripts/noise_uv_experiments.py --recovery --output <run> --source 2241+098 --levels 0 1 10 --seeds 0`, followed by `ml/.venv/bin/python -m scripts.clean_recovery_noise_sweep --output <run>`. Never modify an existing run's flux mode. Run the analytical checks with `ml/.venv/bin/python -m unittest tests.test_clean_recovery_noise_sweep -q`.

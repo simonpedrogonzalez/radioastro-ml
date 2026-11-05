@@ -36,9 +36,11 @@ def _normalized_unit(value: Any, path: Path) -> str:
     aliases = {"jy/beam", "jybeam-1", "jy.beam-1"}
     if normalized in aliases:
         return "Jy/beam"
+    if normalized in {"jy/pixel", "jy/pix", "jypixel-1", "jy.pixel-1"}:
+        return "Jy/pixel"
     if normalized in {"1", "dimensionless"}:
         return "dimensionless"
-    raise ValueError(f"FITS BUNIT must be Jy/beam or dimensionless, got {value!r}: {path}")
+    raise ValueError(f"FITS BUNIT must be Jy/beam, Jy/pixel or dimensionless, got {value!r}: {path}")
 
 
 def load_fits_plane(

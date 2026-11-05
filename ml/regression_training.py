@@ -31,12 +31,21 @@ def fit_filtered_candidate(X, y, mask, params, *, jobs):
 
 
 def masked_squared_error(mask):
-    """Derivatives of sum(mask * (prediction - truth)^2 / 2)."""
+    """Derivatives of sum(weight * (prediction - truth)^2 / 2).
+
+    Boolean masks retain the original behavior; fractional weights support
+    inverse observation probabilities for recovery-damage labels.
+    """
+    weight = np.asarray(mask, dtype=float)
+    if not np.isfinite(weight).all() or np.any(weight < 0):
+        raise ValueError("Training weights must be finite and nonnegative")
     def objective(truth, prediction):
         truth = truth.reshape(prediction.shape)
-        if prediction.shape != mask.shape:
+        if prediction.shape != weight.shape:
             raise ValueError("Training mask and predictions have different shapes")
-        return np.where(mask, prediction - truth, 0.), mask.astype(prediction.dtype)
+        active = weight > 0
+        residual = prediction - np.where(active, truth, 0.)
+        return np.where(active, weight * residual, 0.), weight.astype(prediction.dtype)
     return objective
 
 
