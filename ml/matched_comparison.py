@@ -23,8 +23,8 @@ def frozen_predictions(output, data):
         fitted["xgb_independent"], fitted["xgb_shared"], data["X"])))
     predictions = {}
     for name, obj in fitted.items():
-        x = stage if name in ("xgb_xgb", "xgb_mlp") else data["X"]
-        raw = mt.predict_mlp(obj, x) if name in ("mlp", "xgb_mlp") else mt.predict_xgb(obj["model"], x)
+        x = stage if name in mt.STACKED else data["X"]
+        raw = mt.predict_mlp(obj, x) if name in mt.MLP_NAMES else mt.predict_xgb(obj["model"], x)
         predictions[name] = mt.decode(raw, obj["scale"])
     return predictions
 

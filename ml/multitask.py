@@ -15,10 +15,15 @@ from ml.logreg import COMBINED8_FEATURES
 from ml.regression import GRID
 from scripts.preprocessing.schema import atomic_write_json
 
-NAMES = ("mlp", "xgb_shared", "xgb_independent", "xgb_xgb", "xgb_mlp")
+NAMES = ("mlp", "xgb_shared", "xgb_independent", "xgb_xgb", "xgb_mlp", "xgb_xgb_naive", "xgb_mlp_naive")
+# Second stage on input features + both XGB experts' predictions. Without suffix: trained on
+# source-held-out (out-of-fold) expert predictions. "_naive": trained on the experts' in-sample
+# predictions for their own training rows. Validation/test inputs are identical for both.
+STACKED = ("xgb_xgb", "xgb_mlp", "xgb_xgb_naive", "xgb_mlp_naive")
+MLP_NAMES = ("mlp", "xgb_mlp", "xgb_mlp_naive")
 # Presence outputs are sigmoid probabilities that each corruption type was injected (labels b).
 # They are not the dirty-image perturbation p stored in the matched dataset.
-OUTPUTS = ("d_amp", "d_phase", "d_noise", "y_all", "presence_amp", "presence_phase", "presence_noise")
+OUTPUTS = ("d_amp", "d_phase", "d_noise", "eC", "presence_amp", "presence_phase", "presence_noise")   # eC: data key "y_all"
 # Optional dirty-image task (--with-dirty), appended after the seven outputs above:
 # dirty_* is the dirty-image change p_k = ||D_case - D_case-k|| / ||D0|| (absent = 0),
 # eD = ||D - D0|| / ||D0|| the total dirty error. Same loss form and weights as d and eC.
@@ -188,6 +193,8 @@ def _xgb_parameters(params, jobs, shared, n_out=7):
 
 
 def fit_xgb(x, train, params, scale, *, shared, jobs=4):
+    """Shared: one multi-output booster. Independent: one booster per output; `params` may then be
+    a list with one settings dict per output (per-output selection) or a single dict for all."""
     import xgboost as xgb
 
     target = targets(train, scale)
@@ -199,8 +206,12 @@ def fit_xgb(x, train, params, scale, *, shared, jobs=4):
             return mixed_derivatives(raw, target, train["o"], train["pi"])
         return xgb.train(_xgb_parameters(params, jobs, True, n_out), matrix,
                          num_boost_round=params["n_estimators"], obj=objective)
+    per_output = params if isinstance(params, list) else [params] * n_out
+    if len(per_output) != n_out:
+        raise ValueError("Independent settings must give one entry per output")
     models = []
     for j in range(n_out):
+        params = per_output[j]
         label = target[:, j]
         if j < 4 or j >= 7:
             matrix = xgb.DMatrix(x, label=label)
@@ -292,7 +303,7 @@ def load_frozen(output, name):
     """Load one selected model without fitting or touching evaluation labels."""
     summary = json.loads((output / "results.json").read_text())
     scale = np.asarray(summary["selected"][name]["scale"], dtype=float)
-    if name in ("mlp", "xgb_mlp"):
+    if name in MLP_NAMES:
         import torch
         from torch import nn
         saved = torch.load(output / f"{name}.pt", map_location="cpu", weights_only=False)
@@ -317,7 +328,7 @@ def load_frozen(output, name):
 
 def task_metrics(prediction, data):
     """Scientific scores in physical units; active unknown damage stays masked."""
-    from sklearn.metrics import average_precision_score
+    from sklearn.metrics import average_precision_score, precision_recall_fscore_support, roc_auc_score
 
     n = len(data["X"])
     metrics = {}
@@ -362,6 +373,10 @@ def task_metrics(prediction, data):
                              damage_active=subsets["active"], damage_absent=subsets["absent"],
                              observed_damage=int(observed.sum()), observed_active=int((observed & b).sum()),
                              known_active=int(b.sum()), precision=precision, recall=recall, f1=f1,
+                             tp=tp, fp=fp, fn=fn, tn=int(np.sum(~positive & ~b)),
+                             **dict(zip(("macro_precision", "macro_recall", "macro_f1"), map(float, precision_recall_fscore_support(
+                                 b, positive, average="macro", labels=[False, True], zero_division=0)[:3]))),
+                             auroc=float(roc_auc_score(b, p)) if b.any() and (~b).any() else None,
                              average_precision=float(average_precision_score(b, p)) if b.any() and (~b).any() else None,
                              bce=float(np.mean(-(b * np.log(p) + (~b) * np.log(1-p)))),
                              brier=float(np.mean(np.square(p-b))))
@@ -409,155 +424,283 @@ def total_scores(pred, truth):
                 negative_predictions=int((pred < 0).sum()))
 
 
-def write_report(output, train, val, predictions, summary):
-    import html
+MASK_COLORS = ("#555555", "#0072B2", "#D55E00", "#009E73", "#CC79A7", "#7B61A8", "#C49A00", "#333333")
+MASK_MARKERS = ("s", "o", "^", "D", "v", "P", "X", "*")
+MASK_LABELS = tuple("+".join(k for j, k in enumerate(KINDS) if m >> j & 1) or "none (control)" for m in range(8))
+REPORT_ROWS = (*NAMES, "training_constant")   # the zero baseline is omitted from report tables
+ROW_LABELS = {"training_constant": "training mean (baseline)"}
+TEX = {"amp": r"\mathrm{amp}", "phase": r"\mathrm{phase}", "noise": r"\mathrm{noise}"}
+MATHTEXT = {"amp": r"{\rm amp}", "phase": r"{\rm phase}", "noise": r"{\rm noise}"}
+
+
+def regression_outputs(dirty):
+    """(column in decoded predictions, mathtext title) of the regression outputs plotted on diagonals."""
+    cols = [(k, f"$d_{MATHTEXT[kind]}$") for k, kind in enumerate(KINDS)] + [(3, "$e_C$")]
+    if dirty:
+        cols += [(7 + k, f"$p_{MATHTEXT[kind]}$") for k, kind in enumerate(KINDS)] + [(10, "$e_D$")]
+    return cols
+
+
+def plot_diagonals(output, train, val, predictions, dirty):
+    """One figure per model (validation row, train row); the mask legend is drawn once, on the first figure."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
 
     assets = output / "report_assets"
     assets.mkdir(exist_ok=True)
     data = {"train": train, "val": val}
-    dirty = bool(summary.get("with_dirty", False))
-    names_out = outputs(dirty)
-    loss_keys = ("J", "L_d", "L_y", "L_b") + (("L_p", "L_eD") if dirty else ())
-    columns = [(split, key) for split in ("val", "train") for key in loss_keys]
-    minima = {(split, key): min(summary["losses"][split][name][key] for name in NAMES)
-              for split, key in columns}
-    parts = ["<!doctype html><html><head><meta charset='utf-8'><title>Dataset v2 three-task models</title>",
-             "<style>body{font:15px system-ui;max-width:1400px;margin:auto;padding:1.5rem;color:#1b2932}table{border-collapse:collapse}th,td{border:1px solid #ccd;padding:.4rem;text-align:right}th:first-child,td:first-child{text-align:left}img{max-width:100%}</style></head><body>",
-             "<h1>Dataset v2: three-task models</h1><p>Train and validation only. Fully observed and sparse damage labels are supported; "
-             "J uses training-only RMS scales. Validation selected hyperparameters. Binder train scores use source-held-out expert inputs.</p>"
-             + ("<p>Dirty-image task included: dirty_* is the dirty-image change from removing one corruption type, "
-                "‖D<sub>case</sub> − D<sub>case−k</sub>‖ / ‖D<sub>0</sub>‖ (exactly 0 when that type is absent), and eD = ‖D − D<sub>0</sub>‖ / ‖D<sub>0</sub>‖ "
-                "is the total dirty error. They enter J with the same weights and form as d and eC (L_p, L_eD). "
-                "Their labels are complete, so no inverse-observation weights apply.</p>" if dirty else ""),
-             "<p><a href='results.json'>Results and selected settings</a> · <a href='stage_features.npz'>Saved OOF expert inputs</a></p>",
-             "<h2>Summary of all tasks</h2><table><tr><th>Model</th>" + "".join(f"<th>{s} {k}</th>" for s,k in columns) + "</tr>"]
-    for name in NAMES:
-        cells = []
-        for split, key in columns:
-            value = summary["losses"][split][name][key]
-            text = f"{value:.5g}"
-            if value == minima[(split, key)]: text = f"<strong>{text}</strong>"
-            cells.append(f"<td>{text}</td>")
-        parts.append(f"<tr><td>{html.escape(name)}</td>{''.join(cells)}</tr>")
-    parts.append("</table>")
-    all_names = (*NAMES, "zero_baseline", "training_constant")
+    cols = regression_outputs(dirty)
+    models = [name for name in NAMES if name in predictions["val"]]
 
-    def leakage_table(scores_of, unit):
-        rows = [f"<p>RMSE in {unit}, conditional on another type being present.</p><table><tr><th>Model</th><th>Split</th>"
-                "<th>Absent type</th><th>Present type</th><th>Rows</th><th>RMSE</th></tr>"]
-        for split in ("val", "train"):
-            for name in all_names:
-                for kind in KINDS:
-                    for other, metric in scores_of(split, name)[kind].get("leakage", {}).items():
-                        score = "—" if metric["rmse"] is None else f"{metric['rmse']:.4f}"
-                        rows.append(f"<tr><td>{name}</td><td>{split}</td><td>{kind}</td><td>{other}</td><td>{metric['rows']}</td><td>{score}</td></tr>")
-        return "".join(rows) + "</table>"
-
-    def subset_table(scores_of, with_r2=False):
-        cols = [(split, kind, label) for split in ("val", "train") for kind in KINDS for label in ("active", "absent")]
-        if with_r2:
-            cols = [(split, kind, label) for split, kind, label in cols] + [(split, kind, "R² active") for split in ("val", "train") for kind in KINDS]
-        def value(split, name, kind, label):
-            m = scores_of(split, name)[kind]
-            return m["damage_active"].get("r2") if label == "R² active" else m[f"damage_{label}"]["rmse"]
-        names = [n for n in all_names if all("damage_active" in scores_of(sp, n).get("amp", {}) for sp in ("val", "train"))]
-        best = {c: (max if c[2] == "R² active" else min)((v for v in (value(*c[:1], n, *c[1:]) for n in names) if v is not None), default=None)
-                for c in cols}
-        rows = ["<div style='overflow-x:auto'><table><tr><th>Model</th>" + "".join(f"<th>{s} {k}<br>{l}</th>" for s, k, l in cols) + "</tr>"]
-        for name in names:
-            cells = []
-            for c in cols:
-                v = value(c[0], name, c[1], c[2])
-                text = "—" if v is None else f"{v:.4f}"
-                if v is not None and v == best[c]: text = f"<strong>{text}</strong>"
-                cells.append(f"<td>{text}</td>")
-            rows.append(f"<tr><td>{html.escape(name)}</td>{''.join(cells)}</tr>")
-        return "".join(rows) + "</table></div>"
-
-    def total_table(keys):
-        cols = [(split, key, metric) for split in ("val", "train") for key, _ in keys for metric in ("rmse", "r2")]
-        rows = ["<table><tr><th>Model</th>" + "".join(f"<th>{s} {label}<br>{'RMSE' if m == 'rmse' else 'R²'}</th>"
-                                                       for s, key, m in cols for k2, label in keys if k2 == key) + "</tr>"]
-        for name in all_names:
-            cells = []
-            for split, key, metric in cols:
-                v = summary["metrics"][split][name].get(key, {}).get(metric)
-                cells.append("<td>—</td>" if v is None else f"<td>{v:.4f}</td>")
-            rows.append(f"<tr><td>{html.escape(name)}</td>{''.join(cells)}</tr>")
-        return "".join(rows) + "</table>"
-
-    model_scores = lambda split, name: summary["metrics"][split][name]
-    parts.append("<h2>False damage attributed to an absent type</h2>" + leakage_table(model_scores, "damage units"))
-    parts.append("<h2>Damage error on active and absent rows</h2><p>Physical-unit RMSE per damage output. "
-                 "<em>Active</em>: rows where that error type was injected (b=1); sparse labels use inverse-observation weights "
-                 "divided by the number of active rows. <em>Absent</em>: rows without that error type, whose true damage is exactly 0, "
-                 "so their RMSE measures how far predictions stray from zero. The summary L_d pools both. Bold marks the column minimum.</p>")
-    parts.append(subset_table(model_scores))
-    parts.append("<h2>Total error</h2>" + total_table([("y_all", "eC")] + ([("eD", "eD")] if dirty else [])))
-    if dirty:
-        dirty_scores = lambda split, name: summary["metrics"][split][name]["dirty"]
-        parts.append("<h2>Dirty-image task</h2><h3>Dirty change attributed to an absent type</h3>" + leakage_table(dirty_scores, "dirty-change units"))
-        parts.append("<h3>Dirty change on active and absent rows</h3><p>RMSE and active-row R² of dirty_* per type. "
-                     "Absent rows have a true dirty change of exactly 0. Bold marks the best value in each column.</p>")
-        parts.append(subset_table(dirty_scores, with_r2=True))
-    parts.append("<h2>Validation and train diagonals</h2><p>Only observed damage labels are plotted. Colors and shapes denote the eight injection masks. Each column has its own scale, shared by both rows and all models, and labelled on both axes. "
-                 "presence_* columns are predicted probabilities (sigmoid, 0 to 1) that the type was injected, against the true 0/1 label."
-                 + (" dirty_* and eD columns are the dirty-image task (all rows; absent types have true dirty change 0)." if dirty else "") + "</p>")
-    mask_colors = ("#555555", "#0072B2", "#D55E00", "#009E73", "#CC79A7", "#7B61A8", "#C49A00", "#333333")
-    markers = ("s", "o", "^", "D", "v", "P", "X", "*")
-    def observed_pair(split, name, k):
-        truth = data[split]; prediction = predictions[split][name]
+    def pair(split, name, k):
+        truth, pred = data[split], predictions[split][name]
+        masks = truth["b"].dot(1 << np.arange(3))
         if k < 3:
             keep = truth["o"][:, k].astype(bool)
-            return truth["d"][keep, k], prediction[keep, k], truth["b"][keep].dot(1 << np.arange(3))
+            return truth["d"][keep, k], pred[keep, k], masks[keep]
         if k == 3:
-            return truth["y_all"], prediction[:, 3], truth["b"].dot(1 << np.arange(3))
-        if k < 7:
-            return truth["b"][:, k-4], prediction[:, k], truth["b"].dot(1 << np.arange(3))
+            return truth["y_all"], pred[:, 3], masks
         if k < 10:
-            return truth["p"][:, k-7], prediction[:, k], truth["b"].dot(1 << np.arange(3))
-        return truth["eD"], prediction[:, 10], truth["b"].dot(1 << np.arange(3))
-    n_out = len(names_out)
-    presence = lambda k: 4 <= k < 7
+            return truth["p"][:, k - 7], pred[:, k], masks
+        return truth["eD"], pred[:, 10], masks
+
     bounds = []
-    for k in range(n_out):
-        values = []
-        for name in NAMES:
-            for split in ("train", "val"):
-                a, b, _ = observed_pair(split, name, k)
-                values.extend((a, b))
-        flat = np.concatenate([np.asarray(v, float) for v in values if len(v)])
-        lo, hi = (0., 1.) if presence(k) else (float(flat.min()), float(flat.max()))
+    for k, _ in cols:
+        flat = np.concatenate([np.asarray(v, float) for name in models for split in data for v in pair(split, name, k)[:2]])
+        lo, hi = float(flat.min()), float(flat.max())
         pad = .04 * (hi - lo or 1.)
-        bounds.append((lo-pad, hi+pad))
-    for name in NAMES:
-        fig, axes = plt.subplots(2, n_out, figsize=(20 * n_out / 7, 5.5), sharex="col", sharey="col")
+        bounds.append((lo - pad, hi + pad))
+    files = {}
+    for i, name in enumerate(models):
+        fig, axes = plt.subplots(2, len(cols), figsize=(2.9 * len(cols), 5.8), sharex="col", sharey="col")
         for row, split in enumerate(("val", "train")):
-            for k in range(n_out):
-                ax = axes[row, k]
-                actual, predicted, masks = observed_pair(split, name, k)
+            for c, (k, title) in enumerate(cols):
+                ax = axes[row, c]
+                actual, predicted, masks = pair(split, name, k)
                 for mask in range(8):
                     keep = masks == mask
                     if keep.any():
-                        ax.scatter(actual[keep], predicted[keep], s=7, alpha=.45,
-                                   c=mask_colors[mask], marker=markers[mask], linewidths=0)
-                lo, hi = bounds[k]
+                        ax.scatter(actual[keep], predicted[keep], s=7, alpha=.45, c=MASK_COLORS[mask],
+                                   marker=MASK_MARKERS[mask], linewidths=0)
+                lo, hi = bounds[c]
                 ax.plot([lo, hi], [lo, hi], color="#444", lw=.8)
-                ax.set_xlim(lo, hi); ax.set_ylim(lo, hi); ax.grid(alpha=.2)
-                if presence(k): ax.set_xticks((0, .5, 1)); ax.set_yticks((0, .5, 1))
-                ax.tick_params(labelsize=7)
-                if row == 0: ax.set_title(names_out[k])
-                if row == 1: ax.set_xlabel("True (0/1)" if presence(k) else "True")
+                ax.set_xlim(lo, hi); ax.set_ylim(lo, hi); ax.grid(alpha=.2); ax.tick_params(labelsize=7)
+                if row == 0: ax.set_title(title, fontsize=13)
+                if row == 1: ax.set_xlabel("true")
                 else: ax.tick_params(labelbottom=False)
-                if k == 0: ax.set_ylabel(f"{split} predicted")
+                if c == 0: ax.set_ylabel(f"{split}: predicted")
         fig.subplots_adjust(wspace=.35, hspace=.08)
-        path = assets / f"diagonal_{name}.png"; fig.savefig(path, dpi=140, bbox_inches="tight"); plt.close(fig)
-        parts.append(f"<h3>{html.escape(name)}</h3><img src='report_assets/{path.name}' alt='{name} train and validation diagonals for every output'>")
+        if i == 0:
+            handles = [Line2D([], [], ls="", marker=MASK_MARKERS[m], color=MASK_COLORS[m], markersize=7, label=MASK_LABELS[m])
+                       for m in range(8)]
+            fig.legend(handles=handles, loc="upper center", ncol=8, frameon=False, bbox_to_anchor=(.5, 1.07),
+                       title="Injected corruption types (color and marker, same in every figure)")
+        path = assets / f"diagonal_{name}.png"
+        fig.savefig(path, dpi=140, bbox_inches="tight"); plt.close(fig)
+        files[name] = f"report_assets/{path.name}"
+    return files
+
+
+def write_report(output, train, val, predictions, summary):
+    files = plot_diagonals(output, train, val, predictions, bool(summary.get("with_dirty", False)))
+    render_report(output, summary, files)
+
+
+def classification_scores(m, rows):
+    """Macro (yes/no averaged) precision, recall and F1 at threshold 0.5, AUROC and AUPRC of one presence classifier.
+
+    New results store scikit-learn's macro scores; older ones are rebuilt from the confusion counts.
+    """
+    if "macro_f1" in m:
+        return dict(precision=m["macro_precision"], recall=m["macro_recall"], f1=m["macro_f1"],
+                    auroc=m.get("auroc"), auprc=m.get("average_precision"))
+    if "tp" in m:
+        tp, fp, fn, tn = m["tp"], m["fp"], m["fn"], m["tn"]
+    else:   # older results: rebuild the confusion counts from positive-class precision/recall
+        tp = round(m["recall"] * m["known_active"]) if m.get("recall") is not None else 0
+        fp = round(tp / m["precision"]) - tp if m.get("precision") else 0
+        fn = m["known_active"] - tp
+        tn = rows - tp - fp - fn
+    def prf(t, f_pos, f_neg):   # undefined ratios count as 0 (scikit-learn zero_division=0)
+        p = t / (t + f_pos) if t + f_pos else 0.
+        r = t / (t + f_neg) if t + f_neg else 0.
+        return p, r, (2 * p * r / (p + r) if p + r else 0.)
+    yes, no = prf(tp, fp, fn), prf(tn, fn, fp)
+    macro = [None if a is None or b is None else (a + b) / 2 for a, b in zip(yes, no)]
+    return dict(precision=macro[0], recall=macro[1], f1=macro[2], auroc=m.get("auroc"), auprc=m.get("average_precision"))
+
+
+def _cells_table(rows, groups):
+    """HTML table: rows = (label, {column key: value}); groups = [(group tex, [(metric tex, [(key, better)])])].
+
+    Each group spans its metrics, each metric spans val then train. Bold marks the best value per column.
+    """
+    import html
+    columns = [(key, better) for _, metrics in groups for _, keys in metrics for key, better in keys]
+    best = {}
+    for key, better in columns:
+        values = [v[key] for _, v in rows if v.get(key) is not None]
+        best[key] = (min if better == "min" else max)(values) if values and better else None
+    head1 = "<tr><th rowspan='3'>Model</th>" + "".join(
+        f"<th colspan='{sum(len(k) for _, k in metrics)}'>{g}</th>" for g, metrics in groups) + "</tr>"
+    head2 = "<tr>" + "".join(f"<th colspan='{len(keys)}'>{m}</th>" for _, metrics in groups for m, keys in metrics) + "</tr>"
+    head3 = "<tr>" + "".join(f"<th>{key.split('|')[-1]}</th>" for key, _ in columns) + "</tr>"
+    body = []
+    for label, values in rows:
+        cells = []
+        for key, _ in columns:
+            v = values.get(key)
+            text = "—" if v is None else f"{v:.4f}"
+            if v is not None and best[key] is not None and v == best[key]:
+                text = f"<strong>{text}</strong>"
+            cells.append(f"<td>{text}</td>")
+        body.append(f"<tr><td>{html.escape(ROW_LABELS.get(label, label))}</td>{''.join(cells)}</tr>")
+    return f"<div class='scroll'><table>{head1}{head2}{head3}{''.join(body)}</table></div>"
+
+
+def _split_keys(name, better):
+    return [(f"{name}|val", better), (f"{name}|train", better)]
+
+
+def render_report(output, summary, plot_files, html_name="report.html", note=""):
+    """Write the report from results.json-style `summary` only (plots are referenced by path)."""
+    import html
+    dirty = bool(summary.get("with_dirty", False))
+    metrics = summary["metrics"]
+    losses = summary["losses"]
+    rows_n = {"val": summary["val_rows"], "train": summary["train_rows"]}
+    splits = ("val", "train")
+
+    def row_values(fill):
+        out = []
+        for name in REPORT_ROWS:
+            if name not in metrics["val"]:
+                continue
+            values = {}
+            for split in splits:
+                fill(values, split, name)
+            out.append((name, values))
+        return out
+
+    parts = ["<!doctype html><html><head><meta charset='utf-8'><title>Dataset v2 multitask models</title>",
+             "<script>window.MathJax={tex:{inlineMath:[['\\\\(','\\\\)']]}};</script>",
+             "<script src='https://cdn.jsdelivr.net/npm/mathjax@3.2.2/es5/tex-chtml.js'></script>",
+             "<style>body{font:15px system-ui;max-width:1400px;margin:auto;padding:1.5rem;color:#1b2932}"
+             "table{border-collapse:collapse;margin:.4rem 0 1.4rem}th,td{border:1px solid #ccd;padding:.35rem .5rem;text-align:right}"
+             "th{background:#f1f4f6;text-align:center}td:first-child{text-align:left}.scroll{overflow-x:auto}img{max-width:100%}"
+             ".note{color:#4a5a63}</style></head><body>",
+             f"<h1>Dataset v2: multitask models ({html.escape(str(summary.get('feature_view', '')))})</h1>", note,
+             "<p>Training: ", f"{summary['train_rows']} rows from {summary['train_sources']} sources. Validation: "
+             f"{summary['val_rows']} rows from {summary['val_sources']} sources (selects settings). Every table shows validation "
+             "then train side by side for each metric. Bold marks the best value in each column (lowest loss or RMSE, highest "
+             "\\(R^2\\) or classification score). The training-mean baseline predicts training averages for every row.</p>",
+             "<p class='note'>Models: xgb_shared (one multi-output booster), xgb_independent (one booster per output, settings chosen "
+             "per output), mlp, and two-stage models that take the features plus both XGB experts' predictions. xgb_xgb and xgb_mlp "
+             "are trained on source-held-out (out-of-fold) expert predictions; xgb_xgb_naive and xgb_mlp_naive on the experts' "
+             "in-sample predictions for their own training rows. Both use the same expert inputs on validation, so their gap shows "
+             "what the out-of-fold step is worth.</p>",
+             "<p class='note'>Notation: \\(e_C=\\lVert C-T\\rVert/\\lVert T\\rVert\\) total CLEAN model error, "
+             "\\(d_k=e_C-e_C(\\text{without }k)\\) model damage of type \\(k\\)"
+             + (", \\(e_D=\\lVert D-D_0\\rVert/\\lVert D_0\\rVert\\) total dirty error, "
+                "\\(p_k=\\lVert D-D_{-k}\\rVert/\\lVert D_0\\rVert\\) dirty change of type \\(k\\)" if dirty else "")
+             + ", \\(b_k\\) presence of type \\(k\\). Absent types have \\(d_k\\)"
+             + (" and \\(p_k\\)" if dirty else "") + " exactly 0. <a href='results.json'>All results</a>.</p>"]
+
+    # 1. Losses
+    loss_keys = [("J", "\\(J\\)"), ("L_d", "\\(L_d\\)"), ("L_y", "\\(L_{e_C}\\)"), ("L_b", "\\(L_b\\)")]
+    if dirty:
+        loss_keys += [("L_p", "\\(L_p\\)"), ("L_eD", "\\(L_{e_D}\\)")]
+    def fill_loss(values, split, name):
+        for key, _ in loss_keys:
+            values[f"{key}|{split}"] = losses[split][name].get(key)
+    parts.append("<h2>Loss table</h2><p>Training objective terms. \\(J\\) is the selection objective (scaled terms summed); "
+                 "\\(L_d\\), \\(L_{e_C}\\)" + (", \\(L_p\\), \\(L_{e_D}\\)" if dirty else "")
+                 + " are mean squared errors in physical units and \\(L_b\\) is the presence cross-entropy.</p>")
+    parts.append(_cells_table(row_values(fill_loss), [("Loss", [(t, _split_keys(k, "min")) for k, t in loss_keys])]))
+
+    # 2. Total error
+    totals = [("y_all", "\\(e_C\\)")] + ([("eD", "\\(e_D\\)")] if dirty else [])
+    def fill_total(values, split, name):
+        for key, _ in totals:
+            m = metrics[split][name].get(key, {})
+            values[f"{key}.rmse|{split}"] = m.get("rmse"); values[f"{key}.r2|{split}"] = m.get("r2")
+    parts.append("<h2>Total error</h2>")
+    parts.append(_cells_table(row_values(fill_total), [(t, [("RMSE", _split_keys(f"{k}.rmse", "min")), ("\\(R^2\\)", _split_keys(f"{k}.r2", "max"))])
+                                                       for k, t in totals]))
+
+    # 3-6. Per type, then per type split into active/absent rows
+    def per_type(source, symbol, title, unit):
+        get = (lambda split, name: metrics[split][name]) if source == "d" else (lambda split, name: metrics[split][name]["dirty"])
+        def fill(values, split, name):
+            for kind in KINDS:
+                m = get(split, name)[kind]
+                values[f"{kind}.rmse|{split}"] = m["damage_rmse"]; values[f"{kind}.r2|{split}"] = m.get("damage_r2")
+        def fill_split(values, split, name):
+            for kind in KINDS:
+                m = get(split, name)[kind]
+                values[f"{kind}.a.rmse|{split}"] = m["damage_active"]["rmse"]; values[f"{kind}.a.r2|{split}"] = m["damage_active"].get("r2")
+                values[f"{kind}.b.rmse|{split}"] = m["damage_absent"]["rmse"]
+        out = [f"<h2>{title} per corruption type</h2><p>All rows ({unit}).</p>",
+               _cells_table(row_values(fill), [(f"\\({symbol}_{{{TEX[kind]}}}\\)", [("RMSE", _split_keys(f"{kind}.rmse", "min")),
+                                                                                        ("\\(R^2\\)", _split_keys(f"{kind}.r2", "max"))]) for kind in KINDS]),
+               f"<h2>{title} on active and absent rows</h2><p>Active: rows where that type was injected. Absent: rows without it, "
+               f"whose true value is exactly 0, so their RMSE measures how far predictions stray from zero (\\(R^2\\) is undefined there).</p>",
+               _cells_table(row_values(fill_split), [(f"\\({symbol}_{{{TEX[kind]}}}\\)", [
+                   ("RMSE active", _split_keys(f"{kind}.a.rmse", "min")), ("\\(R^2\\) active", _split_keys(f"{kind}.a.r2", "max")),
+                   ("RMSE absent", _split_keys(f"{kind}.b.rmse", "min"))]) for kind in KINDS])]
+        return out
+    parts += per_type("d", "d", "Model damage", "damage units")
+    if dirty:
+        parts += per_type("p", "p", "Dirty change", "dirty-change units")
+
+    # 7. Presence classification
+    def fill_class(values, split, name):
+        for kind in KINDS:
+            for key, v in classification_scores(metrics[split][name][kind], rows_n[split]).items():
+                values[f"{kind}.{key}|{split}"] = v
+    class_metrics = [("precision", "Macro precision"), ("recall", "Macro recall"), ("f1", "Macro \\(F_1\\)"), ("auroc", "AUROC"), ("auprc", "AUPRC")]
+    parts.append("<h2>Presence classification</h2><p>One yes/no classifier per type (\\(b_k\\)). Macro scores average the yes and "
+                 "no classes at threshold 0.5 (a class that is never predicted has precision 0). AUPRC is the average precision of the yes class. AUROC is missing (—) in results "
+                 "produced before it was recorded.</p>")
+    parts.append(_cells_table(row_values(fill_class), [(f"\\(b_{{{TEX[kind]}}}\\)", [(t, _split_keys(f"{kind}.{k}", "max")) for k, t in class_metrics])
+                                                       for kind in KINDS]))
+
+    # 8. Diagonals
+    parts.append("<h2>Predicted against true</h2><p>Regression outputs only. Top row validation, bottom row train. Each column has "
+                 "its own scale, shared by both rows and all models. Model damage plots only observed labels. The legend on the "
+                 "first figure gives the colors and markers of the injected corruption types for every figure.</p>")
+    for name in NAMES:   # report order
+        if name in plot_files:
+            parts.append(f"<h3>{html.escape(name)}</h3><img src='{plot_files[name]}' alt='{name}: predicted against true for every regression output'>")
+
+    # 9. Attribution to absent types (last)
+    pairs = [(k, o) for k in KINDS for o in KINDS if o != k]
+    def leakage(get):
+        def fill(values, split, name):
+            for kind, other in pairs:
+                values[f"{kind}<{other}|{split}"] = get(split, name)[kind]["leakage"][other]["rmse"]
+        return fill
+    def leak_groups(symbol):
+        return [(f"\\({symbol}_{{{TEX[kind]}}}\\) absent, {other} present", [("RMSE", _split_keys(f"{kind}<{other}", "min"))]) for kind, other in pairs]
+    parts.append("<h2>Damage attributed to an absent type</h2><p>RMSE of the prediction for a type that was not injected (true value 0), "
+                 "on rows where another given type was injected. Lower is better.</p>")
+    parts.append("<h3>Model damage</h3>" + _cells_table(row_values(leakage(lambda s, n: metrics[s][n])), leak_groups("d")))
+    if dirty:
+        parts.append("<h3>Dirty change</h3>" + _cells_table(row_values(leakage(lambda s, n: metrics[s][n]["dirty"])), leak_groups("p")))
     parts.append("</body></html>")
-    (output / "report.html").write_text("".join(parts))
+    (output / html_name).write_text("".join(parts))
+
+
+def rebuild_html(output, html_name="report.html"):
+    """Rebuild the HTML from results.json alone, reusing existing diagonal images (no data or predictions needed)."""
+    summary = json.loads((output / "results.json").read_text())
+    files = {name: f"report_assets/diagonal_{name}.png" for name in NAMES if (output / f"report_assets/diagonal_{name}.png").exists()}
+    note = ("<p class='note'>Rebuilt from results.json. The plots are the ones saved with the run and may predate this "
+            "layout; rerun with --report-only to redraw them.</p>")
+    render_report(output, summary, files, html_name, note)
+    print("Report:", output / html_name, flush=True)
 
 
 def subset(data, indices):
@@ -565,18 +708,40 @@ def subset(data, indices):
     return {key: value[indices] if key != "feature_names" and getattr(value, "shape", ())[:1] == (n,) else value for key, value in data.items()}
 
 
+def output_losses(raw, data, scale):
+    """Validation loss of each output on its own (scaled regression MSE or presence cross-entropy)."""
+    raw = np.asarray(raw, float)
+    target = targets(data, scale)
+    w = data["o"] / data["pi"]
+    loss = np.empty(raw.shape[1])
+    loss[:3] = np.mean(w * np.square(raw[:, :3] - target[:, :3]), axis=0)
+    loss[3] = np.mean(np.square(raw[:, 3] - target[:, 3]))
+    loss[4:7] = np.mean(np.logaddexp(0, raw[:, 4:7]) - target[:, 4:7] * raw[:, 4:7], axis=0)
+    if raw.shape[1] == 11:
+        loss[7:] = np.mean(np.square(raw[:, 7:] - target[:, 7:]), axis=0)
+    return loss
+
+
 def _fit_tree_family(train, val, name, jobs):
+    """Grid search on validation. Joint models (xgb_shared) are selected on J; xgb_independent selects
+    each output's settings separately on that output's own validation loss."""
     scale = scales(train)
-    candidates = []
+    shared = name == "xgb_shared"
+    candidates, models = [], []
     for params in ParameterGrid(GRID):
-        model = fit_xgb(train["X"], train, params, scale,
-                        shared=name == "xgb_shared", jobs=jobs)
-        score = raw_losses(predict_xgb(model, val["X"]), val, scale)["J"]
-        candidates.append(dict(params=params, J=score))
-    best = min(candidates, key=lambda c: c["J"])
-    model = fit_xgb(train["X"], train, best["params"], scale,
-                    shared=name == "xgb_shared", jobs=jobs)
-    return dict(model=model, scale=scale, params=best["params"], candidates=candidates)
+        model = fit_xgb(train["X"], train, params, scale, shared=shared, jobs=jobs)
+        raw = predict_xgb(model, val["X"])
+        candidates.append(dict(params=params, J=raw_losses(raw, val, scale)["J"],
+                               output_losses=output_losses(raw, val, scale).tolist()))
+        models.append(model)
+    if shared:
+        best = min(range(len(candidates)), key=lambda i: candidates[i]["J"])
+        return dict(model=models[best], scale=scale, params=candidates[best]["params"], candidates=candidates)
+    # Training is deterministic (fixed seed), so the chosen candidate boosters are the final models.
+    choice = [min(range(len(candidates)), key=lambda i: candidates[i]["output_losses"][j])
+              for j in range(len(candidates[0]["output_losses"]))]
+    return dict(model=[models[i][j] for j, i in enumerate(choice)], scale=scale,
+                params=[candidates[i]["params"] for i in choice], candidates=candidates)
 
 
 def _expert_matrix(independent, shared, x):
@@ -629,21 +794,25 @@ def fit_data(train, val, output, jobs=4, feature_view="combined8"):
         raise ValueError(f"Binder must receive input features plus {n_experts} expert predictions")
     fitted["xgb_xgb"] = _fit_tree_family(stage_train, stage_val, "xgb_shared", jobs)
     fitted["xgb_mlp"] = fit_mlp(stage_train["X"], stage_train, stage_val["X"], stage_val)
-    np.savez_compressed(output / "stage_features.npz", train_oof=oof,
+    # Naive alternative: the full-data experts' predictions on their own training rows.
+    insample = _expert_matrix(fitted["xgb_independent"], fitted["xgb_shared"], train["X"])
+    naive_train = dict(train, X=np.column_stack((train["X"], insample)))
+    fitted["xgb_xgb_naive"] = _fit_tree_family(naive_train, stage_val, "xgb_shared", jobs)
+    fitted["xgb_mlp_naive"] = fit_mlp(naive_train["X"], naive_train, stage_val["X"], stage_val)
+    np.savez_compressed(output / "stage_features.npz", train_oof=oof, train_insample=insample,
                         val_experts=stage_val["X"][:, width:],
                         train_row_ids=train["row_ids"], val_row_ids=val["row_ids"])
     predictions = {}
     results = {}
     task_scores = {}
-    for split, data, stage in (("train", train, stage_train), ("val", val, stage_val)):
+    for split, data, stage, naive in (("train", train, stage_train, naive_train), ("val", val, stage_val, stage_val)):
         predictions[split] = {}
         results[split] = {}
         task_scores[split] = {}
         for name in NAMES:
             obj = fitted[name]
-            x = stage["X"] if name.startswith("xgb_") and name not in ("xgb_shared", "xgb_independent") else data["X"]
-            if name == "xgb_mlp": x = stage["X"]
-            raw = predict_mlp(obj, x) if name in ("mlp", "xgb_mlp") else predict_xgb(obj["model"], x)
+            x = (naive if name.endswith("_naive") else stage)["X"] if name in STACKED else data["X"]
+            raw = predict_mlp(obj, x) if name in MLP_NAMES else predict_xgb(obj["model"], x)
             predictions[split][name] = decode(raw, obj["scale"])
             results[split][name] = raw_losses(raw, data, obj["scale"])
             task_scores[split][name] = task_metrics(predictions[split][name], data)
@@ -674,7 +843,7 @@ def fit_data(train, val, output, jobs=4, feature_view="combined8"):
     # Save tree models and MLP/scalers with selected training-only scales.
     import torch
     for name, obj in fitted.items():
-        if name in ("mlp", "xgb_mlp"):
+        if name in MLP_NAMES:
             torch.save(dict(state=obj["model"].state_dict(), mean=obj["scaler"].mean_,
                             std=obj["scaler"].scale_, fill=obj["fill"], scale=obj["scale"], epoch=obj["best_epoch"]),
                        output / f"{name}.pt")
@@ -695,8 +864,8 @@ def fit_data(train, val, output, jobs=4, feature_view="combined8"):
     atomic_write_json(output / "results.json", summary)
     for name in NAMES:
         restored = load_frozen(output, name)
-        xx = stage_val["X"] if name in ("xgb_xgb", "xgb_mlp") else val["X"]
-        repeated = (predict_mlp(restored, xx) if name in ("mlp", "xgb_mlp") else
+        xx = stage_val["X"] if name in STACKED else val["X"]
+        repeated = (predict_mlp(restored, xx) if name in MLP_NAMES else
                     predict_xgb(restored["model"], xx))
         with np.load(output / f"predictions_val_{name}.npz", allow_pickle=False) as saved:
             np.testing.assert_allclose(repeated, saved["raw"], rtol=0, atol=1e-6)
@@ -712,7 +881,7 @@ def report_only(train_root, val_root, output):
     predictions = {}
     for split, data in (("train", train), ("val", val)):
         predictions[split] = {}
-        for name in NAMES:
+        for name in summary.get("models", NAMES):
             with np.load(output / f"predictions_{split}_{name}.npz", allow_pickle=False) as saved:
                 np.testing.assert_array_equal(saved["row_ids"], data["row_ids"])
                 scale = np.asarray(summary["selected"][name]["scale"])
@@ -735,14 +904,15 @@ def evaluate_test(test_root, output):
     target = output / "test_results.json"
     if target.exists():
         raise ValueError("Frozen test evaluation already exists; leave it unchanged")
-    fitted = {name: load_frozen(output, name) for name in NAMES}
+    models = summary.get("models", NAMES)
+    fitted = {name: load_frozen(output, name) for name in models}
     experts = _expert_matrix(fitted["xgb_independent"], fitted["xgb_shared"], test["X"])
     stage = np.column_stack((test["X"], experts))
     results = {}
-    for name in NAMES:
+    for name in models:
         obj = fitted[name]
-        x = stage if name in ("xgb_xgb", "xgb_mlp") else test["X"]
-        raw = predict_mlp(obj, x) if name in ("mlp", "xgb_mlp") else predict_xgb(obj["model"], x)
+        x = stage if name in STACKED else test["X"]
+        raw = predict_mlp(obj, x) if name in MLP_NAMES else predict_xgb(obj["model"], x)
         decoded = decode(raw, obj["scale"])
         results[name] = dict(losses=raw_losses(raw, test, obj["scale"]), metrics=task_metrics(decoded, test))
         np.savez_compressed(output / f"predictions_test_{name}.npz", row_ids=test["row_ids"],
@@ -765,9 +935,13 @@ def main():
     p.add_argument("--with-dirty", action="store_true",
                    help="Also train and report the dirty-image task (dirty change per type and eD)")
     p.add_argument("--report-only", action="store_true")
+    p.add_argument("--rebuild-html", metavar="NAME", nargs="?", const="report.html",
+                   help="Rebuild the HTML from OUTPUT/results.json only (no data); optional file name")
     p.add_argument("--evaluate-test", action="store_true")
     a = p.parse_args()
-    if a.evaluate_test:
+    if a.rebuild_html:
+        rebuild_html(a.output, a.rebuild_html)
+    elif a.evaluate_test:
         if not a.test or a.report_only:
             p.error("--evaluate-test requires --test and excludes --report-only")
         evaluate_test(a.test, a.output)
