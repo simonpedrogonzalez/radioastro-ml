@@ -68,7 +68,12 @@ for v in combined8 combined8_dirty6 combined8_model6 all20; do
 done
 ```
 
-- Output directories must be new; `matched_comparison` refuses an existing one.
+- Amplification-cap experiment: `ml/amp_cap_experiment.py` trains xgb_shared (all20) with training rows filtered to A ≤ 2, 3 and 8.5468, then evaluates all three on the same validation rows with A ≤ 2. It only filters rows; it does not re-simulate.
+  ```bash
+  bin/submit ml-cpu python -m ml.amp_cap_experiment --train $TRAIN --val $VAL \
+    --output ml/runs/matched-v2-amp-cap --jobs 8
+  ```
+- Output directories must be new; `matched_comparison` and `amp_cap_experiment` refuse an existing one.
 - `multitask` needs at least 3 training sources and no source shared between train and val. With 3 folds, `matched_comparison` needs at least 4 training sources in each fold.
 - Keep `--jobs` at or below `ML_CPU_CPUS`.
 - `bin/sync-reports` mirrors the resulting reports to `reports/ml-runs/`.

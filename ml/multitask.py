@@ -16,7 +16,9 @@ from ml.regression import GRID
 from scripts.preprocessing.schema import atomic_write_json
 
 NAMES = ("mlp", "xgb_shared", "xgb_independent", "xgb_xgb", "xgb_mlp")
-OUTPUTS = ("d_amp", "d_phase", "d_noise", "y_all", "p_amp", "p_phase", "p_noise")
+# Presence outputs are sigmoid probabilities that each corruption type was injected (labels b).
+# They are not the dirty-image perturbation p stored in the matched dataset.
+OUTPUTS = ("d_amp", "d_phase", "d_noise", "y_all", "presence_amp", "presence_phase", "presence_noise")
 FEATURE_VIEWS = ("combined8", "combined8_dirty6", "combined8_model6", "all20")
 
 
@@ -373,7 +375,8 @@ def write_report(output, train, val, predictions, summary):
             cells.append(f"<td>{text}</td>")
         parts.append(f"<tr><td>{html.escape(name)}</td>{''.join(cells)}</tr>")
     parts.append("</table>")
-    parts.append("<h2>Validation and train diagonals</h2><p>Only observed damage labels are plotted. Colors and shapes denote the eight injection masks. Each output uses the same axes in both rows and across models.</p>")
+    parts.append("<h2>Validation and train diagonals</h2><p>Only observed damage labels are plotted. Colors and shapes denote the eight injection masks. Each column has its own scale, shared by both rows and all models, and labelled on both axes. "
+                 "presence_* columns are predicted probabilities (sigmoid, 0 to 1) that the type was injected, against the true 0/1 label. They are not the dirty-image perturbation p of the dataset report.</p>")
     mask_colors = ("#555555", "#0072B2", "#D55E00", "#009E73", "#CC79A7", "#7B61A8", "#C49A00", "#333333")
     markers = ("s", "o", "^", "D", "v", "P", "X", "*")
     def observed_pair(split, name, k):
@@ -392,7 +395,7 @@ def write_report(output, train, val, predictions, summary):
                 a, b, _ = observed_pair(split, name, k)
                 values.extend((a, b))
         flat = np.concatenate([np.asarray(v, float) for v in values if len(v)])
-        lo, hi = float(flat.min()), float(flat.max())
+        lo, hi = (0., 1.) if k >= 4 else (float(flat.min()), float(flat.max()))
         pad = .04 * (hi - lo or 1.)
         bounds.append((lo-pad, hi+pad))
     for name in NAMES:
@@ -409,12 +412,13 @@ def write_report(output, train, val, predictions, summary):
                 lo, hi = bounds[k]
                 ax.plot([lo, hi], [lo, hi], color="#444", lw=.8)
                 ax.set_xlim(lo, hi); ax.set_ylim(lo, hi); ax.grid(alpha=.2)
+                if k >= 4: ax.set_xticks((0, .5, 1)); ax.set_yticks((0, .5, 1))
+                ax.tick_params(labelsize=7)
                 if row == 0: ax.set_title(OUTPUTS[k])
-                if row == 1: ax.set_xlabel("True")
+                if row == 1: ax.set_xlabel("True (0/1)" if k >= 4 else "True")
                 else: ax.tick_params(labelbottom=False)
                 if k == 0: ax.set_ylabel(f"{split} predicted")
-                else: ax.tick_params(labelleft=False)
-        fig.subplots_adjust(wspace=0, hspace=0)
+        fig.subplots_adjust(wspace=.35, hspace=.08)
         path = assets / f"diagonal_{name}.png"; fig.savefig(path, dpi=140, bbox_inches="tight"); plt.close(fig)
         parts.append(f"<h3>{html.escape(name)}</h3><img src='report_assets/{path.name}' alt='{name} train and validation seven-output diagonals'>")
     parts.append("</body></html>")
