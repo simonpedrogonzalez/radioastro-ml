@@ -71,7 +71,8 @@ for pair in "runs:runs" "ml/runs:ml-runs"; do
     [[ -d "$src" ]] || { echo "Skipping missing $src"; continue; }
     list=$(mktemp)
     select_files "$src" > "$list"
-    total=$(cd "$src" && tr '\n' '\0' < "$list" | xargs -0 du -ck 2>/dev/null | tail -1 | cut -f1)
+    total=$(cd "$src" && tr '\n' '\0' < "$list" | xargs -0 -r du -ck 2>/dev/null | tail -1 | cut -f1)
+    total=${total:-0}  # empty selection: report 0 instead of sizing the whole tree
     echo "== $src/ -> $target/: $(wc -l < "$list" | tr -d ' ') files, $((total / 1024)) MB"
     if [[ $dry -eq 1 ]]; then
         cat "$list"

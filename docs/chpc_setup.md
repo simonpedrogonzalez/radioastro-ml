@@ -169,5 +169,6 @@ Every direct or batch invocation creates a unique scratch run directory with a
 manifest containing the command, Git commit, host, loaded modules, runtime
 version, Slurm job ID, timestamps, and exit status.
 
-Scratch is temporary and not backed up. Copy final reports and irreplaceable
-products to persistent storage.
+The configured storage root is persistent astro group storage, not scratch;
+confirm its backup policy with CHPC. Copy final reports and irreplaceable
+products to a backed-up location.

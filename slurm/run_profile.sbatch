@@ -3,7 +3,8 @@
 #SBATCH --ntasks=1
 
 set -euo pipefail
-ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
+# sbatch runs a spooled copy of this script, so the clone comes from bin/submit.
+ROOT=${RADIOASTRO_ROOT:?submit through bin/submit (RADIOASTRO_ROOT unset)}
 [[ $# -ge 2 ]] || { echo "run_profile.sbatch requires a profile and command" >&2; exit 2; }
 profile=$1
 shift

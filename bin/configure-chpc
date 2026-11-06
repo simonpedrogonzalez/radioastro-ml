@@ -167,7 +167,7 @@ cpu_qos=$(choose "CPU QoS" "${CHPC_CPU_QOS:-}" "$(qoses_for_account "$cpu_cluste
 gpu_qos=$(choose "GPU QoS" "${CHPC_GPU_QOS:-}" "$(qoses_for_account "$gpu_cluster" "$gpu_account")" true)
 login_host=${CHPC_LOGIN_HOST:-$(hostname -f)}
 username=$(id -un)
-storage=${RADIOASTRO_SCRATCH:-/scratch/general/vast/$username/radioastroml}
+storage=${RADIOASTRO_SCRATCH:?export RADIOASTRO_SCRATCH=/path/to/your/storage/radioastroml (e.g. your folder under /uufs/chpc.utah.edu/common/home/astro/tanmoy/)}
 temporary=$(mktemp "$ROOT/config/chpc.env.tmp.XXXXXX")
 trap 'rm -f "$temporary"' EXIT
 

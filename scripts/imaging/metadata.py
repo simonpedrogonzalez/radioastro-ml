@@ -41,6 +41,11 @@ def _is_measurement_set(path: Path) -> bool:
 def resolve_path(ms: str | Path, extracted_root: str | Path = DEFAULT_EXTRACTED_MS_ROOT) -> ResolvedMS:
     """Resolve an existing MS path or a visibility ID to exactly one MS."""
     supplied = Path(ms).expanduser()
+    if not supplied.exists() and supplied.is_absolute() and "collect" in supplied.parts:
+        # Path recorded in another clone (e.g. Mac vs CHPC): same repository-relative MS here.
+        relocated = REPOSITORY_ROOT.joinpath(*supplied.parts[supplied.parts.index("collect"):])
+        if relocated.exists():
+            supplied = relocated
     if supplied.exists():
         resolved = supplied.resolve()
         if not _is_measurement_set(resolved):

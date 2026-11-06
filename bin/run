@@ -59,7 +59,7 @@ runtime=$1
 shift
 
 if is_chpc; then
-    : "${RADIOASTRO_SCRATCH:=/scratch/general/vast/${USER}/radioastroml}"
+    : "${RADIOASTRO_SCRATCH:?set RADIOASTRO_SCRATCH in config/chpc.env}"
     run_root="$RADIOASTRO_SCRATCH/runs"
     cache_root="$RADIOASTRO_SCRATCH/.cache"
 else
@@ -132,6 +132,12 @@ case "$runtime" in
             exit 1
         }
         casa_args=(--nogui --nologger)
+        # Standard CASA writes its log in the run directory; the CASA 6.4 casa-vla
+        # module did not honour --logfile on CHPC and hung, so it keeps its default.
+        [[ "$runtime" != casa ]] || casa_args+=(--logfile "$run_dir/casa.log")
+        # Per-run cache dir: concurrent CASA processes sharing ~/.casa/ipython/history.sqlite
+        # on NFS occasionally hit a sqlite I/O error that crashes CASA 6.7 startup.
+        [[ "$runtime" != casa ]] || casa_args+=(--cachedir "$run_dir/casa-cache")
         if [[ "$runtime" == casa-pipeline ]]; then
             pipeline_flag=${CASA_PIPELINE_FLAG:-}
             [[ -n "$pipeline_flag" ]] || [[ "$(uname -s)" != Darwin ]] || pipeline_flag=--pipeline

@@ -61,7 +61,8 @@ def prepare_v(source, folder, sky, *, v2=False):
     metadata_text=work/f'{source.source_id}_V.simulation.txt'
     if v.is_dir() and metadata.is_file() and metadata_text.is_file():
         stored=json.loads(metadata.read_text())
-        if stored.get('components')!=sky or stored.get('input_ms')!=payload['input_ms']:
+        from scripts.imaging.metadata import resolve_path
+        if stored.get('components')!=sky or stored.get('input_ms')!=str(resolve_path(payload['input_ms']).path):
             raise ValueError('Noiseless source simulation changed')
         return v
     if work.exists():

@@ -9,7 +9,7 @@ Move data, results, environments, caches, and CASA data from:
 to:
 
 ```text
-/uufs/astro.utah.edu/common/home/u6039460/work/sgonzalez/radioastroml
+/uufs/chpc.utah.edu/common/home/astro/tanmoy/sgonzalez/radioastroml
 ```
 
 The code clone stays at `$HOME/radioastro-ml`. `RADIOASTRO_SCRATCH` retains its
@@ -39,7 +39,7 @@ cd "$HOME/radioastro-ml"
     set -e
     source config/chpc.env
     bin/configure-chpc --check
-    test "$RADIOASTRO_SCRATCH" = /uufs/astro.utah.edu/common/home/u6039460/work/sgonzalez/radioastroml
+    test "$RADIOASTRO_SCRATCH" = /uufs/chpc.utah.edu/common/home/astro/tanmoy/sgonzalez/radioastroml
     mkdir -p "$RADIOASTRO_SCRATCH"
     test -r "$RADIOASTRO_SCRATCH"
     test -w "$RADIOASTRO_SCRATCH"
@@ -61,7 +61,7 @@ through setup in step 3.
     set -e
     source config/chpc.env
     OLD_ROOT=/scratch/general/vast/u1528314/radioastroml
-    test "$RADIOASTRO_SCRATCH" = /uufs/astro.utah.edu/common/home/u6039460/work/sgonzalez/radioastroml
+    test "$RADIOASTRO_SCRATCH" = /uufs/chpc.utah.edu/common/home/astro/tanmoy/sgonzalez/radioastroml
 
     for subdir in data runs outputs casa/data; do
         mkdir -p "$RADIOASTRO_SCRATCH/$subdir"
@@ -120,7 +120,7 @@ target. This allows the step to be rerun after an interrupted setup.
     source config/chpc.env
     bin/configure-chpc --check
     OLD_ROOT=/scratch/general/vast/u1528314/radioastroml
-    test "$RADIOASTRO_SCRATCH" = /uufs/astro.utah.edu/common/home/u6039460/work/sgonzalez/radioastroml
+    test "$RADIOASTRO_SCRATCH" = /uufs/chpc.utah.edu/common/home/astro/tanmoy/sgonzalez/radioastroml
 
     for link in data collect/extracted collect/downloads \
         collect/experiments ml/runs runs "$HOME/.casa/data"; do
@@ -227,7 +227,7 @@ restriction. Changing Unix file modes does not remove that restriction.
 Try entering the exact project directory in the Globus Path field:
 
 ```text
-/uufs/astro.utah.edu/common/home/u6039460/work/sgonzalez/radioastroml/
+/uufs/chpc.utah.edu/common/home/astro/tanmoy/sgonzalez/radioastroml/
 ```
 
 If this also returns `Path not allowed`, ask CHPC support at
@@ -244,4 +244,4 @@ The configured path is valid for the tested login/CPU shells; its availability
 through Globus remains unresolved.
 
 
-du --apparent-size -B1 --max-depth=1/uufs/astro.utah.edu/common/home/u6039460/work/sgonzalez/radioastroml | sort -nr | awk '{print "%10.2f GB %s\n", $1/1000000000, $2}'
+du --apparent-size -B1 --max-depth=1/uufs/chpc.utah.edu/common/home/astro/tanmoy/sgonzalez/radioastroml | sort -nr | awk '{print "%10.2f GB %s\n", $1/1000000000, $2}'

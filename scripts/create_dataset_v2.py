@@ -28,6 +28,27 @@ DEFAULT_OUTPUT = Path("runs/dataset-v2-20261104")
 PILOT = Path("runs/injection-bounds-pilot-20261102")
 
 
+def repo_relative(path):
+    """Repository-relative form of a path recorded in another clone (e.g. Mac vs CHPC)."""
+    p = Path(path)
+    if p.is_absolute():
+        try:
+            return p.relative_to(g.ROOT)
+        except ValueError:
+            if "collect" in p.parts:
+                return Path(*p.parts[p.parts.index("collect"):])
+    return p
+
+
+def local_path(path):
+    """Recorded path if it exists here, else the same repository-relative path in this clone."""
+    p = Path(path)
+    if p.exists():
+        return p
+    candidate = g.ROOT / repo_relative(p)
+    return candidate if candidate.exists() else p
+
+
 def file_sha(path):
     h = hashlib.sha256()
     with Path(path).open("rb") as f:
@@ -102,7 +123,7 @@ def indexed_sources(config, smoke=False):
     members = json.loads(index.read_text())["samples"]
     ids = sorted({source_dataset_id(Path(x).parent.name) for x in members})
     thermal = json.loads((g.THERMAL_DIR / "report.json").read_text())
-    entries = {x["id"]: x for x in thermal["samples"]}
+    entries = {x["id"]: dict(x, original_ms=str(local_path(x["original_ms"]))) for x in thermal["samples"]}
     if set(ids) - set(entries):
         raise ValueError("Indexed parent is missing thermal provenance")
     parents = {}
@@ -136,7 +157,12 @@ def _pilot_contract(pilot):
 
     plan = json.loads((pilot / "plan.json").read_text())
     current = json.loads(json.dumps(asdict(DefaultImagingConfig), default=str))
-    if plan["configuration"] != current:
+
+    def portable(config):
+        # Clone-location paths are compared repository-relative; every setting stays exact.
+        return dict(config, **{k: str(repo_relative(config[k])) for k in ("calibrator_meta_csv", "extracted_ms_root")})
+
+    if portable(plan["configuration"]) != portable(current):
         raise ValueError("Current standard imaging config differs from the completed pilot")
     if plan["configuration"]["clean"]["dirty_peak_fraction"] != 1e-7 or plan["configuration"]["clean"]["nsigma"] != 3:
         raise ValueError("Pilot adaptive stopping contract changed")

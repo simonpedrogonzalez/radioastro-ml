@@ -49,4 +49,5 @@ options=(--job-name="radioastro-$profile" --clusters="$cluster" --partition="$pa
 [[ -z "$qos" ]] || options+=(--qos="$qos")
 [[ -z "$gres" ]] || options+=(--gres="$gres")
 
+export RADIOASTRO_ROOT="$ROOT"
 exec sbatch "${options[@]}" "$ROOT/slurm/run_profile.sbatch" "$profile" "$@"
