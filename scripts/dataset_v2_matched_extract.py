@@ -1,8 +1,9 @@
 """ML-environment worker: matched Dataset v2 targets and the 20-feature view.
 
 Features (docs/dataset_v2_updated_plan.md §4): combined8 (unchanged), dirty6
-(columns 1-6 of combined8 evaluated on the dirty image) and model6 (raw CLEAN
-model flux sums). Targets: eC (CLEAN recovery error) and eD (dirty error).
+(columns 1-6 of combined8 evaluated on the dirty image), model6 (raw CLEAN
+model flux sums) and clean2 (CLEAN iterations, nonzero model pixels).
+Targets: eC (CLEAN recovery error) and eD (dirty error).
 """
 from __future__ import annotations
 
@@ -24,7 +25,10 @@ DIRTY6 = ("dirty.dynamic_range_scaled_mad", "dirty.scaled_mad_jy_per_beam", "dir
           "dirty.p99_5_over_scaled_mad", "dirty.log1p_even_energy_over_mad2", "dirty.log1p_odd_energy_over_mad2")
 MODEL6 = ("model.flux_positive_jy", "model.flux_negative_magnitude_jy", "model.flux_absolute_jy",
           "model.flux_inside_beam_jy", "model.flux_outside_beam_jy", "model.flux_over_restored_peak_per_beam")
-FEATURES = tuple(COMBINED8_FEATURES) + DIRTY6 + MODEL6
+CLEAN2 = ("clean.iterations", "model.nonzero_pixels")
+BASE20 = tuple(COMBINED8_FEATURES) + DIRTY6 + MODEL6   # schema of cases committed before CLEAN2
+FEATURES = BASE20 + CLEAN2
+OPTIONAL = ("model.flux_over_restored_peak_per_beam",)   # the only feature that may be missing
 
 
 def image_qa4(image, valid, peak_image, peak_valid, header):
@@ -56,6 +60,15 @@ def model6(model, omega, header, restored_peak):
     ratio = F / restored_peak if math.isfinite(restored_peak) and restored_peak > 0 else float("nan")
     return [float(np.maximum(M, 0).sum()), float(np.maximum(-M, 0).sum()), float(np.abs(M).sum()),
             float(M[inside].sum()), float(M[outside].sum()), ratio], dict(F=F, inside_pixels=int(inside.sum()))
+
+
+def clean2(model, convergence):
+    """Total CLEAN minor-cycle iterations and the count of nonzero raw-model pixels (either sign, whole image)."""
+    iterations = convergence.get("iterdone")
+    if isinstance(iterations, bool) or not isinstance(iterations, (int, float)) or not math.isfinite(iterations) or iterations < 0:
+        raise ValueError(f"Missing or invalid CLEAN iteration count: {iterations!r}")
+    model = np.asarray(model)
+    return [float(iterations), float(np.count_nonzero(np.isfinite(model) & (model != 0)))]
 
 
 def tclean_model_flux(convergence):
@@ -116,9 +129,9 @@ def extract(root, record, masks_path, nominal_rms, reference_record):
     whole = float(model[np.isfinite(model)].sum())
     if summary is not None and abs(whole - summary) > 1e-3 * max(abs(summary), 1e-6):
         raise ValueError(f"Model flux sum {whole} disagrees with tclean modelFlux {summary}")
-    X = [*c8.tolist(), *dirty_features, *m6]
+    X = [*c8.tolist(), *dirty_features, *m6, *clean2(model, record["convergence"])]
     # Only the flux/peak ratio may be missing (restored peak <= 0 or nonfinite).
-    if len(X) != len(FEATURES) or not all(math.isfinite(v) for v in X[:-1]):
+    if len(X) != len(FEATURES) or not all(math.isfinite(v) for v, name in zip(X, FEATURES) if name not in OPTIONAL):
         raise ValueError("Nonfinite matched v2 features")
     X = json_features(X)
     if not (math.isfinite(eC) and math.isfinite(eD)):
