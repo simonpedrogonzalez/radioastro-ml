@@ -93,6 +93,11 @@ done
   ```bash
   bin/submit ml-cpu python -m ml.multitask_error_analysis --run ml/runs/matched-v2-signal-all20 --val $VAL
   ```
+- Dirty-image task: add `--with-dirty` to `ml.multitask` to also train and report the per-type dirty change (`dirty_amp/phase/noise`) and the total dirty error `eD`, with the same tables and plots as the model-error targets. Without the flag, runs are unchanged.
+  ```bash
+  bin/submit ml-cpu python -m ml.multitask --train $TRAIN --val $VAL \
+    --output ml/runs/matched-v2-signal-all20-dirty --feature-view all20 --with-dirty --jobs 8
+  ```
 - Output directories must be new; `matched_comparison` and `amp_cap_experiment` refuse an existing one.
 - `multitask` needs at least 3 training sources and no source shared between train and val. With 3 folds, `matched_comparison` needs at least 4 training sources in each fold.
 - Keep `--jobs` at or below `ML_CPU_CPUS`.
