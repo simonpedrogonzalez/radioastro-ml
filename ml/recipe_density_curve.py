@@ -34,7 +34,20 @@ SERIES = ("#2a78d6", "#eb6834")
 
 
 def recipe_groups(train_root):
-    """recipe id -> (source, branch group) from the immutable training plan."""
+    """recipe id -> (source, branch group) from the immutable training plan(s).
+
+    For a dataset v2.1 manifest the ids carry the part prefix, and a branch group is per
+    part, so each part keeps its own stratification when recipes are subsampled.
+    """
+    if mt.is_manifest(train_root):
+        from scripts.dataset_v21 import _resolve
+        manifest = json.loads(_resolve(train_root).read_text())
+        out = {}
+        for e in manifest["parts"]:
+            plan = json.loads((_resolve(e["run"]) / "plan.json").read_text())
+            out.update({f"{e['tag']}/{r['id']}": (r["source"], f"{e['tag']}:{r['group']}")
+                        for sp in plan["source_plans"] for r in sp["recipes"]})
+        return out
     plan = json.loads((train_root / "plan.json").read_text())
     return {r["id"]: (r["source"], r["group"]) for sp in plan["source_plans"] for r in sp["recipes"]}
 

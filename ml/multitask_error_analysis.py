@@ -29,9 +29,10 @@ SERIES = ("#2a78d6", "#eb6834", "#1baf7a", "#eda100")
 
 def load(run, val_root, models):
     val = mt.load_split(val_root, "val", "all20")
-    plan = json.loads((val_root / "plan.json").read_text())
-    snr = {p["id"]: p["nominal_source_snr"] for p in plan["prepared_sources"]}
-    val["snr0"] = np.asarray([snr[str(s)] for s in val["source_ids"]], float)
+    if "snr0" not in val:
+        plan = json.loads((val_root / "plan.json").read_text())
+        snr = {p["id"]: p["nominal_source_snr"] for p in plan["prepared_sources"]}
+        val["snr0"] = np.asarray([snr[str(s)] for s in val["source_ids"]], float)
     val["r"] = val["params"][:, 2] / val["snr0"]
     preds = {}
     for name in models:

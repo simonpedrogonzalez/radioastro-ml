@@ -36,9 +36,22 @@ def outputs(dirty):
 FEATURE_VIEWS = ("combined8", "combined8_dirty6", "combined8_model6", "all20", "all22")
 
 
+def is_manifest(root):
+    return Path(root).suffix == ".json"
+
+
+def read_split(root, split):
+    """Raw arrays of a verified run folder (<split>.npz) or a dataset v2.1 manifest (.json)."""
+    if is_manifest(root):
+        from scripts.dataset_v21 import load_manifest
+        return load_manifest(root, split)
+    with np.load(Path(root) / f"{split}.npz", allow_pickle=False) as z:
+        return {key: z[key] for key in z.files}
+
+
 def load_split(root, split, feature_view="combined8", dirty=False):
-    with np.load(root / f"{split}.npz", allow_pickle=False) as z:
-        data = {key: z[key] for key in z.files}
+    """root: a run folder with <split>.npz, or a dataset v2.1 manifest (.json) joining several runs."""
+    data = read_split(root, split)
     n = len(data["X"])
     data["with_dirty"] = bool(dirty)
     if dirty:
@@ -50,8 +63,8 @@ def load_split(root, split, feature_view="combined8", dirty=False):
             raise ValueError("Dirty change must be exactly 0 for absent corruption types")
     if "eC" in data:
         data["y_all"] = data["eC"]
-        plan_path = root / "plan.json"
-        if plan_path.exists() and "params" in data:
+        plan_path = Path(root) / "plan.json"
+        if "noise_ratio" not in data and plan_path.exists() and "params" in data:
             plan = json.loads(plan_path.read_text())
             snr = {p["id"]: p["nominal_source_snr"] for p in plan["prepared_sources"]}
             # Severity metadata for reporting only; never appended to X.

@@ -59,6 +59,37 @@ bin/submit ml-cpu python -m scripts.create_dataset_v2_matched --output $RUN --ve
 
 The backfill writes a sealed `cases/<id>/clean2_features.json` per case and leaves `case.json` and all images unchanged. It skips cases that already have them. `--verify` rewrites `<split>.npz` with 22 features; the first 20 columns and all labels are unchanged. Use `--feature-view all22` in the ML scripts to train on them.
 
+### Dataset v2.1 (training only): extension run plus a filtered join
+
+v2.1 training = the existing v2 training run, filtered, plus a new extension run, joined at load time by a manifest. No existing file is changed or copied. Validation stays `runs/dataset-v2-matched-val`.
+
+- **Extension run:** `config/dataset_v21_train_extension.json`, which sets:
+  - strong bands only (`weak_fraction` 0);
+  - amplification A in [1.4309, 8.5468];
+  - a new seed (new recipes and a new noise realization, with their own control per source);
+  - 12 recipes per source, which doubles the original number of training rows.
+
+  Run it like any other matched run, passing the config at the prepare stage. It costs about as much as the original training run.
+  ```bash
+  EXT=runs/dataset-v2.1-matched-train-extension
+  # same 4 steps as above with RUN=$EXT, adding --config config/dataset_v21_train_extension.json to --prepare
+  ```
+- **Manifest:** after the extension run passes `--verify`, build the manifest. The v2 run must already have 22 features (backfilled and re-verified). The command also writes `manifest.html` with counts and parameter distributions.
+  ```bash
+  bin/submit ml-cpu python -m scripts.dataset_v21 build --output runs/dataset-v2.1-train/manifest.json --split train \
+    --part v2=runs/dataset-v2-matched-train --part ext=$EXT --drop-weak --amp-max 8.5468
+  ```
+  - `--drop-weak` removes rows containing a weak-band amp or phase corruption.
+  - `--amp-max` removes rows containing amplification above 8.5468.
+  - A row is dropped whole and never modified. Other rows of the same recipe (e.g. its phase-only row) stay.
+- **Training:** pass the manifest wherever a dataset folder is expected.
+  ```bash
+  bin/submit ml-cpu python -m ml.multitask --train runs/dataset-v2.1-train/manifest.json \
+    --val runs/dataset-v2-matched-val --output ml/runs/matched-v2.1-all22-dirty --feature-view all22 --with-dirty --jobs 8
+  ```
+- **Optional:** to also score on validation rows inside the v2.1 ranges, build a validation manifest with the same filter (`--split val --part v2=runs/dataset-v2-matched-val --drop-weak --amp-max 8.5468`) and pass it as `--val`.
+- **If a part changes:** the manifest records file hashes and refuses to load if a part changed after it was built.
+
 For the validation split, use a separate `RUN` and a prepare-stage config file containing `{"split": "val"}`.
 
 ## ML experiments

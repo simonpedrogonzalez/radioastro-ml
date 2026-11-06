@@ -1,0 +1,8 @@
+{
+  "split": "train",
+  "seed": 20261107,
+  "recipes_per_source": 12,
+  "weak_fraction": 0,
+  "range_policy": "v2.1_extension_strong_bands_only_amp_cap_8.5468",
+  "ranges": {"amp_amplification": [1.4309, 8.5468]}
+}

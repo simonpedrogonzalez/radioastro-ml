@@ -103,8 +103,7 @@ def compare(dataset, output, folds=3, jobs=4, repeats=1000):
     summary = dict(folds=[], views={}, selection="Inner source holdout selects validation J; outer sources evaluate frozen models",
                    bootstrap="95% paired-source resampling of fixed OOF predictions, seed 42; excludes refitting and selection uncertainty",
                    bootstrap_repeats=repeats, primary_damage_target="signed CLEAN damage dC; eC aliases y_all; dirty targets are audit only")
-    with np.load(dataset / "train.npz", allow_pickle=False) as z:
-        present = set(map(str, z["feature_names"]))
+    present = set(map(str, mt.read_split(dataset, "train")["feature_names"]))
     views = [v for v in mt.FEATURE_VIEWS if v != "all22" or {"clean.iterations", "model.nonzero_pixels"} <= present]
     for view in views:
         data = mt.load_split(dataset, "train", view)

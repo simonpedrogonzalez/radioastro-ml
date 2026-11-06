@@ -210,5 +210,29 @@ class Clean2(unittest.TestCase):
             self.assertEqual(case_features(path, new), [1.] * 22)
 
 
+class DatasetV21(unittest.TestCase):
+    def test_filter_drops_only_rows_containing_a_violating_corruption(self):
+        from scripts.dataset_v21 import row_filter
+        plan = dict(source_plans=[dict(recipes=[dict(id="r0", amp_band="weak", phase_band="strong", A=.9),
+                                                dict(id="r1", amp_band="strong", phase_band="weak", A=12.),
+                                                dict(id="r2", amp_band="strong", phase_band="strong", A=3.)])])
+        recipe = ["", "r0", "r0", "r0", "r1", "r1", "r1", "r2"]
+        b = [[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1], [1, 0, 0], [0, 1, 0], [1, 1, 0], [1, 1, 1]]
+        data = dict(recipe_ids=np.asarray(recipe), b=np.asarray(b))
+        keep, reasons = row_filter(data, plan, drop_weak=True, amp_max=8.5)
+        self.assertEqual(keep.tolist(), [True, False, True, True, False, False, False, True])
+        self.assertEqual(reasons, {"weak amp": 1, "A > 8.5": 1, "weak phase": 1, "weak phase + A > 8.5": 1})
+        keep, reasons = row_filter(data, plan, drop_weak=False, amp_max=None)
+        self.assertTrue(keep.all() and not reasons)
+
+    def test_extension_config_samples_strong_capped_recipes_with_new_noise(self):
+        from scripts.create_dataset_v2_matched import configuration
+        config = configuration(Path(__file__).resolve().parents[1] / "config/dataset_v21_train_extension.json")
+        recipes = sample_recipes("0000+000", 500., [3, 7], config)
+        self.assertTrue(all(r["amp_band"] == r["phase_band"] == "strong" for r in recipes))
+        self.assertTrue(all(r["A"] <= 8.5468 for r in recipes))
+        self.assertNotEqual(plan_source(source(), config, "train")["noise_seeds"], plan_source(source(), DEFAULT, "train")["noise_seeds"])
+
+
 if __name__ == "__main__":
     unittest.main()
