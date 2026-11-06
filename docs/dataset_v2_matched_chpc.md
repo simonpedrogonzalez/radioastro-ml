@@ -89,6 +89,11 @@ done
   bin/submit ml-cpu python -m ml.amp_learning_curve --train $TRAIN --val $VAL \
     --output ml/runs/matched-v2-amp-learning-curve --jobs 8
   ```
+- Recipe-density curve (`ml/recipe_density_curve.py`): keeps all training sources but subsamples recipes per source (1, 2 and all 3 per branch, i.e. 4, 8, 12 recipes; 5 draws each), xgb_shared with fixed settings, all evaluated on the same validation rows. It tests whether denser simulation of the same sources would help, before simulating more. Optional `--cap 2` restricts both splits to A ≤ 2.
+  ```bash
+  bin/submit ml-cpu python -m ml.recipe_density_curve --train $TRAIN --val $VAL \
+    --output ml/runs/matched-v2-recipe-density --feature-view all22 --jobs 8
+  ```
 - Error analysis of a finished multitask run (read-only, no refitting), written to `<run>/error_analysis/report.html`:
   ```bash
   bin/submit ml-cpu python -m ml.multitask_error_analysis --run ml/runs/matched-v2-signal-all20 --val $VAL
