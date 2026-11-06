@@ -181,5 +181,34 @@ class Defects(unittest.TestCase):
                                {k: v for k, v in hashes.items() if k != "model"}, "omitted")
 
 
+class Clean2(unittest.TestCase):
+    def test_counts_iterations_and_nonzero_pixels_of_either_sign(self):
+        from scripts.dataset_v2_matched_extract import FEATURES, clean2
+        model = np.zeros((8, 8)); model[1, 1] = .5; model[2, 3] = -.2; model[4, 4] = np.nan
+        self.assertEqual(clean2(model, {"iterdone": 17}), [17., 2.])
+        self.assertEqual(FEATURES[-2:], ("clean.iterations", "model.nonzero_pixels"))
+        with self.assertRaises(ValueError):
+            clean2(model, {})
+
+    def test_old_case_needs_matching_sidecar(self):
+        import json, tempfile
+        from scripts.create_dataset_v2 import file_sha
+        from scripts.create_dataset_v2_matched import EXTRA, _commit, case_features
+        from scripts.dataset_v2_matched_extract import BASE20, CLEAN2, FEATURES
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "case.json"
+            rec = dict(feature_names=list(BASE20), X=[0.] * 20, product_sha256=dict(model="m"))
+            _commit(path, rec)
+            with self.assertRaisesRegex(ValueError, "backfill"):
+                case_features(path, rec)
+            _commit(path.with_name(EXTRA), dict(feature_names=list(CLEAN2), X=[5., 3.], model_sha256="m", case_sha256=file_sha(path)))
+            self.assertEqual(case_features(path, rec), [0.] * 20 + [5., 3.])
+            _commit(path.with_name(EXTRA), dict(feature_names=list(CLEAN2), X=[5., 3.], model_sha256="other", case_sha256=file_sha(path)))
+            with self.assertRaisesRegex(ValueError, "does not belong"):
+                case_features(path, rec)
+            new = dict(feature_names=list(FEATURES), X=[1.] * 22)
+            self.assertEqual(case_features(path, new), [1.] * 22)
+
+
 if __name__ == "__main__":
     unittest.main()

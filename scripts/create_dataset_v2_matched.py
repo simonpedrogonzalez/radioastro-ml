@@ -5,6 +5,7 @@ Stages (docs/dataset_v2_updated_plan.md §2), each restartable:
   ML:   --plan --num-shards N                             (immutable plan + shard assignment)
   ML:   --execute --num-shards N --shard i --parallel P [--scratch-root DIR]
                                                           (launches CASA --unit per template)
+  ML:   --backfill-features                               (add CLEAN2 to cases committed with 20 features)
   ML:   --verify                                          (join and tabular split)
 Run each shard as at most one live attempt; sealed units are skipped on rerun.
 The collected source data are only read; every simulation works on copies.
@@ -400,6 +401,58 @@ def features_array(rows):
     return np.asarray([[np.nan if x is None else float(x) for x in r["X"]] for r in rows], np.float64)
 
 
+EXTRA = "clean2_features.json"
+
+
+def backfill_stage(output):
+    """Add CLEAN2 to committed 20-feature cases from their retained model FITS and stored convergence.
+
+    Writes a sealed sidecar cases/<id>/clean2_features.json; case.json and every image are left unchanged.
+    No simulation or imaging is rerun. Cases already holding all features, or a valid sidecar, are skipped.
+    """
+    from astropy.io import fits
+    from scripts.dataset_v2_matched_extract import BASE20, CLEAN2, clean2
+
+    output = output.resolve()
+    done = skipped = 0
+    for path in sorted((output / "cases").glob("*/case.json")):
+        if not _sealed(path):
+            raise ValueError(f"Case seal missing or changed: {path}")
+        rec = json.loads(path.read_text())
+        side = path.with_name(EXTRA)
+        if rec["feature_names"] != list(BASE20) or _sealed(side):
+            skipped += 1
+            continue
+        model_path = output / rec["products"]["model"]
+        if file_sha(model_path) != rec["product_sha256"]["model"]:
+            raise ValueError(f"Retained model changed: {model_path}")
+        with fits.open(model_path, memmap=False) as hdul:
+            model = np.asarray(np.squeeze(hdul[0].data), np.float64)
+        _commit(side, dict(feature_names=list(CLEAN2), X=clean2(model, rec["convergence"]),
+                           model_sha256=rec["product_sha256"]["model"], case_sha256=file_sha(path)))
+        done += 1
+    print("BACKFILLED", dict(written=done, skipped=skipped), flush=True)
+    return done
+
+
+def case_features(path, rec):
+    """Feature names and values of one case: all of them, or the 20 committed plus the CLEAN2 sidecar."""
+    from scripts.dataset_v2_matched_extract import BASE20, CLEAN2, FEATURES
+
+    if rec["feature_names"] == list(FEATURES):
+        return rec["X"]
+    if rec["feature_names"] != list(BASE20):
+        raise ValueError(f"Case has an unknown feature schema: {path}")
+    side = path.with_name(EXTRA)
+    if not _sealed(side):
+        raise ValueError(f"{path.parent.name}: 20-feature case without CLEAN2; run --backfill-features first")
+    extra = json.loads(side.read_text())
+    if (extra["feature_names"] != list(CLEAN2) or extra["model_sha256"] != rec["product_sha256"]["model"]
+            or extra["case_sha256"] != file_sha(path)):
+        raise ValueError(f"CLEAN2 sidecar does not belong to this case: {side}")
+    return rec["X"] + extra["X"]
+
+
 def verify_stage(output):
     from astropy.io import fits
     from scripts.dataset_v2_matched_extract import FEATURES
@@ -423,8 +476,9 @@ def verify_stage(output):
             if not _sealed(path):
                 raise ValueError(f"Case seal missing or changed: {path}")
             rec = json.loads(path.read_text())
-            if rec["plan_sha256"] != plan_hash or rec["feature_names"] != list(FEATURES):
-                raise ValueError(f"Case belongs to another plan/schema: {path}")
+            if rec["plan_sha256"] != plan_hash:
+                raise ValueError(f"Case belongs to another plan: {path}")
+            rec["X"] = case_features(path, rec)
             check_products(output, rec["products"], rec["product_sha256"], f"case {case_id}")
             records[case_id] = rec
     for prepared in plan_data["prepared_sources"]:
@@ -506,6 +560,7 @@ def main():
     stage.add_argument("--plan", action="store_true")
     stage.add_argument("--execute", action="store_true")
     stage.add_argument("--unit", metavar="UNIT", help=argparse.SUPPRESS)
+    stage.add_argument("--backfill-features", action="store_true")
     stage.add_argument("--verify", action="store_true")
     p.add_argument("--num-shards", type=int, default=1)
     p.add_argument("--shard", type=int, default=0)
@@ -525,6 +580,8 @@ def main():
                       scratch_root=a.scratch_root or a.output / "scratch")
     elif a.unit:
         execute_unit(a.output, a.unit, a.scratch_root or a.output / "scratch")
+    elif a.backfill_features:
+        backfill_stage(a.output)
     else:
         verify_stage(a.output)
 

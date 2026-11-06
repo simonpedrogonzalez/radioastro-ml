@@ -92,7 +92,7 @@ def write_report(output, summary, val, predictions):
              "table{border-collapse:collapse;margin:.5rem 0 1.5rem}th,td{border:1px solid #ccd;padding:.35rem .6rem;text-align:right}"
              "th:first-child,td:first-child{text-align:left}img{max-width:100%}</style></head><body>",
              "<h1>Does strong amplification in training help or hurt moderate amplification?</h1>",
-             f"<p>xgb_shared on all20 features, trained three times on training rows with gain A ≤ cap, and evaluated on the same "
+             f"<p>xgb_shared on {summary['feature_view']} features, trained three times on training rows with gain A ≤ cap, and evaluated on the same "
              f"validation rows with A ≤ {EVAL_CAP:g} ({summary['val_rows']} rows, {summary['val_sources']} sources). Rows were only filtered, "
              "no label was changed. Rows without amplitude corruption (A = 1) are kept in every version. Hyperparameters are selected "
              "on this same validation subset for each version (the multitask rule), so the scores are comparable but slightly optimistic. "
@@ -131,15 +131,15 @@ def write_report(output, summary, val, predictions):
     (output / "report.html").write_text("".join(parts))
 
 
-def run(train_root, val_root, output, jobs=8):
+def run(train_root, val_root, output, jobs=8, view=VIEW):
     output.mkdir(parents=True, exist_ok=True)
     if (output / "results.json").exists():
         raise ValueError("Output already exists; choose a fresh directory")
-    train_all, val_all = mt.load_split(train_root, "train", VIEW), mt.load_split(val_root, "val", VIEW)
+    train_all, val_all = mt.load_split(train_root, "train", view), mt.load_split(val_root, "val", view)
     if set(train_all["source_ids"]) & set(val_all["source_ids"]):
         raise ValueError("Train/validation sources overlap")
     val = mt.subset(val_all, np.flatnonzero(keep_amp(val_all, EVAL_CAP)))
-    summary = dict(model="xgb_shared", feature_view=VIEW, caps=list(CAPS), eval_cap=EVAL_CAP,
+    summary = dict(model="xgb_shared", feature_view=view, caps=list(CAPS), eval_cap=EVAL_CAP,
                    val_rows=len(val["X"]), val_sources=len(set(val["source_ids"])),
                    val_row_ids=val["row_ids"].tolist(),
                    selection="validation J on the A <= 2 evaluation subset (same rule as ml/multitask.py)", versions={})
@@ -171,8 +171,9 @@ def main():
     p.add_argument("--val", type=Path, required=True)
     p.add_argument("--output", type=Path, required=True)
     p.add_argument("--jobs", type=int, default=8)
+    p.add_argument("--feature-view", choices=mt.FEATURE_VIEWS, default=VIEW)
     a = p.parse_args()
-    run(a.train, a.val, a.output, a.jobs)
+    run(a.train, a.val, a.output, a.jobs, a.feature_view)
 
 
 if __name__ == "__main__":

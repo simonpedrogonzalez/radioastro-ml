@@ -19,7 +19,7 @@ NAMES = ("mlp", "xgb_shared", "xgb_independent", "xgb_xgb", "xgb_mlp")
 # Presence outputs are sigmoid probabilities that each corruption type was injected (labels b).
 # They are not the dirty-image perturbation p stored in the matched dataset.
 OUTPUTS = ("d_amp", "d_phase", "d_noise", "y_all", "presence_amp", "presence_phase", "presence_noise")
-FEATURE_VIEWS = ("combined8", "combined8_dirty6", "combined8_model6", "all20")
+FEATURE_VIEWS = ("combined8", "combined8_dirty6", "combined8_model6", "all20", "all22")
 
 
 def load_split(root, split, feature_view="combined8"):
@@ -37,8 +37,9 @@ def load_split(root, split, feature_view="combined8"):
     names = tuple(map(str, data.get("feature_names", COMBINED8_FEATURES)))
     if feature_view not in FEATURE_VIEWS:
         raise ValueError(f"Unknown feature view: {feature_view}")
-    from scripts.dataset_v2_matched_extract import DIRTY6, MODEL6
-    selected = tuple(COMBINED8_FEATURES) + (DIRTY6 if feature_view in ("combined8_dirty6", "all20") else ()) + (MODEL6 if feature_view in ("combined8_model6", "all20") else ())
+    from scripts.dataset_v2_matched_extract import CLEAN2, DIRTY6, MODEL6
+    selected = (tuple(COMBINED8_FEATURES) + (DIRTY6 if feature_view in ("combined8_dirty6", "all20", "all22") else ())
+                + (MODEL6 if feature_view in ("combined8_model6", "all20", "all22") else ()) + (CLEAN2 if feature_view == "all22" else ()))
     if data["X"].shape != (n, len(names)) or not set(selected) <= set(names) or len(set(names)) != len(names):
         raise ValueError("Feature schema does not contain the requested view")
     data["X"] = data["X"][:, [names.index(name) for name in selected]]

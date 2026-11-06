@@ -103,7 +103,10 @@ def compare(dataset, output, folds=3, jobs=4, repeats=1000):
     summary = dict(folds=[], views={}, selection="Inner source holdout selects validation J; outer sources evaluate frozen models",
                    bootstrap="95% paired-source resampling of fixed OOF predictions, seed 42; excludes refitting and selection uncertainty",
                    bootstrap_repeats=repeats, primary_damage_target="signed CLEAN damage dC; eC aliases y_all; dirty targets are audit only")
-    for view in mt.FEATURE_VIEWS:
+    with np.load(dataset / "train.npz", allow_pickle=False) as z:
+        present = set(map(str, z["feature_names"]))
+    views = [v for v in mt.FEATURE_VIEWS if v != "all22" or {"clean.iterations", "model.nonzero_pixels"} <= present]
+    for view in views:
         data = mt.load_split(dataset, "train", view)
         predictions = {name: np.full((len(groups), 7), np.nan) for name in (*mt.NAMES, "zero_baseline", "training_constant")}
         for fold, (outer, heldout) in enumerate(splits):
@@ -118,7 +121,7 @@ def compare(dataset, output, folds=3, jobs=4, repeats=1000):
             frozen = frozen_predictions(folder, test)
             frozen.update(baselines(train, len(heldout)))
             for name in predictions: predictions[name][heldout] = frozen[name]
-            if view == mt.FEATURE_VIEWS[0]:
+            if view == views[0]:
                 summary["folds"].append(dict(fit_sources=sorted(set(map(str, groups[fitting]))),
                                              tuning_sources=sorted(set(map(str, groups[tune]))),
                                              evaluation_sources=sorted(set(map(str, groups[heldout])))))

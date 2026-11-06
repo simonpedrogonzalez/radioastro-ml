@@ -76,7 +76,7 @@ def write_report(output, summary):
            "table{border-collapse:collapse;margin:.4rem 0 1.2rem}th,td{border:1px solid #ccd;padding:.3rem .5rem;text-align:right}"
            "th:first-child,td:first-child{text-align:left}.scroll{overflow-x:auto}img{max-width:100%}")
     parts = [f"<!doctype html><html><head><meta charset='utf-8'><title>Amplification learning curve</title><style>{css}</style></head><body>",
-             "<h1>Learning curve: cap 2, xgb_shared, all20</h1>",
+             f"<h1>Learning curve: cap 2, xgb_shared, {summary['feature_view']}</h1>",
              f"<p>Training rows with A ≤ {CAP:g}, from random subsets of whole training sources ({summary['repeats']} draws per size, "
              f"seed {SEED}; the largest size uses all {summary['all_sources']} sources once). Every point is evaluated on the same "
              f"{summary['val_rows']} validation rows with A ≤ {EVAL_CAP:g} from {summary['val_sources']} held-out sources. "
@@ -105,11 +105,11 @@ def write_report(output, summary):
     (output / "report.html").write_text("".join(parts))
 
 
-def run(train_root, val_root, output, sizes, repeats, jobs):
+def run(train_root, val_root, output, sizes, repeats, jobs, view=VIEW):
     output.mkdir(parents=True, exist_ok=True)
     if (output / "results.json").exists():
         raise ValueError("Output already exists; choose a fresh directory")
-    train_all, val_all = mt.load_split(train_root, "train", VIEW), mt.load_split(val_root, "val", VIEW)
+    train_all, val_all = mt.load_split(train_root, "train", view), mt.load_split(val_root, "val", view)
     if set(train_all["source_ids"]) & set(val_all["source_ids"]):
         raise ValueError("Train/validation sources overlap")
     train_cap = mt.subset(train_all, np.flatnonzero(keep_amp(train_all, CAP)))
@@ -136,7 +136,7 @@ def run(train_root, val_root, output, sizes, repeats, jobs):
                          val=scores(mt.decode(mt.predict_xgb(model, val["X"]), scale), val))
             points.append(point)
             print(f"{n} sources, draw {r}: val d_amp active RMSE {point['val']['d_amp active']:.4f}", flush=True)
-    summary = dict(model="xgb_shared", feature_view=VIEW, cap=CAP, eval_cap=EVAL_CAP, seed=SEED, repeats=repeats,
+    summary = dict(model="xgb_shared", feature_view=view, cap=CAP, eval_cap=EVAL_CAP, seed=SEED, repeats=repeats,
                    params=params, scale=scale.tolist(), all_sources=len(sources),
                    val_rows=len(val["X"]), val_sources=len(set(val["source_ids"])), val_row_ids=val["row_ids"].tolist(),
                    zero_val=zero_scores(val), points=points)
@@ -153,8 +153,9 @@ def main():
     p.add_argument("--sizes", type=int, nargs="+", default=[25, 50, 75])
     p.add_argument("--repeats", type=int, default=5)
     p.add_argument("--jobs", type=int, default=8)
+    p.add_argument("--feature-view", choices=mt.FEATURE_VIEWS, default=VIEW)
     a = p.parse_args()
-    run(a.train, a.val, a.output, a.sizes, a.repeats, a.jobs)
+    run(a.train, a.val, a.output, a.sizes, a.repeats, a.jobs, a.feature_view)
 
 
 if __name__ == "__main__":

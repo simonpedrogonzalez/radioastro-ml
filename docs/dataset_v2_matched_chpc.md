@@ -48,6 +48,17 @@ bin/submit ml-cpu python -m scripts.create_dataset_v2_matched --output $RUN --ve
 bin/submit ml-cpu python -m scripts.report_dataset_v2_matched --dataset $RUN
 ```
 
+### Adding the CLEAN2 features to an existing run
+
+New runs compute 22 features: the 20 before plus `clean.iterations` (CLEAN minor-cycle iterations) and `model.nonzero_pixels` (nonzero raw-model pixels of either sign). For a run whose cases were committed with 20 features, compute the two from the retained model FITS and the stored CLEAN record, without re-simulating, then re-verify:
+
+```bash
+bin/submit ml-cpu python -m scripts.create_dataset_v2_matched --output $RUN --backfill-features
+bin/submit ml-cpu python -m scripts.create_dataset_v2_matched --output $RUN --verify
+```
+
+The backfill writes a sealed `cases/<id>/clean2_features.json` per case and leaves `case.json` and all images unchanged. It skips cases that already have them. `--verify` rewrites `<split>.npz` with 22 features; the first 20 columns and all labels are unchanged. Use `--feature-view all22` in the ML scripts to train on them.
+
 For the validation split, use a separate `RUN` and a prepare-stage config file containing `{"split": "val"}`.
 
 ## ML experiments
