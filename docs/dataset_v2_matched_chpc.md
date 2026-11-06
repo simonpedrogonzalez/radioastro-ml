@@ -73,6 +73,15 @@ done
   bin/submit ml-cpu python -m ml.amp_cap_experiment --train $TRAIN --val $VAL \
     --output ml/runs/matched-v2-amp-cap --jobs 8
   ```
+- Learning curve for cap 2 (`ml/amp_learning_curve.py`): xgb_shared, all20, training rows A ≤ 2 from random subsets of whole sources (25, 50, 75 with 5 draws each, then all), all evaluated on the same validation rows with A ≤ 2. Settings and target scales are chosen once on the full set and kept fixed.
+  ```bash
+  bin/submit ml-cpu python -m ml.amp_learning_curve --train $TRAIN --val $VAL \
+    --output ml/runs/matched-v2-amp-learning-curve --jobs 8
+  ```
+- Error analysis of a finished multitask run (read-only, no refitting), written to `<run>/error_analysis/report.html`:
+  ```bash
+  bin/submit ml-cpu python -m ml.multitask_error_analysis --run ml/runs/matched-v2-signal-all20 --val $VAL
+  ```
 - Output directories must be new; `matched_comparison` and `amp_cap_experiment` refuse an existing one.
 - `multitask` needs at least 3 training sources and no source shared between train and val. With 3 folds, `matched_comparison` needs at least 4 training sources in each fold.
 - Keep `--jobs` at or below `ML_CPU_CPUS`.
