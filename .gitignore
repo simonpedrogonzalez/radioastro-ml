@@ -247,3 +247,5 @@ slurm/logs/
 
 # CASA temporary working lattices (created in the working directory by tclean/image tools)
 TempLattice*/
+
+.agents/CONTINUITY.md
