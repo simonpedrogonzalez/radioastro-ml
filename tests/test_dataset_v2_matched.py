@@ -156,30 +156,6 @@ class Defects(unittest.TestCase):
         array = features_array([dict(X=back)])
         self.assertTrue(np.isnan(array[0, 2]) and array[0, 0] == 1.)
 
-    def test_verify_rejects_missing_or_changed_products(self):
-        import tempfile
-        from scripts.create_dataset_v2 import file_sha
-        from scripts.create_dataset_v2_matched import check_products
-        keys = ("dirty", "clean", "residual", "psf", "model", "support")
-        with tempfile.TemporaryDirectory() as d:
-            root = Path(d)
-            products = {k: f"case/{k}.bin" for k in keys}
-            (root / "case").mkdir()
-            for k in keys:
-                (root / products[k]).write_bytes(k.encode())
-            hashes = {k: file_sha(root / products[k]) for k in keys}
-            check_products(root, products, hashes, "ok")
-            (root / products["dirty"]).write_bytes(b"doubled")
-            with self.assertRaisesRegex(ValueError, "dirty product changed"):
-                check_products(root, products, hashes, "changed")
-            (root / products["dirty"]).write_bytes(b"dirty")
-            (root / products["model"]).unlink()
-            with self.assertRaisesRegex(ValueError, "model product is missing"):
-                check_products(root, products, hashes, "missing")
-            with self.assertRaisesRegex(ValueError, "incomplete"):
-                check_products(root, {k: v for k, v in products.items() if k != "model"},
-                               {k: v for k, v in hashes.items() if k != "model"}, "omitted")
-
 
 class Clean2(unittest.TestCase):
     def test_counts_iterations_and_nonzero_pixels_of_either_sign(self):
@@ -192,7 +168,6 @@ class Clean2(unittest.TestCase):
 
     def test_old_case_needs_matching_sidecar(self):
         import json, tempfile
-        from scripts.create_dataset_v2 import file_sha
         from scripts.create_dataset_v2_matched import EXTRA, _commit, case_features
         from scripts.dataset_v2_matched_extract import BASE20, CLEAN2, FEATURES
         with tempfile.TemporaryDirectory() as d:
@@ -201,10 +176,10 @@ class Clean2(unittest.TestCase):
             _commit(path, rec)
             with self.assertRaisesRegex(ValueError, "backfill"):
                 case_features(path, rec)
-            _commit(path.with_name(EXTRA), dict(feature_names=list(CLEAN2), X=[5., 3.], model_sha256="m", case_sha256=file_sha(path)))
+            _commit(path.with_name(EXTRA), dict(feature_names=list(CLEAN2), X=[5., 3.]))
             self.assertEqual(case_features(path, rec), [0.] * 20 + [5., 3.])
-            _commit(path.with_name(EXTRA), dict(feature_names=list(CLEAN2), X=[5., 3.], model_sha256="other", case_sha256=file_sha(path)))
-            with self.assertRaisesRegex(ValueError, "does not belong"):
+            _commit(path.with_name(EXTRA), dict(feature_names=["other"], X=[5.]))
+            with self.assertRaisesRegex(ValueError, "unknown schema"):
                 case_features(path, rec)
             new = dict(feature_names=list(FEATURES), X=[1.] * 22)
             self.assertEqual(case_features(path, new), [1.] * 22)

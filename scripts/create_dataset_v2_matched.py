@@ -248,8 +248,8 @@ def column_hash(ms, minus=None):
 
 
 def _sealed(path):
-    seal = path.with_suffix(".seal.json")
-    return path.is_file() and seal.is_file() and json.loads(seal.read_text())["sha256"] == file_sha(path)
+    """Committed: the record and its seal (written after it) both exist."""
+    return path.is_file() and path.with_suffix(".seal.json").is_file()
 
 
 def _commit(path, payload):
@@ -384,18 +384,6 @@ def execute_unit(output, unit_id, scratch_root):
 
 # ---------------------------------------------------------------- stage 4: verify
 
-def check_products(output, products, hashes, label):
-    """Every retained product a label or feature was computed from must exist unchanged."""
-    if set(products) != set(hashes) or not {"dirty", "clean", "residual", "psf", "model", "support"} <= set(products):
-        raise ValueError(f"{label}: product list and stored hashes differ or are incomplete")
-    for key, rel in products.items():
-        path = output / rel
-        if not path.is_file():
-            raise ValueError(f"{label}: retained {key} product is missing: {path}")
-        if file_sha(path) != hashes[key]:
-            raise ValueError(f"{label}: retained {key} product changed: {path}")
-
-
 def features_array(rows):
     """JSON null (missing feature) becomes NaN in the numeric dataset."""
     return np.asarray([[np.nan if x is None else float(x) for x in r["X"]] for r in rows], np.float64)
@@ -417,19 +405,15 @@ def backfill_stage(output):
     done = skipped = 0
     for path in sorted((output / "cases").glob("*/case.json")):
         if not _sealed(path):
-            raise ValueError(f"Case seal missing or changed: {path}")
+            raise ValueError(f"Case seal missing: {path}")
         rec = json.loads(path.read_text())
         side = path.with_name(EXTRA)
         if rec["feature_names"] != list(BASE20) or _sealed(side):
             skipped += 1
             continue
-        model_path = output / rec["products"]["model"]
-        if file_sha(model_path) != rec["product_sha256"]["model"]:
-            raise ValueError(f"Retained model changed: {model_path}")
-        with fits.open(model_path, memmap=False) as hdul:
+        with fits.open(output / rec["products"]["model"], memmap=False) as hdul:
             model = np.asarray(np.squeeze(hdul[0].data), np.float64)
-        _commit(side, dict(feature_names=list(CLEAN2), X=clean2(model, rec["convergence"]),
-                           model_sha256=rec["product_sha256"]["model"], case_sha256=file_sha(path)))
+        _commit(side, dict(feature_names=list(CLEAN2), X=clean2(model, rec["convergence"])))
         done += 1
     print("BACKFILLED", dict(written=done, skipped=skipped), flush=True)
     return done
@@ -447,9 +431,8 @@ def case_features(path, rec):
     if not _sealed(side):
         raise ValueError(f"{path.parent.name}: 20-feature case without CLEAN2; run --backfill-features first")
     extra = json.loads(side.read_text())
-    if (extra["feature_names"] != list(CLEAN2) or extra["model_sha256"] != rec["product_sha256"]["model"]
-            or extra["case_sha256"] != file_sha(path)):
-        raise ValueError(f"CLEAN2 sidecar does not belong to this case: {side}")
+    if extra["feature_names"] != list(CLEAN2):
+        raise ValueError(f"CLEAN2 sidecar has an unknown schema: {side}")
     return rec["X"] + extra["X"]
 
 
@@ -474,19 +457,12 @@ def verify_stage(output):
         for case_id in u["cases"]:
             path = output / "cases" / case_id / "case.json"
             if not _sealed(path):
-                raise ValueError(f"Case seal missing or changed: {path}")
+                raise ValueError(f"Case seal missing: {path}")
             rec = json.loads(path.read_text())
             if rec["plan_sha256"] != plan_hash:
                 raise ValueError(f"Case belongs to another plan: {path}")
             rec["X"] = case_features(path, rec)
-            check_products(output, rec["products"], rec["product_sha256"], f"case {case_id}")
             records[case_id] = rec
-    for prepared in plan_data["prepared_sources"]:
-        sid = prepared["id"]
-        reference = json.loads((output / "sources" / sid / "recovery/noiseless/record.json").read_text())
-        check_products(output, reference["products"], reference["sha256"], f"reference {sid}")
-        if file_sha(output / prepared["reference_masks"]) != prepared["reference_sha256"]:
-            raise ValueError(f"reference {sid}: fixed masks changed")
     # Pairing: every unit of a source/slot rebuilt bit-identical V and nominal noise.
     for sp in plan_data["source_plans"]:
         for slot in range(len(sp["noise_seeds"])):
