@@ -175,7 +175,7 @@ def unit(output, case_id):
 
     def casa(runtime, *args, label):
         res = subprocess.run(runtime_command(runtime, "--output", output, *args), cwd=ROOT,
-                             capture_output=True, text=True)
+                             capture_output=True, text=True, env=dict(os.environ, MPLBACKEND="Agg"))  # no display on nodes
         Path(f"{log}_{label}.log").write_text(res.stdout[-200000:] + "\n--- stderr ---\n" + res.stderr[-50000:])
         return res.returncode
 
@@ -216,7 +216,8 @@ def unit(output, case_id):
 
 
 NOTE_PATTERNS = ("Estimated SNR per solint", r"^\s*(inf_EB|inf|int|[0-9.]+s): [0-9.]+$", "No regions found by aut",
-                 "mask file .* is empty", "Peak SNR", "Final solint", "Final SNR", "Starting with solint",
+                 "mask file .* is empty", "Peak SNR", "Peak intensity of source", r"^rms: ", r"^Beam ",
+                 "Final solint", "Final SNR", "Starting with solint",
                  "[Ss]top", "[Pp]assed", "[Ff]ailed")
 
 
@@ -636,11 +637,13 @@ def recipe_b(work, regen, gain, flagging):
             tb.close()
     record["corrected_columns"] = changed
     try:
-        record["native_crops"] = save_native(work, Path(regen["observed_ms"]).parents[2] / "native" /
-                                             f"{Path(regen['observed_ms']).parent.name}__{safe(record['recipe'])}.npz")
+        crops, errors, found = save_native(work, Path(regen["observed_ms"]).parents[2] / "native" /
+                                           f"{Path(regen['observed_ms']).parent.name}__{safe(record['recipe'])}.npz")
+        record.update(native_crops=crops, native_crops_errors=errors, native_images_found=found)
     except Exception:
         record["native_crops"] = None
         record["native_crops_error"] = traceback.format_exc()[-1500:]
+    record["automask_log"] = automask_log()
     weblogs = sorted(work.glob("pipeline-*"))
     if weblogs:
         record["weblog"] = str(weblogs[-1])
@@ -660,35 +663,62 @@ NATIVE = ("dirty.image.tt0", "initial.image.tt0", "initial.residual.tt0", "initi
 
 
 def save_native(work, target, half=128):
-    """Central crops of hif_selfcal's own images (secondary diagnostics), plus whole-image stats."""
+    """Central crops of hif_selfcal's own images (secondary diagnostics), plus whole-image stats.
+
+    One failing image never discards the others. Returns (path or None, per-image errors, candidates found)."""
     from casatools import image
-    arrays, meta = {}, {}
-    for d in sorted(work.glob("sc_workdir_*")):
-        for path in sorted(d.glob("sc.*")):
-            key = path.name.rsplit("_", 1)[-1]
-            if key not in NATIVE or not path.is_dir():
-                continue
-            ia = image(); ia.open(str(path))
+    arrays, meta, errors = {}, {}, {}
+    # hif_selfcal's own images (sc_workdir_*, any depth). Regcal pipeline products (oussid.*) are not wanted.
+    candidates = sorted(p for p in work.rglob("*") if p.is_dir() and p.name.rsplit("_", 1)[-1] in NATIVE
+                        and not p.name.startswith("oussid"))
+    for path in candidates:
+        key = path.name.rsplit("_", 1)[-1]
+        if key in arrays:
+            continue
+        ia = image()
+        try:
+            ia.open(str(path))
+            shape = [int(x) for x in ia.shape()]            # plain ints: casatools rejects numpy ints in blc/trc
+            cx, cy = shape[0] // 2, shape[1] // 2
+            rest = [0] * (len(shape) - 2)
+            blc = [max(0, cx - half), max(0, cy - half)] + rest
+            trc = [min(shape[0] - 1, cx + half - 1), min(shape[1] - 1, cy + half - 1)] + rest
+            arrays[key] = np.squeeze(np.asarray(ia.getchunk(blc=blc, trc=trc), float)).T.astype(np.float32)
+            stats = ia.statistics(verbose=False)
+            cell = ia.coordsys().increment()["numeric"][:2]
+            info = dict(path=str(path.relative_to(work)), shape=shape,
+                        cell_arcsec=[float(abs(c)) * 206264.806 for c in cell],
+                        full_max=float(stats["max"][0]), full_min=float(stats["min"][0]),
+                        full_sum=float(stats["sum"][0]), full_rms=float(stats["rms"][0]))
             try:
-                shape = ia.shape()
-                cx, cy = shape[0] // 2, shape[1] // 2
-                blc, trc = [cx - half, cy - half] + [0] * (len(shape) - 2), [cx + half - 1, cy + half - 1] + [0] * (len(shape) - 2)
-                arrays[key] = np.squeeze(ia.getchunk(blc=blc, trc=trc)).T.astype(np.float32)
-                stats = ia.statistics(verbose=False)
-                cell = ia.coordsys().increment()["numeric"][:2]
                 beam = ia.restoringbeam() if key.endswith("image.tt0") else {}
-                meta[key] = dict(shape=[int(x) for x in shape], cell_arcsec=[float(abs(c)) * 206264.806 for c in cell],
-                                 full_max=float(stats["max"][0]), full_min=float(stats["min"][0]),
-                                 full_sum=float(stats["sum"][0]), full_rms=float(stats["rms"][0]),
-                                 beam=dict(major_arcsec=float(beam["major"]["value"]) if beam else None,
-                                           minor_arcsec=float(beam["minor"]["value"]) if beam else None))
-            finally:
-                ia.close()
+                if beam and "major" in beam:
+                    info["beam_arcsec"] = [float(beam["major"]["value"]), float(beam["minor"]["value"])]
+            except Exception:
+                pass
+            meta[key] = info
+        except Exception as exc:
+            errors[key] = f"{path.name}: {type(exc).__name__}: {exc}"[:500]
+        finally:
+            ia.close()
+    found = [str(p.relative_to(work)) for p in candidates]
     if not arrays:
-        return None
+        return None, errors, found
     target.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(target, meta=json.dumps(meta), **{k.replace(".", "_"): v for k, v in arrays.items()})
-    return str(target)
+    return str(target), errors, found
+
+
+def automask_log(limit=200):
+    """auto-multithresh lines from the CASA log (sidelobe level, thresholds), which stdout does not carry."""
+    try:
+        from casatasks import casalog
+        path = Path(casalog.logfile())
+        lines = [l.strip() for l in path.read_text(errors="replace").splitlines()
+                 if "SDMaskHandler" in l or "idelobe" in l or "noise threshold" in l.lower()]
+        return dict(logfile=str(path), lines=[l[-300:] for l in lines[-limit:]])
+    except Exception as exc:
+        return dict(error=f"{type(exc).__name__}: {exc}")
 
 
 def summarize_selfcal(result):

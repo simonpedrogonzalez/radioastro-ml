@@ -35,18 +35,27 @@ def run(output, source_run, cases, parallel):
 
 
 def log_numbers(notes):
-    """Peak, rms and solint S/N from the pipeline decision lines (first occurrence = initial image)."""
+    """Peak, rms and solint S/N from the pipeline decision lines (last occurrence = hif_selfcal's image)."""
     out = {}
     for text in notes:
         for key, pattern in (("peak_jy", r"Peak intensity of source: ([0-9.eE+-]+) mJy"),
                              ("rms_jy", r"rms: ([0-9.eE+-]+) mJy"), ("peak_snr", r"Peak SNR: ([0-9.eE+-]+)")):
             m = re.search(pattern, text)
-            if m and key not in out:
+            if m:                                  # last value wins: hif_selfcal's own image, not regcal imaging
                 out[key] = float(m.group(1)) / (1000 if key != "peak_snr" else 1)
         m = re.match(r"^(inf_EB|inf|int|[0-9.]+s): ([0-9.]+)$", text)
         if m:
             out.setdefault("solint_snr", {})[m.group(1)] = float(m.group(2))
     return out
+
+
+def automask_sidelobe(lines):
+    """PSF sidelobe level as logged by CASA auto-multithresh, if present."""
+    for line in lines:
+        m = re.search(r"[Ss]idelobe level[^0-9]*([0-9]*\.?[0-9]+)", line)
+        if m:
+            return float(m.group(1))
+    return None
 
 
 def psf_sidelobe(psf):
@@ -75,7 +84,9 @@ def report(output):
         committed = json.loads((source_run / "cases" / r["case"] / "case.json").read_text())
         c = committed["case"]
         kind = KIND[(c["A"] != 1) + 2 * (c["phi_deg"] != 0) + 4 * (c["a"] != 1)]
-        nums = log_numbers(rec.get("pipeline_notes", []))
+        from scripts.vla_pipeline_qa import pipeline_notes, safe
+        log = output / "logs" / f"unit_{r['case']}_{safe(r['recipe'])}.log"
+        nums = log_numbers(pipeline_notes(log) if log.exists() else rec.get("pipeline_notes", []))
         ours_sidelobe = committed["convergence"].get("raw", {}).get("maxpsfsidelobe")
         native = rec.get("native_crops")
         arrays, meta = {}, {}
@@ -84,20 +95,29 @@ def report(output):
                 meta = json.loads(str(z["meta"]))
                 arrays = {k: z[k] for k in z.files if k != "meta"}
         sidelobe = psf_sidelobe(arrays["initial_psf_tt0"]) if "initial_psf_tt0" in arrays else math.nan
+        logged = automask_sidelobe(rec.get("automask_log", {}).get("lines", []))
         peak, rms = nums.get("peak_jy"), nums.get("rms_jy")
+        # Sidelobe used for the estimate: CASA's logged value, else the pipeline PSF crop, else our imaging's.
+        used, used_from = next(((v, k) for v, k in ((logged, "CASA log"), (sidelobe, "pipeline PSF"),
+                                                     (ours_sidelobe, "matched-v2 PSF"))
+                                if v is not None and math.isfinite(v)), (None, None))
         level = None
-        if peak and rms and math.isfinite(sidelobe):
-            threshold = max(SIDELOBE_T * sidelobe * peak, NOISE_T * rms)
+        if peak and rms and used is not None:
+            threshold = max(SIDELOBE_T * used * peak, NOISE_T * rms)
             level = threshold / peak
         mask_pixels = meta.get("initial.mask", {}).get("full_sum")
         row = dict(case=r["case"], source=c["source"], kind=kind, A=c["A"], phi=c["phi_deg"], a=c["a"],
                    snr0=snr0.get(c["source"]), disposition=rec.get("disposition"),
                    sc_success=next((t.get("sc_success") for t in rec.get("selfcal_result", {}).get("targets", [])), None),
                    peak=peak, rms=rms, peak_snr=nums.get("peak_snr"), sidelobe=sidelobe, sidelobe_ours=ours_sidelobe,
+                   sidelobe_logged=logged, sidelobe_used_from=used_from,
                    threshold_level=level, region_beams=None if level is None or level >= 1 else math.log(1 / level),
                    mask_pixels=mask_pixels, solint_snr=nums.get("solint_snr"),
                    eC_before=ev.get("before", {}).get("eC"), eC_after=ev.get("after", {}).get("eC"),
-                   new_flags=rec.get("new_flag_fraction"), seconds=rec.get("seconds"))
+                   new_flags=rec.get("new_flag_fraction"), seconds=rec.get("seconds"),
+                   native_error=None if arrays else (rec.get("native_crops_error") or
+                                                     (json.dumps(rec["native_crops_errors"]) if rec.get("native_crops_errors")
+                                                      else f"no crops saved; images found: {rec.get('native_images_found')}")))
         rows.append(row)
         if not arrays:
             continue
@@ -133,17 +153,21 @@ def report(output):
             "Peak and rms are the pipeline's own values for its initial image. Images: central 256 px of the "
             "pipeline's own self-cal images, mask in green.</p>",
             "<table><tr><th>source</th><th>case</th><th>kind</th><th>SNR₀</th><th>result</th><th>peak (Jy)</th>"
-            "<th>rms (Jy)</th><th>peak S/N</th><th>PSF sidelobe (pipe / ours)</th><th>mask level</th>"
+            "<th>rms (Jy)</th><th>peak S/N</th><th>PSF sidelobe (CASA log / pipe PSF / ours)</th><th>mask level (sidelobe from)</th>"
             "<th>region (beams)</th><th>mask px</th><th>eC before → after</th><th>min</th></tr>"]
     for r in sorted(rows, key=lambda r: (r["source"], r["kind"])):
         bad = " class=bad" if r["disposition"] != "applied" else ""
         html.append(f"<tr><td>{r['source']}</td><td>{r['case'][:8]}</td><td>{r['kind']}</td><td>{fmt(r['snr0'], '{:.0f}')}</td>"
                     f"<td{bad}>{r['disposition']}</td><td>{fmt(r['peak'])}</td><td>{fmt(r['rms'])}</td>"
-                    f"<td>{fmt(r['peak_snr'], '{:.0f}')}</td><td>{fmt(r['sidelobe'], '{:.2f}')} / {fmt(r['sidelobe_ours'], '{:.2f}')}</td>"
-                    f"<td>{fmt(r['threshold_level'], '{:.2f}')}</td><td>{fmt(r['region_beams'], '{:.2f}')}</td>"
+                    f"<td>{fmt(r['peak_snr'], '{:.0f}')}</td><td>{fmt(r['sidelobe_logged'], '{:.2f}')} / {fmt(r['sidelobe'], '{:.2f}')} / {fmt(r['sidelobe_ours'], '{:.2f}')}</td>"
+                    f"<td>{fmt(r['threshold_level'], '{:.2f}')} ({r['sidelobe_used_from'] or '–'})</td><td>{fmt(r['region_beams'], '{:.2f}')}</td>"
                     f"<td>{fmt(r['mask_pixels'], '{:.0f}')}</td><td>{fmt(r['eC_before'], '{:.3f}')} → {fmt(r['eC_after'], '{:.3f}')}</td>"
                     f"<td>{fmt(None if r['seconds'] is None else r['seconds'] / 60, '{:.0f}')}</td></tr>")
     html.append("</table>")
+    missing = [r for r in rows if r["native_error"]]
+    if missing:
+        html.append(f"<p class=bad>No pipeline images for {len(missing)} case(s): "
+                    f"{missing[0]['native_error'][-600:]}</p>")
     for r, name in sorted(figs, key=lambda x: (x[0]["source"], x[0]["kind"])):
         html.append(f"<h3>{r['source']} · {r['kind']}</h3><img src='{name}'>")
     (output / "mask_report.html").write_text("\n".join(html))
