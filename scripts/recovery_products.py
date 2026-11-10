@@ -48,7 +48,8 @@ def recovery_products(output, folder, source, sky, sigma, settings_hash, v=None,
     beam=Beam(**reference['beam']) if reference is not None else None
     region=BeamRegion(source.metric_min_radius_beams,source.metric_max_radius_beams)
 
-    def image_cell(cell,ms,multiplier,seed_label,casa_seed,metadata=None):
+    def image_cell(cell,ms,multiplier,seed_label,casa_seed,metadata=None,require_same_samples=True):
+        """require_same_samples=False (VLA pipeline QA): flags/weights may differ from V; recorded, not rejected."""
         nonlocal reference,grid,beam
         if complete(cell): return
         cell.mkdir(parents=True,exist_ok=True)
@@ -104,7 +105,10 @@ def recovery_products(output, folder, source, sky, sigma, settings_hash, v=None,
                 np.testing.assert_array_equal(search,masks['clean_search'])
         products={k:str(getattr(imaging,k+'_fits').relative_to(output)) for k in ('dirty','clean','residual','psf')}
         products.update(model=str(model_fits.relative_to(output)),support=str(support_path.relative_to(output)))
-        actual=measure_pair(v,ms,sigma)
+        try:actual=measure_pair(v,ms,sigma)
+        except Exception:
+            if require_same_samples:raise
+            actual=dict(SNR_corr_actual=None,valid_complex_samples=None)
         def invariant_hashes(path):
             tb=table();tb.open(str(path))
             try:
@@ -118,7 +122,8 @@ def recovery_products(output, folder, source, sky, sigma, settings_hash, v=None,
                 return hashes
             finally:tb.close()
         invariants=invariant_hashes(ms)
-        if invariants!=invariant_hashes(v): raise ValueError('Weights/flags/UVW changed within recovery sweep')
+        reference_invariants=invariant_hashes(v)
+        if require_same_samples and invariants!=reference_invariants: raise ValueError('Weights/flags/UVW changed within recovery sweep')
         record=dict(source=source_id,noise_multiplier=multiplier,seed=seed_label,casa_seed=casa_seed,
             settings_hash=settings_hash,products=products,components=sky,flux_jy=flux,sigma0_jy=sigma,
             SNR_corr_actual=actual['SNR_corr_actual'],valid_complex_samples=actual['valid_complex_samples'],
@@ -130,6 +135,9 @@ def recovery_products(output, folder, source, sky, sigma, settings_hash, v=None,
             sha256={k:hashlib.sha256((output/p).read_bytes()).hexdigest() for k,p in products.items()})
         for k,p in products.items():
             if k!='support': load_fits_plane(output/p)
+        if not require_same_samples:
+            record['samples_changed_from_V']=sorted(k for k in set(invariants)|set(reference_invariants)
+                                                   if invariants.get(k)!=reference_invariants.get(k))
         if metadata is not None: record.update(metadata)
         atomic_write_json(cell/'record.json',record)
         # Retain compressed products and metadata, remove only generated CASA
