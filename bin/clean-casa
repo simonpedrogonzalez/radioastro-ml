@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# Delete CASA litter from the repo root: casa-*.log, casacalls-*.txt and TempLattice*/ directories.
+# Only the top level of the repo is touched. Items modified in the last --min-age minutes are kept,
+# because running CASA jobs (cwd = repo root) may still be writing them.
+#
+# usage: bin/clean-casa [--dry-run] [--min-age MINUTES]
+#   --dry-run   list what would be deleted; delete nothing
+#   --min-age   keep items modified within this many minutes (default 60; 0 deletes everything)
+set -euo pipefail
+
+ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
+dry=0
+min_age=60
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --dry-run) dry=1 ;;
+        --min-age) min_age=$2; shift ;;
+        -h|--help) sed -n '2,9p' "$0"; exit 0 ;;
+        *) echo "Unknown option: $1" >&2; exit 2 ;;
+    esac
+    shift
+done
+[[ "$min_age" =~ ^[0-9]+$ ]] || { echo "--min-age must be a whole number of minutes" >&2; exit 2; }
+
+age=()
+[[ $min_age -gt 0 ]] && age=(-mmin "+$min_age")
+mapfile -t items < <(find "$ROOT" -mindepth 1 -maxdepth 1 "${age[@]}" \
+    \( \( -type f \( -name 'casa-*.log' -o -name 'casacalls-*.txt' \) \) -o \( -type d -name 'TempLattice*' \) \) | sort)
+
+if [[ ${#items[@]} -eq 0 ]]; then
+    echo "Nothing to clean (items newer than $min_age min are kept)."
+    exit 0
+fi
+for item in "${items[@]}"; do
+    echo "${item#"$ROOT"/}"
+    [[ $dry -eq 1 ]] || rm -rf -- "$item"
+done
+if [[ $dry -eq 1 ]]; then
+    echo "Would delete ${#items[@]} items (dry run)."
+else
+    echo "Deleted ${#items[@]} items."
+fi

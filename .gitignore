@@ -249,3 +249,6 @@ slurm/logs/
 TempLattice*/
 
 .agents/CONTINUITY.md
+
+# CASA call logs written to the repo root
+casacalls-*.txt
