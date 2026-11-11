@@ -52,7 +52,7 @@ def log_numbers(notes):
 def automask_sidelobe(lines):
     """PSF sidelobe level as logged by CASA auto-multithresh, if present."""
     for line in lines:
-        m = re.search(r"[Ss]idelobe level[^0-9]*([0-9]*\.?[0-9]+)", line)
+        m = re.search(r"[Ss]idelobe ?[Ll]evel[^0-9]*([0-9]*\.?[0-9]+)", line)   # CASA: "SidelobeLevel = 0.385"
         if m:
             return float(m.group(1))
     return None

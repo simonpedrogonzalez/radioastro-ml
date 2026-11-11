@@ -5,7 +5,10 @@
 # or a quoted relative asset path in its scripts) are copied; FITS, npz, checkpoints, Measurement Sets and CASA image
 # tables (and the index.html browsers inside them) are never copied.
 #
-# usage: bin/sync-reports [--dry-run] [--delete] [--max-size MB] [--dest DIR]
+# usage: bin/sync-reports [--dry-run] [--delete] [--max-size MB] [--dest DIR] [RUN_DIR ...]
+#   RUN_DIR     only scan these directories (under runs/ or ml/runs/); fast, use it in
+#               chained jobs. Without RUN_DIR the whole runs/ and ml/runs/ trees are walked,
+#               which takes ~30 min because of the large dataset runs.
 #   --dest      default: $RADIOASTRO_SCRATCH/reports (from config/chpc.env if present)
 #   --max-size  skip referenced files larger than this many MB (default 20)
 #   --delete    remove mirrored files that are no longer selected
@@ -19,22 +22,26 @@ dest=${RADIOASTRO_SCRATCH:+$RADIOASTRO_SCRATCH/reports}
 max_mb=20
 dry=0
 delete=0
+paths=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --dry-run) dry=1 ;;
         --delete) delete=1 ;;
         --max-size) max_mb=$2; shift ;;
         --dest) dest=$2; shift ;;
-        -h|--help) sed -n '2,14p' "$0"; exit 0 ;;
-        *) echo "Unknown option: $1" >&2; exit 2 ;;
+        -h|--help) sed -n '2,17p' "$0"; exit 0 ;;
+        -*) echo "Unknown option: $1" >&2; exit 2 ;;
+        *) [[ -d "$1" ]] || { echo "Not a directory: $1" >&2; exit 2; }
+           paths+=("$(realpath "$1")") ;;
     esac
     shift
 done
 [[ -n "${dest:-}" ]] || { echo "Set --dest (RADIOASTRO_SCRATCH is not set)" >&2; exit 2; }
+[[ $delete -eq 0 || ${#paths[@]} -eq 0 ]] || { echo "--delete needs a full sync (no RUN_DIR)" >&2; exit 2; }
 command -v python3 >/dev/null || { echo "python3 is required" >&2; exit 1; }
 
-select_files() {  # $1 = source root; prints relative paths (html + referenced assets)
-    python3 - "$1" "$max_mb" <<'EOF'
+select_files() {  # $1 = source root, $2.. = dirs to scan (default: root); prints paths relative to root
+    python3 - "$1" "$max_mb" "${@:2}" <<'EOF'
 import os, re, sys
 from urllib.parse import unquote, urlsplit
 root, limit = os.path.realpath(sys.argv[1]), float(sys.argv[2]) * 2**20
@@ -44,7 +51,7 @@ link = re.compile(r"""(?:src|href)\s*=\s*["']([^"'#?]+)""", re.I)
 # Paths built in page scripts/JSON, e.g. "images/<source>/<id>_clean.png".
 quoted = re.compile(r"""["']([^"'\s<>?#]+\.(?:png|jpe?g|svg|gif|webp|csv|json|txt))["']""", re.I)
 selected = set()
-for d, dirs, files in os.walk(root):
+for d, dirs, files in (w for start in (sys.argv[3:] or [root]) for w in os.walk(start)):
     dirs[:] = [x for x in dirs if not x.endswith(casa) and x != "scratch" and not x.startswith("TempLattice")]
     for name in files:
         if not name.lower().endswith((".html", ".htm")):
@@ -69,8 +76,15 @@ EOF
 for pair in "runs:runs" "ml/runs:ml-runs"; do
     src="$ROOT/${pair%%:*}"; target="$dest/${pair##*:}"
     [[ -d "$src" ]] || { echo "Skipping missing $src"; continue; }
+    starts=()
+    if [[ ${#paths[@]} -gt 0 ]]; then
+        real=$(realpath "$src")
+        for p in "${paths[@]}"; do [[ "$p" == "$real" || "$p" == "$real"/* ]] && starts+=("$p"); done
+        [[ ${#starts[@]} -gt 0 ]] || continue
+        matched=$(( ${matched:-0} + ${#starts[@]} ))
+    fi
     list=$(mktemp)
-    select_files "$src" > "$list"
+    select_files "$src" "${starts[@]}" > "$list"
     total=$(cd "$src" && tr '\n' '\0' < "$list" | xargs -0 -r du -ck 2>/dev/null | tail -1 | cut -f1)
     total=${total:-0}  # empty selection: report 0 instead of sizing the whole tree
     echo "== $src/ -> $target/: $(wc -l < "$list" | tr -d ' ') files, $((total / 1024)) MB"
@@ -87,3 +101,4 @@ for pair in "runs:runs" "ml/runs:ml-runs"; do
     fi
     rm -f "$list"
 done
+[[ ${#paths[@]} -eq 0 || ${matched:-0} -eq ${#paths[@]} ]] || { echo "Some RUN_DIRs are not under runs/ or ml/runs/" >&2; exit 2; }

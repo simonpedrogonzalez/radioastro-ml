@@ -638,7 +638,7 @@ def recipe_b(work, regen, gain, flagging):
     record["corrected_columns"] = changed
     try:
         crops, errors, found = save_native(work, Path(regen["observed_ms"]).parents[2] / "native" /
-                                           f"{Path(regen['observed_ms']).parent.name}__{safe(record['recipe'])}.npz")
+                                           f"{Path(regen['observed_ms']).parent.name}__{work.name}.npz")  # work dir = safe(recipe)
         record.update(native_crops=crops, native_crops_errors=errors, native_images_found=found)
     except Exception:
         record["native_crops"] = None

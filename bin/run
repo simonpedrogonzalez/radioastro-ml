@@ -105,7 +105,14 @@ case "$runtime" in
             else
                 module_name=${CASA_PIPELINE_MODULE:-casa-vla}
             fi
-            load_module "$module_name"
+            # A self-contained NRAO pipeline tarball (CASA_PIPELINE_BIN) replaces the
+            # casa-vla module (CASA 6.4.1 / pipeline 2022.2, which has no hif_selfcal).
+            if [[ "$runtime" == casa-pipeline && -n "${CASA_PIPELINE_BIN:-}" ]]; then
+                module_name=$(basename -- "$(dirname -- "$(dirname -- "$CASA_PIPELINE_BIN")")")
+                modules_init
+            else
+                load_module "$module_name"
+            fi
             export RADIOASTRO_CASA_DATA="${CASA_DATA_DIR:-$RADIOASTRO_SCRATCH/casa/data}"
             export CASASITECONFIG="$ROOT/config/casasiteconfig.py"
             mkdir -p "$RADIOASTRO_CASA_DATA"
@@ -115,7 +122,9 @@ case "$runtime" in
                 casa_bin=${CASA_PIPELINE_BIN:-$(command -v casa-vla 2>/dev/null || command -v casa 2>/dev/null || true)}
             fi
             [[ -n "$casa_bin" ]] || { echo "$module_name did not expose a CASA executable" >&2; exit 1; }
-            loaded_module=$(module -t list 2>&1 | awk '/casa/{print; exit}')
+            loaded_module=""
+            [[ "$runtime" == casa-pipeline && -n "${CASA_PIPELINE_BIN:-}" ]] \
+                || loaded_module=$(module -t list 2>&1 | awk '/casa/{print; exit}')
             safe_module=${loaded_module:-$module_name}
             safe_module=${safe_module//\//_}
             export PYTHONUSERBASE="${RADIOASTRO_SCRATCH}/envs/casa-user/${safe_module}"
@@ -137,7 +146,7 @@ case "$runtime" in
         [[ "$runtime" != casa ]] || casa_args+=(--logfile "$run_dir/casa.log")
         # Per-run cache dir: concurrent CASA processes sharing ~/.casa/ipython/history.sqlite
         # on NFS occasionally hit a sqlite I/O error that crashes CASA 6.7 startup.
-        [[ "$runtime" != casa ]] || casa_args+=(--cachedir "$run_dir/casa-cache")
+        [[ "$runtime" != casa && -z "${CASA_PIPELINE_BIN:-}" ]] || casa_args+=(--cachedir "$run_dir/casa-cache")
         if [[ "$runtime" == casa-pipeline ]]; then
             pipeline_flag=${CASA_PIPELINE_FLAG:-}
             [[ -n "$pipeline_flag" ]] || [[ "$(uname -s)" != Darwin ]] || pipeline_flag=--pipeline
