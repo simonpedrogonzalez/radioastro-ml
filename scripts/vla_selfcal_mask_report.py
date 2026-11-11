@@ -28,9 +28,10 @@ SIDELOBE_T, NOISE_T, MINBEAMFRAC = 2.0, 5.0, 0.3
 KIND = {0: "control", 1: "amp", 2: "phase", 4: "noise", 3: "amp+phase", 5: "amp+noise", 6: "phase+noise", 7: "all three"}
 
 
-def run(output, source_run, cases, parallel):
+def run(output, source_run, cases, parallel, imsize=None, masking="auto"):
     from scripts import vla_pipeline_qa as qa
-    qa.plan(output, source_run, "B", [RECIPE], cases, "none", None, None)
+    qa.plan(output, source_run, "B", [RECIPE], cases, "none", None, None, native_diagnostics=True,
+            selfcal_imsize=imsize, selfcal_masking=masking)
     qa.execute(output, parallel)
 
 
@@ -52,7 +53,7 @@ def log_numbers(notes):
 def automask_sidelobe(lines):
     """PSF sidelobe level as logged by CASA auto-multithresh, if present."""
     for line in lines:
-        m = re.search(r"[Ss]idelobe ?[Ll]evel[^0-9]*([0-9]*\.?[0-9]+)", line)   # CASA: "SidelobeLevel = 0.385"
+        m = re.search(r"[Ss]idelobe\s*[Ll]evel[^0-9.]*([0-9]*\.?[0-9]+(?:[eE][-+]?[0-9]+)?)", line)   # CASA: "SidelobeLevel = 0.385"
         if m:
             return float(m.group(1))
     return None
@@ -114,7 +115,8 @@ def report(output):
                    threshold_level=level, region_beams=None if level is None or level >= 1 else math.log(1 / level),
                    mask_pixels=mask_pixels, solint_snr=nums.get("solint_snr"),
                    eC_before=ev.get("before", {}).get("eC"), eC_after=ev.get("after", {}).get("eC"),
-                   new_flags=rec.get("new_flag_fraction"), seconds=rec.get("seconds"),
+                   new_flags=sum(s.get("added") or 0 for s in rec.get("flag_stages", [])) or rec.get("new_flag_fraction"),
+                   seconds=rec.get("seconds"), mask_usage=rec.get("mask_usage"), reused=ev.get("evaluation_reused"),
                    native_error=None if arrays else (rec.get("native_crops_error") or
                                                      (json.dumps(rec["native_crops_errors"]) if rec.get("native_crops_errors")
                                                       else f"no crops saved; images found: {rec.get('native_images_found')}")))
@@ -147,7 +149,8 @@ def report(output):
             "max-width:1300px;margin:2em auto;padding:0 1em}table{border-collapse:collapse}td,th{border:1px solid #ccc;"
             "padding:3px 6px;text-align:right;font-size:13px}th{background:#f3f3f3}td:nth-child(-n+3){text-align:left}"
             ".bad{color:#b2182b;font-weight:bold}img{max-width:100%}</style>",
-            f"<h1>Why hif_selfcal skips cases</h1><p>{RECIPE}, {len(rows)} cases, {applied} self-calibrated. "
+            f"<h1>Why hif_selfcal skips cases</h1><p>{RECIPE} ({p.get('variant') or 'imsize=auto, masking=auto'}), "
+            f"{len(rows)} cases, {applied} self-calibrated. "
             f"Mask level = max({SIDELOBE_T} × PSF sidelobe × peak, {NOISE_T} × rms) / peak (estimate). A point source "
             f"keeps a region of ln(1/level) beams, pruned below {MINBEAMFRAC} beam (level &gt; 0.74). "
             "Peak and rms are the pipeline's own values for its initial image. Images: central 256 px of the "
@@ -185,11 +188,13 @@ def main():
     ap.add_argument("--source-run", type=Path)
     ap.add_argument("--cases", default="representative")
     ap.add_argument("--parallel", type=int, default=2)
+    ap.add_argument("--selfcal-imsize", type=int, help="Internal self-cal image size N (default: pipeline's own)")
+    ap.add_argument("--selfcal-masking", choices=("auto", "center"), default="auto")
     a = ap.parse_args()
     if a.run:
         if not a.source_run:
             ap.error("--run needs --source-run")
-        run(a.output.resolve(), a.source_run, a.cases, a.parallel)
+        run(a.output.resolve(), a.source_run, a.cases, a.parallel, a.selfcal_imsize, a.selfcal_masking)
     report(a.output)
 
 

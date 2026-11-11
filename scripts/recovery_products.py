@@ -150,4 +150,39 @@ def recovery_products(output, folder, source, sky, sigma, settings_hash, v=None,
                 else: path.unlink()
         print('RECOVERY COMPLETE',source_id,seed_label,multiplier,flush=True)
 
+    def dirty_only(cell,ms,metadata=None):
+        """Dirty image only (niter 0) on the fixed evaluation grid with the evaluation imaging settings.
+
+        For noiseless references whose flags/weights differ from V: extraction reads only products['dirty']."""
+        from scripts.imaging.imaging import _direct_base_parameters
+        from casatasks import tclean
+        if grid is None: raise ValueError('Dirty-only imaging needs the fixed reference grid')
+        path=cell/'record.json'
+        if path.exists():
+            r=json.loads(path.read_text())
+            if r.get('settings_hash')==settings_hash and (output/r['products']['dirty']).is_file(): return
+        cell.mkdir(parents=True,exist_ok=True)
+        directory=cell/'imaging'
+        if directory.exists(): shutil.rmtree(directory)
+        directory.mkdir()
+        config=replace(DefaultImagingConfig,grid=FixedGrid(grid),restoring_beam=beam)
+        resolved=config.resolve(ms,directory,imsize=source.imsize)
+        parameters=_direct_base_parameters(config,resolved,directory/'dirty')
+        parameters.update(niter=0,pblimit=g.DATASET_PBLIMIT)
+        tclean(**parameters)
+        suffix='.image.tt0' if config.deconvolver=='mtmfs' else '.image'
+        dirty_fits=export_casa_fits(directory/('dirty'+suffix),directory/'dirty.fits.gz',fallback_beam=beam,
+            fallback_unit='Jy/beam',invalid_policy='fill',fill_value=0.)
+        load_fits_plane(dirty_fits)
+        products=dict(dirty=str(dirty_fits.relative_to(output)))
+        record=dict(source=source_id,settings_hash=settings_hash,products=products,niter=0,
+            resolved_configuration=json_safe(resolved),
+            sha256={k:hashlib.sha256((output/p).read_bytes()).hexdigest() for k,p in products.items()})
+        if metadata is not None: record.update(metadata)
+        atomic_write_json(path,record)
+        for p in directory.iterdir():
+            if p.name.startswith('dirty.') and not p.name.endswith('.fits.gz'):
+                shutil.rmtree(p) if p.is_dir() else p.unlink()
+
+    image_cell.dirty_only=dirty_only
     return complete, image_cell

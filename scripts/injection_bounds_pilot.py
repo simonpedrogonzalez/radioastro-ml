@@ -110,8 +110,8 @@ def source_metadata(root, selected, *, v2=False):
     return sources
 
 
-def add_paired_noise(v, regular, observed, scale=1.):
-    """Add scale*(regular−V) after the gain; audit storage rounding."""
+def add_paired_noise(v, regular, observed, scale=1., audit=True):
+    """Add scale*(regular−V) after the gain; audit storage rounding. audit=False skips the noise hash."""
     from casatools import table
     tables=[table() for _ in range(3)];a,b,c=tables
     a.open(str(v));b.open(str(regular));c.open(str(observed),nomodify=False)
@@ -122,7 +122,8 @@ def add_paired_noise(v, regular, observed, scale=1.):
             base=np.asarray(a.getcol('DATA',**args),np.complex128)
             noise=scale*(np.asarray(b.getcol('DATA',**args),np.complex128)-base)
             gain=np.asarray(c.getcol('DATA',**args),np.complex128)
-            h.update(np.ascontiguousarray(noise).tobytes());noise_power+=float(np.square(np.abs(noise)).sum())
+            if audit:h.update(np.ascontiguousarray(noise).tobytes())
+            noise_power+=float(np.square(np.abs(noise)).sum())
             c.putcol('DATA',gain+noise,**args)
             actual=np.asarray(c.getcol('DATA',**args),np.complex128)-gain
             max_roundoff=max(max_roundoff,float(np.abs(actual-noise).max()))
@@ -130,7 +131,7 @@ def add_paired_noise(v, regular, observed, scale=1.):
             if not np.allclose(actual,noise,rtol=0,atol=tolerance):raise ValueError('Paired additive noise changed')
     finally:
         for tb in reversed(tables):tb.close()
-    return dict(noise_delta_sha256=h.hexdigest(),noise_delta_L2_all_samples=math.sqrt(noise_power),
+    return dict(noise_delta_sha256=h.hexdigest() if audit else None,noise_delta_L2_all_samples=math.sqrt(noise_power),
         maximum_storage_roundoff_jy=max_roundoff)
 
 
