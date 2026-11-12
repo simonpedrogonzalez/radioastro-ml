@@ -6,10 +6,13 @@ runs and writes (design doc, "Requested report redesign and My Criteria"):
 
   1. one aggregate row per run configuration and flagging mode: coverage, a My Criteria category-count bar
      chart on a shared scale, and measured recipe runtime;
-  2. the full per-case table (every planned case, pending ones included) with Pipeline action, My Criteria,
-     eC before/after, matched reference, damage reduction/remaining excess, runtime and Description.
+  2. the full per-case table (every planned case, pending ones included) with Corruption (per-kind removal damage,
+     total and solvable eC), Pipeline action, My Criteria, eC before/after, CLEAN images before and after the
+     recipe on one shared color scale per case, matched reference, damage reduction/remaining excess, runtime and
+     Description.
 
-Retained per-case evidence is written to descriptions/. Run folders are only read.
+Retained per-case evidence is written to descriptions/, the image thumbnails to images/ (rendered from the FITS
+the eC evaluation used; existing PNGs are reused). Run folders are only read.
 
   bin/run ml scripts/vla_pipeline_qa_compare.py --output runs/vla-pipeline-qa-compare RUN [RUN ...]
 """
@@ -48,6 +51,22 @@ def configuration(p, recipe):
     return " · ".join(parts + [flags]), ("B", size or 10 ** 9, " ".join(parts[2:]), recipe)
 
 
+def clean_image(root, case_dir):
+    path = root / "cases" / case_dir / "imaging" / "clean.fits.gz"
+    return str(path) if path.exists() else None
+
+
+def render_pair(before, after, out_before, out_after, label):
+    """Before/after CLEAN images through the canonical imaging plotter (inferno, WCS axes, colorbar, beam), on one
+    shared symmetric scale: +-99.5th percentile of |pixel| over both images. Returns (vmin, vmax) in mJy/beam."""
+    from scripts.imaging.plot_utils import casa_image_to_png, shared_fits_display_limits
+    limits = shared_fits_display_limits([Path(before), Path(after)])
+    for path, out, when in ((before, out_before, "before"), (after, out_after, "after")):
+        casa_image_to_png(Path(path), Path(out), title=f"{label} clean {when}", draw_beam=True,
+                          display_limits_mjy_per_beam=limits, dpi=90)
+    return list(limits)
+
+
 def superseded(result):
     """B flagging_off results without the calonly model-write fix carry the known flux-scale error."""
     if not result["recipe"].endswith("flagging_off") or not result["recipe"].startswith("B:"):
@@ -62,6 +81,8 @@ def load(run):
     source_run = Path(p["source_run"])
     sp = json.loads((source_run / "plan.json").read_text())
     plan_of = {c["id"]: s for s in sp["source_plans"] for c in s["cases"]}
+    rows_path = source_run / "rows.json"                   # per-kind removal damage d = eC(case) - eC(kind removed)
+    damage_of = ({r["case"]: r for r in json.loads(rows_path.read_text())["rows"]} if rows_path.exists() else {})
     archived = {}
 
     def eC_of(case_id):
@@ -81,8 +102,11 @@ def load(run):
             cid = u["case"]
             splan = plan_of[cid]
             params = next(c for c in splan["cases"] if c["id"] == cid)
+            dmg = damage_of.get(cid, {})
             item = dict(case=cid, label=next(r["id"] for r in splan["rows"] if r["case"] == cid),
-                        corruption=CORRUPTIONS[gain_mask(params)], action="–")
+                        corruption=CORRUPTIONS[gain_mask(params)], mask=gain_mask(params), action="–",
+                        d=dmg.get("d"), eC_total=dmg.get("eC", eC_of(cid)),
+                        clean_before=clean_image(source_run, cid))
             path = run / "results" / f"{cid}__{safe(recipe)}.json"
             if not path.exists():
                 item.update(category="error" if cid in units else "pending",
@@ -92,7 +116,10 @@ def load(run):
                 result = json.loads(path.read_text())
                 ref = matched_reference(splan, cid, eC_of)
                 crit = my_criteria(result, gain_mask(params) & 3 != 0, ref)
+                reused = result.get("evaluation", {}).get("evaluation_reused")
                 item.update(crit, reference_id=ref.get("id"), seconds=result["recipe_record"].get("seconds"),
+                            evaluation_reused=bool(reused), clean_after=(
+                                item["clean_before"] if reused else clean_image(run, f"{cid}/{safe(recipe)}")),
                             superseded=superseded(result), description=describe(result, crit),
                             notes=result["recipe_record"].get("pipeline_notes", []),
                             evidence=dict(recipe_record=result["recipe_record"], evaluation={
@@ -144,12 +171,38 @@ def badge(k):
     return f"<span class=badge style='{style}'>{name(k)}</span>"
 
 
+def corruption_cell(c):
+    """Kind, per-kind removal damage of the injected kinds, total eC and eC_solvable: the gain (amp+phase) damage,
+    eC before − matched reference eC, which a perfect gain solution would remove."""
+    out = [c["corruption"]]
+    d, mask = c.get("d"), c.get("mask", 0)
+    if d is not None and mask:
+        out.append(" / ".join(f"d_{k} {d[i]:.3f}" for i, k in enumerate(("amp", "phase", "noise")) if mask >> i & 1))
+    total = c.get("eC_total", c.get("before"))
+    line = f"eC={total:.3f}" if total is not None else ""
+    if mask & 3 and c.get("damage") is not None:
+        line += f" (eC_solvable={c['damage']:.3f})"
+    if line:
+        out.append(line)
+    return "<br>".join(out)
+
+
+def image_cell(c, key):
+    path = c.get(f"{key}_png")
+    if not path:
+        return "<td><small>–</small></td>"
+    note = f"<br><small>±{c['png_scale'][1]:.3g} mJy/beam</small>" if key == "after" else ""
+    if key == "after" and c.get("evaluation_reused"):
+        note += "<br><small>input unchanged</small>"
+    return f"<td><a href='{path}'><img src='{path}' loading=lazy width=160></a>{note}</td>"
+
+
 def write_report(output, summaries, rows, runs, filename):
     f = lambda x, d=3: "–" if x is None else f"{x:.{d}f}"
     esc = htmllib.escape
     scale = max([1] + [s["counts"][k] for s in summaries for k in CATEGORIES])
     out = ["<!doctype html><meta charset=utf-8><title>VLA pipeline QA comparison</title><style>body{font-family:"
-           "sans-serif;max-width:1600px;margin:2em auto;padding:0 1em}table{border-collapse:collapse;margin:.6em 0}"
+           "sans-serif;max-width:1600px;margin:2em auto;padding:0 1em}table{border-collapse:collapse;margin:0}.scroll{overflow-x:auto;margin:.6em 0}"
            "td,th{border:1px solid #ccc;padding:3px 7px;text-align:left;vertical-align:top}th{background:#f3f3f3}"
            "td.n{text-align:right}tr.old td{color:#999}.bar{display:flex;align-items:center;gap:4px;font-size:12px;"
            "cursor:pointer;line-height:15px}.bar .lab{width:135px}.fill{display:inline-block;height:11px}"
@@ -157,20 +210,31 @@ def write_report(output, summaries, rows, runs, filename):
            "font-weight:bold}details{font-size:12px}small{color:#555}</style>",
            f"<h1>VLA pipeline QA comparison</h1><p>{len(runs)} run(s): {', '.join(esc(r.name) for r in runs)}. "
            f"Criteria: {CRITERIA_VERSION}.</p>",
-           "<p><b>My Criteria.</b> eC: CLEAN recovery error at the common restoring beam (0 = perfect). "
-           "<i>Reference</i>: archived eC of the same source case with amplitude and phase injections removed, keeping "
-           "the noise seed and multiplier (nominal-noise control for gain-only cases, matched noise-only case "
-           "otherwise). Damage = before − reference, remaining excess = after − reference, change = before − after, "
-           f"boundary = reference + {TOLERANCE} (acceptable remaining gain damage); ε = {EPSILON} is the meaningful-change "
-           "tolerance (PROVISIONAL, not yet justified). After accounting for errors/missing measurements, "
-           "<b>blocked</b> means a prerequisite prevented correction trials, regardless of initial quality. Otherwise: <b>degraded</b> if change &lt; −ε (even inside the "
-           "boundary); <b>preserved</b> if before ≤ boundary and |change| ≤ ε (after a valid processing decision, never an empty-model block); <b>solved</b> if amplitude/phase injected, before &gt; boundary, after ≤ boundary, change "
-           "&gt; ε and a correction was applied; <b>improved</b> if change &gt; ε otherwise; for before &gt; boundary and "
-           "|change| ≤ ε: <b>rejected</b> if trials ran but no correction was retained, <b>unchanged</b> if a correction "
-           "was applied (unknown action: unavailable). Applying calibration earns no success label by itself. The reference is a benchmark, not a proven attainable "
-           "bound: gains act before noise injection, so inverting amplitude errors can change the output noise. "
-           "Meeting it does not prove the true antenna gains were recovered. Pending, error and unavailable are "
-           "accounting states, not scientific outcomes.</p>"]
+           "<h3>My Criteria</h3><ul>"
+           "<li><b>eC</b>: CLEAN recovery error at the common restoring beam (0 = perfect).</li>"
+           "<li><b>Reference eC</b>: what eC should be once the gain errors are solved; archived eC of the same source case with amplitude and phase injections "
+           "removed, keeping the noise seed and multiplier (nominal-noise control for gain-only cases, matched "
+           "noise-only case otherwise).</li>"
+           "<li><b>Quantities</b>: damage (eC_solvable) = before − reference; remaining excess = after − reference; "
+           "change = before − after.</li>"
+           f"<li><b>Boundary</b> = reference + {TOLERANCE} (acceptable remaining gain damage).</li>"
+           f"<li><b>ε = {EPSILON}</b>: meaningful-change tolerance (PROVISIONAL, not yet justified).</li></ul>"
+           "<p>Categories, checked in this order (after errors and missing measurements):</p><ol>"
+           "<li><b>blocked</b>: a prerequisite prevented correction trials, regardless of initial quality.</li>"
+           "<li><b>degraded</b>: change &lt; −ε (even inside the boundary).</li>"
+           "<li><b>preserved</b>: before ≤ boundary and |change| ≤ ε (after a valid processing decision, never an "
+           "empty-model block).</li>"
+           "<li><b>solved</b>: amplitude/phase injected, before &gt; boundary, after ≤ boundary, change &gt; ε, and a "
+           "correction was applied.</li>"
+           "<li><b>improved</b>: change &gt; ε otherwise.</li>"
+           "<li>before &gt; boundary and |change| ≤ ε: <b>rejected</b> if trials ran but no correction was retained, "
+           "<b>unchanged</b> if a correction was applied (unknown action: unavailable).</li></ol>"
+           "<p>Notes:</p><ul>"
+           "<li>Applying calibration earns no success label by itself.</li>"
+           "<li>The reference is a benchmark, not a proven attainable bound: gains act before noise injection, so "
+           "inverting amplitude errors can change the output noise.</li>"
+           "<li>Meeting it does not prove the true antenna gains were recovered.</li>"
+           "<li>Pending, error and unavailable are accounting states, not scientific outcomes.</li></ul>"]
     if any(s["superseded"] for s in summaries):
         out.append("<p><b>Grey rows</b>: B flagging_off without the calonly model-write fix (superseded, reference "
                    "only).</p>")
@@ -178,7 +242,7 @@ def write_report(output, summaries, rows, runs, filename):
                "count scale; click a bar to list its cases. Runtime: measured wall time of the recipe's own CASA "
                "process (median, range) and summed recipe-process hours, which is not elapsed run time. Elapsed: "
                "summed duration of the run's --execute calls (whole cases: regeneration, both flagging recipes, "
-               "evaluation), shared by both flagging rows.</p><table><tr><th>Configuration</th><th>Coverage</th>"
+               "evaluation), shared by both flagging rows.</p><div class=scroll><table><tr><th>Configuration</th><th>Coverage</th>"
                "<th>My Criteria</th><th>Runtime</th><th>Description</th></tr>")
     for s in summaries:
         c, r = s["counts"], s["runtime"]
@@ -195,13 +259,28 @@ def write_report(output, summaries, rows, runs, filename):
                    f"<td>{bars(c, scale, s['config'])}</td><td>{runtime}</td>"
                    f"<td>{esc(s['description'])}<br><b>{s['initially_above']}/{s['initial_known']} with known baseline "
                    "initially exceed the gain-damage boundary.</b></td></tr>")
-    out.append("</table><h2>Cases</h2><p>Every planned case. Filter: <select id=fc><option value=''>all "
+    out.append("</table></div><h2>Cases</h2><ul>"
+               "<li><b>Reference eC</b>: eC of the same case without the amp/phase errors, i.e. what eC should be once "
+               "the gains are solved.</li>"
+               "<li><b>eC_solvable</b> = eC − reference eC: the part of eC a perfect gain solution removes; shown before → "
+               "after the recipe (negative after: below the reference).</li>"
+               "<li><b>reduction</b> = before − after (positive = better, negative = worse); the same number for eC and "
+               "eC_solvable, since both share the reference.</li>"
+               "<li><b>Pipeline action</b>: <i>Applied</i> (a correction was applied), <i>Left unchanged</i> (trials ran, "
+               "no correction kept), <i>Could not start</i> (blocked, e.g. empty mask or S/N too low), <i>Error</i> "
+               "(the recipe crashed), <i>Unknown</i> (no decision recorded).</li></ul>"
+               "<p>Every planned case. Filter: <select id=fc><option value=''>all "
                "configurations</option>" + "".join(f"<option>{esc(s['config'])}</option>" for s in summaries) +
                "</select> <select id=fk><option value=''>all categories</option>" +
                "".join(f"<option value={k}>{name(k)}</option>" for k in CATEGORIES + ACCOUNTING) + "</select></p>"
-               "<table id=cases><tr><th>Configuration</th><th>Source / case</th><th>Corruption</th>"
-               "<th>Pipeline action</th><th>My Criteria</th><th>eC before → after</th><th>Reference eC</th>"
-               "<th>Reduction / remaining</th><th>Recipe min</th><th>Description</th></tr>")
+               "<p><b>Corruption</b>: injected kinds; d_k = eC(case) − eC(same case with kind k removed), archived removal damage "
+               "(per-kind values need not add up); eC = archived total. <b>Images</b>: CLEAN image used for eC, before "
+               "(archived case) and after the recipe, canonical imaging plot style with one shared linear scale per case "
+               "(±99.5th percentile of |pixel| over both images, shown under the after image); click to enlarge.</p>"
+               "<div class=scroll><table id=cases><tr><th>Configuration</th><th>Source / case</th><th>Corruption</th>"
+               "<th>Pipeline action</th><th>My Criteria</th><th>eC before → after</th><th>CLEAN before</th>"
+               "<th>CLEAN after</th><th>eC_solvable before → after</th>"
+               "<th>Recipe runtime (min)</th><th>Description</th></tr>")
     for row in rows:
         for c in row["cases"]:
             link = c.get("evidence_file")
@@ -212,14 +291,15 @@ def write_report(output, summaries, rows, runs, filename):
             out.append(
                 f"<tr data-config='{esc(row['config'])}' data-cat={c['category']}"
                 f"{' class=old' if c.get('superseded') else ''}><td>{esc(row['config'])}</td>"
-                f"<td>{esc(c['label'])}<br><small>{c['case']}</small></td><td>{c['corruption']}</td>"
+                f"<td>{esc(c['label'])}<br><small>{c['case']}</small></td><td>{corruption_cell(c)}</td>"
                 f"<td>{esc(c['action'])}</td><td>{badge(c['category'])}</td>"
-                f"<td class=n>{f(c.get('before'))} → {f(c.get('after'))}</td><td class=n>{f(c.get('reference'))}"
-                f"<br><small>{esc(c.get('reference_id') or '')}</small></td>"
-                f"<td class=n>{f(c.get('reduction'))} / {f(c.get('remaining'))}</td>"
+                f"<td class=n>{f(c.get('before'))} → {f(c.get('after'))}<br>reduction {f(c.get('reduction'))}</td>"
+                f"{image_cell(c, 'before')}{image_cell(c, 'after')}"
+                f"<td class=n>{f(c.get('damage'))} → {f(c.get('remaining'))}<br>reduction {f(c.get('reduction'))}"
+                f"<br><small>reference eC {f(c.get('reference'))} ({esc(c.get('reference_id') or '–')})</small></td>"
                 f"<td class=n>{f(c['seconds'] / 60 if c.get('seconds') is not None else None, 1)}</td>"
                 f"<td>{esc(c['description'])}{details}</td></tr>")
-    out.append("</table><script>const fc=document.getElementById('fc'),fk=document.getElementById('fk');"
+    out.append("</table></div><script>const fc=document.getElementById('fc'),fk=document.getElementById('fk');"
                "function apply(){for(const tr of document.querySelectorAll('#cases tr[data-cat]'))tr.style.display="
                "(!fc.value||tr.dataset.config===fc.value)&&(!fk.value||tr.dataset.cat===fk.value)?'':'none'}"
                "fc.onchange=fk.onchange=apply;for(const b of document.querySelectorAll('.bar'))b.onclick=()=>{"
@@ -241,6 +321,30 @@ def build(runs, output, filename="comparison.html"):
                     description=c["description"], my_criteria={k: c.get(k) for k in (
                         "category", "action", "before", "after", "reference", "boundary", "reference_id", "damage", "remaining",
                         "reduction", "nonpositive_damage", "reason")}, **c.pop("evidence")))
+    images = output / "images"
+    images.mkdir(exist_ok=True)
+    rendered = reused = 0
+    for row in rows:                        # before/after CLEAN thumbnails, one shared color scale per case
+        for c in row["cases"]:
+            before, after = c.pop("clean_before", None), c.pop("clean_after", None)
+            if not (before and after):
+                continue
+            stem = f"images/{row['run']}__{c['case']}__{safe(row['recipe'])}"
+            pb, pa, scale = output / f"{stem}__before.png", output / f"{stem}__after.png", output / f"{stem}.json"
+            newest = max(Path(before).stat().st_mtime, Path(after).stat().st_mtime)
+            if pb.exists() and pa.exists() and scale.exists() and scale.stat().st_mtime >= newest:
+                c["png_scale"] = json.loads(scale.read_text())
+                reused += 1
+            else:
+                try:
+                    c["png_scale"] = render_pair(before, after, pb, pa, c["label"])
+                except Exception as exc:    # a broken FITS must not stop the report
+                    print("IMAGE FAILED", c["case"], row["recipe"], exc)
+                    continue
+                scale.write_text(json.dumps(c["png_scale"]))
+                rendered += 1
+            c["before_png"], c["after_png"] = f"{stem}__before.png", f"{stem}__after.png"
+    print(f"IMAGES rendered {rendered}, reused {reused}")
     summaries = [summarize(r) for r in rows]
     write_json(output / filename.replace(".html", ".json"), dict(
         criteria_version=CRITERIA_VERSION, tolerance=TOLERANCE, epsilon=EPSILON, epsilon_status="provisional",

@@ -49,6 +49,7 @@ def casa_image_to_png(
     metric_region: Optional[BeamRegion] = None,
     fallback_beam: Optional[Beam] = None,
     display_limits_mjy_per_beam: Optional[tuple[float, float]] = None,
+    dpi: int = 180,
 ) -> dict[str, object]:
     """Render one CASA image or retained FITS plane using the canonical style."""
     try:
@@ -241,7 +242,7 @@ def casa_image_to_png(
                     )
                 )
         plt.tight_layout()
-        figure.savefig(png_path, dpi=180)
+        figure.savefig(png_path, dpi=dpi)
         plt.close(figure)
         return {
             "source_plane": (
@@ -257,7 +258,7 @@ def casa_image_to_png(
             "origin": "lower",
             "interpolation": None,
             "figure_size_inches": list(figure.get_size_inches()),
-            "dpi": 180,
+            "dpi": dpi,
             "title": title or image_path.name,
             "axis_labels": ["RA", "Dec"],
             "colorbar_label": display_unit,
