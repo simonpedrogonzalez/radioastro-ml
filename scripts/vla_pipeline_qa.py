@@ -249,7 +249,7 @@ def unit(output, case_id):
     def casa(runtime, *args, label):
         res = subprocess.run(runtime_command(runtime, "--output", output, *args), cwd=ROOT,
                              capture_output=True, text=True, env=dict(os.environ, MPLBACKEND="Agg"))  # no display on nodes
-        Path(f"{log}_{label}.log").write_text(res.stdout[-200000:] + "\n--- stderr ---\n" + res.stderr[-50000:])
+        Path(f"{log}_{label}.log").write_text(res.stdout + "\n--- stderr ---\n" + res.stderr)
         return res.returncode
 
     def finish(summary):
@@ -319,7 +319,7 @@ def unit(output, case_id):
 
 NOTE_PATTERNS = ("Estimated SNR per solint", r"^\s*(inf_EB|inf|int|[0-9.]+s): [0-9.]+$", "No regions found by aut",
                  "mask file .* is empty", "Peak SNR", "Peak intensity of source", r"^rms: ", r"^Beam ",
-                 "Final solint", "Final SNR", "Starting with solint",
+                 "Final solint", "Final SNR", "Starting with solint", "Continuing with solint", "REASON:",
                  "[Ss]top", "[Pp]assed", "[Ff]ailed")
 
 
@@ -331,7 +331,7 @@ def pipeline_notes(log, limit=400):
     notes = []
     for line in log.read_text(errors="replace").splitlines():
         text = line.split("INFO: ", 1)[-1].split("\t")[-1].strip()
-        if any(re.search(p, text) for p in NOTE_PATTERNS) and "update path" not in text and text not in notes:
+        if any(re.search(p, text) for p in NOTE_PATTERNS) and "update path" not in text:
             notes.append(text[:200])
     return notes[:limit]
 
@@ -1283,10 +1283,10 @@ def casa_image(output, case_id, label, ms, dirty_reference="auto"):
 
 # ---------------------------------------------------------------- report (ML)
 
-CRITERIA_VERSION = "my-criteria-v2 (2026-11-11, corrected precedence)"   # [USER] supersedes v1 and the eC < 0.05 outcome
+CRITERIA_VERSION = "my-criteria-v3 (2026-11-12, blocked versus preserved)"   # [USER] supersedes v1 and the eC < 0.05 outcome
 TOLERANCE = 0.05   # [USER] acceptable remaining gain damage: boundary = matched reference eC + 0.05 (absolute eC)
 EPSILON = 0.005    # PROVISIONAL meaningful-change tolerance (not user-approved). Justify before scientific counts
-CATEGORIES = ("correctly_preserved", "solved", "improved", "degraded", "refused", "unchanged")
+CATEGORIES = ("preserved", "solved", "improved", "degraded", "blocked", "rejected", "unchanged")
 ACCOUNTING = ("pending", "error", "unavailable")
 EMPTY_MODEL = ("No regions found by aut", "is empty", "Empty model", "empty model")
 LOW_SNR = ("SNR_too_low_for_solint inf_EB", "S/N too low")
@@ -1305,19 +1305,61 @@ def _evidence(rec):
     return "\n".join(rec.get("pipeline_notes", [])) + json.dumps(rec.get("selfcal_result", {}), default=str)
 
 
+def decision_evidence(rec):
+    """Read native stop/interval decisions first; logs supplement older result records."""
+    libraries = [t.get("sc_lib", {}) for t in rec.get("selfcal_result", {}).get("targets", [])]
+    stops, failures, finals = [], [], []
+    judged = False
+    rollback = False
+    def visit(value):
+        nonlocal judged
+        if isinstance(value, dict):
+            reason = str(value.get("Fail_Reason") or "")
+            if reason and reason != "None":
+                failures.append(reason)
+            # Prerequisite failures are not evaluated gain trials.
+            if value.get("Pass") is True or (value.get("Pass") is False and
+                    any(x in reason for x in ("S/N decrease", "Beam", "beam", "RMS", "successful solints later"))):
+                judged = True
+            for v in value.values():
+                visit(v)
+        elif isinstance(value, list):
+            for v in value:
+                visit(v)
+    for lib in libraries:
+        if not isinstance(lib, dict):
+            continue
+        stop = str(lib.get("Stop_Reason") or "")
+        if stop and stop != "None":
+            stops.append(stop)
+        final = str(lib.get("final_solint") or "")
+        if final and final != "None":
+            finals.append(final)
+        rollback |= bool(lib.get("inf_EB_SNR_decrease")) and final == "None"
+        visit(lib)
+    notes = rec.get("pipeline_notes", [])
+    judged |= any("Selfcal passed" in n or "REASON:" in n for n in notes)
+    blocked = any(x in " ".join(stops) for x in ("Empty model", "Estimated_SNR_too_low", "No viable calibrator"))
+    if not stops:
+        blocked = any(x in "\n".join(notes) for x in EMPTY_MODEL + LOW_SNR)
+    return dict(stops=list(dict.fromkeys(stops)), failures=list(dict.fromkeys(failures)),
+                finals=list(dict.fromkeys(finals)), judged=judged, blocked=blocked, rollback=rollback)
+
+
 def pipeline_action(rec):
-    """Short label of what the tested recipe did (no use of the injected truth)."""
+    """Application and prerequisite status, independent of injected truth or metric quality."""
     d = rec.get("disposition")
+    if d in ("runtime_failure", "unsupported"):
+        return "Error"
     if d == "applied" or (d == "no_usable_output" and (rec.get("correction_applied") or {}).get("any")):
         return "Applied"
     if d == "no_valid_solutions":
-        return "Could not start"
+        return "Left unchanged"  # solver attempted, but produced no usable correction
     if d == "not_applied":
-        started = any(n.startswith("Starting with solint") for n in rec.get("pipeline_notes", []))
-        text = _evidence(rec)
-        return "Could not start" if not started and any(s in text for s in EMPTY_MODEL + LOW_SNR) else "Left unchanged"
-    if d in ("runtime_failure", "unsupported"):
-        return "Error"
+        evidence = decision_evidence(rec)
+        if evidence["blocked"] and not evidence["judged"]:
+            return "Could not start"
+        return "Left unchanged" if evidence["judged"] else "Unknown"
     return "Unknown"
 
 
@@ -1353,7 +1395,7 @@ def my_criteria(result, gain, reference):
     rec, ev = result.get("recipe_record", {}), result.get("evaluation", {})
     action = pipeline_action(rec)
     out = dict(action=action, gain=bool(gain))
-    if ev.get("status") != "measured":
+    if action == "Error" or ev.get("status") != "measured":
         return dict(out, category="error" if action == "Error" else "unavailable",
                     reason=str(ev.get("reason") or rec.get("reason") or ev.get("status"))[-300:])
     before, after = ev.get("before", {}).get("eC"), ev.get("after", {}).get("eC")
@@ -1365,20 +1407,22 @@ def my_criteria(result, gain, reference):
     boundary, change = ref + TOLERANCE, before - after
     out.update(before=before, after=after, reference=ref, boundary=boundary, damage=before - ref,
                remaining=after - ref, reduction=change, nonpositive_damage=bool(gain and before - ref <= 0))
-    if change < -EPSILON:
+    if action == "Could not start":
+        category = "blocked"
+    elif change < -EPSILON:
         category = "degraded"
-    elif before <= boundary and abs(change) <= EPSILON:
-        category = "correctly_preserved"
+    elif before <= boundary and abs(change) <= EPSILON and action in ("Applied", "Left unchanged"):
+        category = "preserved"
     elif gain and before > boundary and after <= boundary and change > EPSILON and action == "Applied":
         category = "solved"
     elif change > EPSILON:
         category = "improved"
-    elif action in ("Left unchanged", "Could not start"):    # before > boundary, no meaningful change
-        category = "refused"
+    elif action == "Left unchanged":    # before > boundary, no meaningful change
+        category = "rejected"
     elif action == "Applied":
         category = "unchanged"
     else:
-        return dict(out, category="unavailable", reason="cannot distinguish refused from unchanged")
+        return dict(out, category="unavailable", reason="cannot distinguish rejected from unchanged")
     return dict(out, category=category)
 
 
@@ -1389,6 +1433,7 @@ def describe(result, crit):
     action, text = crit["action"], _evidence(rec)
     reason = str(rec.get("reason") or "")
     parts = []
+    evidence = decision_evidence(rec)
     if action == "Applied":
         final = [n.split(":", 1)[1].strip() for n in notes if n.startswith("Final solint")]
         parts.append("Applied gain correction" + (f", final solint {final[-1]} (log)." if final else "."))
@@ -1404,10 +1449,20 @@ def describe(result, crit):
         parts.append("Error: " + (reason.strip().splitlines() or ["unknown"])[-1][:200])
     else:
         parts.append(f"Outcome unknown ({rec.get('disposition')}). {reason[:200]}".strip())
+    if evidence["stops"]:
+        parts.append("Pipeline stop: " + "; ".join(evidence["stops"]) + ".")
+    if evidence["finals"]:
+        parts.append("Retained interval: " + ", ".join(evidence["finals"]) + ".")
+    if evidence["rollback"]:
+        parts.append("The provisional first interval reduced S/N and was revoked after no later interval succeeded.")
+    if evidence["failures"]:
+        parts.append("Interval decisions: " + "; ".join(evidence["failures"]) + ".")
+    warnings = [n for n in notes if "QA execution failed" in n or "Template generation failed" in n]
+    if warnings:
+        parts.append("Pipeline warning (impact not established): " + warnings[0])
     tried = [n.split(":", 1)[1].strip() for n in notes if n.startswith("Starting with solint")]
-    if tried:
-        passed = sum("Selfcal passed" in n for n in notes)
-        parts.append(f"Started at solint {tried[0]}; {passed} interval(s) passed (log).")
+    if tried and action != "Could not start":
+        parts.append(f"First interval entered: {tried[0]} (log, not proof of a retained correction).")
     rejected = list(dict.fromkeys(n.split("REASON:", 1)[1].strip() for n in notes if "REASON:" in n))
     if rejected:
         parts.append("Rejected trial: " + "; ".join(rejected) + " (log).")
@@ -1422,7 +1477,7 @@ def describe(result, crit):
         parts.append("The requested central mask did not (only) reach tclean.")
     cat = crit.get("category")
     within = crit.get("boundary") is not None and crit["before"] <= crit["boundary"]
-    if cat == "correctly_preserved":
+    if cat == "preserved":
         parts.append("Input left unchanged; archived metrics reused." if
                      result.get("evaluation", {}).get("evaluation_reused") else
                      "Already within tolerance; eC changed by less than epsilon.")

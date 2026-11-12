@@ -113,24 +113,44 @@ class HelperTests(unittest.TestCase):
 
     def test_my_criteria(self):
         def res(before, after, disposition="applied", reused=False, status="measured"):
-            return dict(recipe_record=dict(disposition=disposition), evaluation=dict(
+            return dict(recipe_record=dict(disposition=disposition, pipeline_notes=["REASON: S/N decrease"] if disposition == "not_applied" else []), evaluation=dict(
                 status=status, evaluation_reused=reused, before=dict(eC=before), after=dict(eC=after)))
         cat = lambda r, gain, ref=.10: q.my_criteria(r, gain, dict(eC=ref))["category"]
         # Design doc example table: reference 0.10, boundary 0.15, epsilon 0.005
         for before, after, disposition, expected in (
-                (.12, .121, "applied", "correctly_preserved"), (.12, .121, "not_applied", "correctly_preserved"),
+                (.12, .121, "applied", "preserved"), (.12, .121, "not_applied", "preserved"),
                 (.12, .10, "applied", "improved"), (.20, .14, "applied", "solved"), (.20, .17, "applied", "improved"),
-                (.12, .14, "applied", "degraded"), (.20, .20, "not_applied", "refused"),
+                (.12, .14, "applied", "degraded"), (.20, .20, "not_applied", "rejected"),
                 (.20, .201, "applied", "unchanged"), (.151, .149, "applied", "unchanged")):
             self.assertEqual(cat(res(before, after, disposition), True), expected, (before, after, disposition))
         self.assertEqual(cat(res(.20, .14, "not_applied"), True), "improved")       # not solved without application
         self.assertEqual(cat(res(.20, .14), False, .20), "improved")                # no gain injection: never solved
-        self.assertEqual(cat(res(.2, .2, "not_applied", True), False, .2), "correctly_preserved")  # noisy control
-        self.assertEqual(cat(res(.2, .2), False, .2), "correctly_preserved")        # applied, no effect, pure noise
+        self.assertEqual(cat(res(.2, .2, "not_applied", True), False, .2), "preserved")  # noisy control
+        self.assertEqual(cat(res(.2, .2), False, .2), "preserved")        # applied, no effect, pure noise
         self.assertEqual(cat(res(.2, .2, "not_run"), True), "unavailable")          # unknown action: no guess
         self.assertEqual(cat(res(.3, .1, "runtime_failure", status="unavailable"), True), "error")
         self.assertEqual(cat(res(.3, float("nan")), True), "unavailable")
         self.assertEqual(q.my_criteria(res(.3, .1), True, dict(reason="x"))["category"], "unavailable")
+
+    def test_blocked_and_error_precedence(self):
+        for before in (.01, .2):
+            r = dict(recipe_record=dict(disposition="not_applied", selfcal_result=dict(targets=[dict(
+                sc_lib=dict(Stop_Reason="Empty model for solint inf_EB"))])),
+                evaluation=dict(status="measured", before=dict(eC=before), after=dict(eC=before)))
+            self.assertEqual(q.my_criteria(r, True, dict(eC=0))["category"], "blocked")
+            r["recipe_record"]["disposition"] = "runtime_failure"
+            self.assertEqual(q.my_criteria(r, True, dict(eC=0))["category"], "error")
+        r["recipe_record"] = dict(disposition="not_applied")
+        self.assertEqual(q.my_criteria(r, True, dict(eC=.2))["category"], "unavailable")
+
+    def test_structured_rejection_and_rollback(self):
+        rec = dict(disposition="not_applied", selfcal_result=dict(targets=[dict(sc_lib=dict(
+            Stop_Reason="S/N decrease", final_solint="None", inf_EB_SNR_decrease=True,
+            ms={"inf_EB": dict(Pass=False, Fail_Reason="S/N decrease with no successful solints later")}))]))
+        self.assertEqual(q.pipeline_action(rec), "Left unchanged")
+        self.assertTrue(q.decision_evidence(rec)["rollback"])
+        rec["selfcal_result"]["targets"][0]["sc_lib"]["Stop_Reason"] = "Empty model for solint inf"
+        self.assertEqual(q.pipeline_action(rec), "Left unchanged")
 
     def test_matched_reference(self):
         case = lambda cid, A=1., phi=0., a=1.: dict(id=cid, A=A, phi_deg=phi, a=a, source="s", slot=0, noise_seed=7)
@@ -148,8 +168,14 @@ class HelperTests(unittest.TestCase):
         self.assertEqual(q.pipeline_action(dict(disposition="applied")), "Applied")
         self.assertEqual(q.pipeline_action(dict(disposition="not_applied", pipeline_notes=["No regions found by automasking"])),
                          "Could not start")
+        self.assertEqual(q.pipeline_action(dict(disposition="not_applied", pipeline_notes=[   # hif_selfcal empty mask
+            "The mask file sc.X_dirty.mask is empty.", "Starting with solint: inf_EB", "Final solint: None",
+            "No regions found by automasking"])), "Could not start")
+        self.assertEqual(q.pipeline_action(dict(disposition="not_applied", pipeline_notes=[   # trial ran, rejected
+            "Starting with solint: inf_EB", "REASON: S/N decrease", "The mask file sc.X_final.mask is empty."])),
+            "Left unchanged")
         self.assertEqual(q.pipeline_action(dict(disposition="not_applied", pipeline_notes=[
-            "Starting with solint: inf_EB", "No regions found by automasking"])), "Left unchanged")
+            "Starting with solint: inf_EB", "REASON: S/N decrease"])), "Left unchanged")
         self.assertEqual(q.pipeline_action(dict(disposition="runtime_failure")), "Error")
         self.assertEqual(q.pipeline_action(dict(disposition="not_run")), "Unknown")
 

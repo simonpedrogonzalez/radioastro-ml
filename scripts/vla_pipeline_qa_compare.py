@@ -27,9 +27,9 @@ from scripts.vla_pipeline_qa import (ACCOUNTING, CATEGORIES, CRITERIA_VERSION, E
 
 CORRUPTIONS = {0: "control", 1: "amp", 2: "phase", 4: "noise", 3: "amp+phase", 5: "amp+noise", 6: "phase+noise",
                7: "amp+phase+noise"}
-COLORS = dict(correctly_preserved="#009E73", solved="#0072B2", improved="#56B4E9", degraded="#D55E00",
-              refused="#CC79A7", unchanged="#777777")
-NAMES = dict(correctly_preserved="correctly preserved")
+COLORS = dict(preserved="#009E73", solved="#0072B2", improved="#56B4E9", degraded="#D55E00",
+              blocked="#E69F00", rejected="#CC79A7", unchanged="#777777")
+NAMES = {}
 name = lambda k: NAMES.get(k, k)
 
 
@@ -111,9 +111,18 @@ def summarize(row):
     runtime = dict(timed=len(secs), median_min=float(np.median(secs)) / 60, min_min=min(secs) / 60,
                    max_min=max(secs) / 60, recipe_hours=sum(secs) / 3600) if secs else dict(timed=0)
     done = [c for c in row["calls"] if "finished" in c]
+    actions = {a: sum(c.get("action") == a for c in cases) for a in
+               ("Applied", "Left unchanged", "Could not start", "Error", "Unknown")}
+    description = "; ".join(f"{n} {label}" for a, label in (
+        ("Could not start", "blocked before correction trials"), ("Applied", "applied corrections"),
+        ("Left unchanged", "retained no correction after trials"), ("Error", "execution errors"),
+        ("Unknown", "unknown decisions")) if (n := actions[a]))
+    initial_known = [c for c in cases if c.get("before") is not None and c.get("boundary") is not None]
     return dict(run=row["run"], config=row["config"], recipe=row["recipe"], superseded=row["superseded"],
                 planned=len(cases), finished=len(cases) - counts["pending"],
                 classified=sum(counts[k] for k in CATEGORIES), counts=counts, runtime=runtime,
+                description=description, initially_above=sum(c["before"] > c["boundary"] for c in initial_known),
+                initial_known=len(initial_known),
                 elapsed_hours=sum(c["finished"] - c["started"] for c in done) / 3600 if done else None,
                 parallel=sorted({c["parallel"] for c in row["calls"]}),
                 cpus=sorted({str(c.get("slurm_cpus") or c.get("cpu_count")) for c in row["calls"]}))
@@ -153,11 +162,11 @@ def write_report(output, summaries, rows, runs, filename):
            "the noise seed and multiplier (nominal-noise control for gain-only cases, matched noise-only case "
            "otherwise). Damage = before − reference, remaining excess = after − reference, change = before − after, "
            f"boundary = reference + {TOLERANCE} (acceptable remaining gain damage); ε = {EPSILON} is the meaningful-change "
-           "tolerance (PROVISIONAL, not yet justified). Precedence: <b>degraded</b> if change &lt; −ε (even inside the "
-           "boundary); <b>correctly preserved</b> if before ≤ boundary and |change| ≤ ε (any noise level, whether or not "
-           "a correction ran); <b>solved</b> if amplitude/phase injected, before &gt; boundary, after ≤ boundary, change "
+           "tolerance (PROVISIONAL, not yet justified). After accounting for errors/missing measurements, "
+           "<b>blocked</b> means a prerequisite prevented correction trials, regardless of initial quality. Otherwise: <b>degraded</b> if change &lt; −ε (even inside the "
+           "boundary); <b>preserved</b> if before ≤ boundary and |change| ≤ ε (after a valid processing decision, never an empty-model block); <b>solved</b> if amplitude/phase injected, before &gt; boundary, after ≤ boundary, change "
            "&gt; ε and a correction was applied; <b>improved</b> if change &gt; ε otherwise; for before &gt; boundary and "
-           "|change| ≤ ε: <b>refused</b> if the pipeline skipped or rejected correction, <b>unchanged</b> if a correction "
+           "|change| ≤ ε: <b>rejected</b> if trials ran but no correction was retained, <b>unchanged</b> if a correction "
            "was applied (unknown action: unavailable). Applying calibration earns no success label by itself. The reference is a benchmark, not a proven attainable "
            "bound: gains act before noise injection, so inverting amplitude errors can change the output noise. "
            "Meeting it does not prove the true antenna gains were recovered. Pending, error and unavailable are "
@@ -170,7 +179,7 @@ def write_report(output, summaries, rows, runs, filename):
                "process (median, range) and summed recipe-process hours, which is not elapsed run time. Elapsed: "
                "summed duration of the run's --execute calls (whole cases: regeneration, both flagging recipes, "
                "evaluation), shared by both flagging rows.</p><table><tr><th>Configuration</th><th>Coverage</th>"
-               "<th>My Criteria</th><th>Runtime</th></tr>")
+               "<th>My Criteria</th><th>Runtime</th><th>Description</th></tr>")
     for s in summaries:
         c, r = s["counts"], s["runtime"]
         partial = " <span class=partial>partial</span>" if s["finished"] < s["planned"] else ""
@@ -183,7 +192,9 @@ def write_report(output, summaries, rows, runs, filename):
             f", parallel {'/'.join(map(str, s['parallel']))}, CPUs {'/'.join(s['cpus'])}"
             if s["parallel"] else "") + f"; run {esc(s['run'])}</small>"
         out.append(f"<tr{' class=old' if s['superseded'] else ''}><td>{esc(s['config'])}</td><td>{cover}</td>"
-                   f"<td>{bars(c, scale, s['config'])}</td><td>{runtime}</td></tr>")
+                   f"<td>{bars(c, scale, s['config'])}</td><td>{runtime}</td>"
+                   f"<td>{esc(s['description'])}<br><b>{s['initially_above']}/{s['initial_known']} with known baseline "
+                   "initially exceed the gain-damage boundary.</b></td></tr>")
     out.append("</table><h2>Cases</h2><p>Every planned case. Filter: <select id=fc><option value=''>all "
                "configurations</option>" + "".join(f"<option>{esc(s['config'])}</option>" for s in summaries) +
                "</select> <select id=fk><option value=''>all categories</option>" +

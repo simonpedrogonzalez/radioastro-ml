@@ -508,7 +508,7 @@ For the installed local pipeline, the explicit rollback rule revokes an `inf_EB`
 
 ### My Criteria: evaluate removable gain damage, not total noise
 
-[USER] Confirmed categories: **correctly preserved**, **solved**, **improved**, **degraded**, **refused**, **unchanged**. Thermal noise is not a gain corruption to be solved. A control or pure-noise case left unchanged can be correctly preserved even when its eC is above 0.05. The requested 0.05 tolerance is an absolute eC difference, not a 5% relative reduction and not a dirty-error threshold.
+[USER] Confirmed v3 categories (2026-11-12): **preserved**, **solved**, **improved**, **degraded**, **blocked**, **rejected**, **unchanged**. Blocked means a prerequisite prevented correction trials. Rejected means trials ran but no correction was retained on a case needing improvement. These replace the ambiguous refused label. Thermal noise is not a gain corruption to be solved. A control or pure-noise case left unchanged can be preserved even when its eC is above 0.05. The requested 0.05 tolerance is an absolute eC difference, not a 5% relative reduction and not a dirty-error threshold.
 
 Implementation interpretation of the requested damage-based comparison:
 
@@ -522,32 +522,34 @@ Implementation interpretation of the requested damage-based comparison:
 
 Use `change = before - after` and `boundary = reference + 0.05`. The tolerance **0.05 defines acceptable remaining gain damage**. A separate **epsilon defines meaningful change**, using unrounded metrics. The current code's `epsilon = 0.005` remains provisional, not user-approved or established as numerical repeatability. Record its value and justify it before using counts for science. Do not use 0.05 as the improvement/degradation tolerance.
 
-1. **Accounting first:** incomplete execution, runtime errors, invalid/nonfinite measurements, or missing matched references are **pending**, **error**, or **unavailable**, not scientific categories. A missing or ambiguous pipeline decision must not be invented as a refusal.
-2. **Degraded:** `change < -epsilon`. This takes precedence even if the result remains inside the acceptable boundary.
-3. **Correctly preserved:** `before <= boundary` and `abs(change) <= epsilon`. The case was already acceptable and did not meaningfully change. This applies whether the pipeline did nothing or applied a correction with negligible effect, and whether the case is a control, pure noise, or a gain-corrupted case already within tolerance. Do not require `evaluation_reused=True`. A known empty-model stop can still preserve an already-acceptable case, but Description must expose that reason rather than claim the pipeline recognized that no correction was needed.
-4. **Solved:** amplitude/phase corruption is present, `before > boundary`, `after <= boundary`, `change > epsilon`, and a correction was actually applied. This is a demonstrated transition from unacceptable to acceptable remaining gain damage. A case already inside the boundary is **never solved**, even if calibration ran. A tiny crossing of the boundary with `abs(change) <= epsilon` is not evidence of a solution.
-5. **Improved:** `change > epsilon` and the solved condition is not met. This includes measurable improvement to an already-acceptable case. For noise-only cases, describe this as improved image error, not removal of thermal noise. A measured improvement from flagging alone may be improved, but must not be described as successful gain correction.
-6. **Refused:** `before > boundary`, no meaningful improvement or degradation, and the pipeline explicitly skipped/rejected correction without applying one. Description distinguishes insufficient S/N, empty model, and rejected trials. An already-acceptable case left unchanged is correctly preserved, not refused.
-7. **Unchanged:** `before > boundary`, correction was applied, and `abs(change) <= epsilon`. Processing ran but did not meaningfully improve the case. This category is now confirmed, not proposed. No-effect processing of an already-acceptable control or pure-noise case belongs to correctly preserved instead.
+1. **Accounting first:** incomplete execution, runtime errors, invalid/nonfinite measurements, or missing matched references are **pending**, **error**, or **unavailable**, not scientific categories. A missing or ambiguous pipeline decision must not be invented as a rejection.
+2. **Blocked:** an explicit prerequisite prevented correction trials (e.g. empty initial model or insufficient initial S/N), regardless of whether the input was already acceptable. Check this before all metric outcome labels. A runtime failure remains error, not blocked. A later empty model after evaluated trials is not evidence that processing could not start.
+3. **Degraded:** `change < -epsilon`. This takes precedence even if the result remains inside the acceptable boundary.
+4. **Preserved:** `before <= boundary` and `abs(change) <= epsilon`. The case was already acceptable and did not meaningfully change. This applies whether the pipeline did nothing or applied a correction with negligible effect, and whether the case is a control, pure noise, or a gain-corrupted case already within tolerance. Do not require `evaluation_reused=True`. Requires evidence of an applied correction or evaluated correction trials. An empty-model block is blocked, never preserved. Missing decision evidence is unavailable, not proof of a valid no-op.
+5. **Solved:** amplitude/phase corruption is present, `before > boundary`, `after <= boundary`, `change > epsilon`, and a correction was actually applied. This is a demonstrated transition from unacceptable to acceptable remaining gain damage. A case already inside the boundary is **never solved**, even if calibration ran. A tiny crossing of the boundary with `abs(change) <= epsilon` is not evidence of a solution.
+6. **Improved:** `change > epsilon` and the solved condition is not met. This includes measurable improvement to an already-acceptable case. For noise-only cases, describe this as improved image error, not removal of thermal noise. A measured improvement from flagging alone may be improved, but must not be described as successful gain correction.
+7. **Rejected:** `before > boundary`, no meaningful improvement or degradation, and the pipeline evaluated correction trials but rejected them without applying one. Description records the actual trial rejection. Initial insufficient S/N and empty model instead belong to blocked. An already-acceptable case left unchanged is preserved, not rejected.
+8. **Unchanged:** `before > boundary`, correction was applied, and `abs(change) <= epsilon`. Processing ran but did not meaningfully improve the case. This category is now confirmed, not proposed. No-effect processing of an already-acceptable control or pure-noise case belongs to preserved only after a valid processing decision.
 
-For a remaining case with an unknown action and no measurable change, show unavailable with “cannot distinguish refused from unchanged”, not a guessed category. The above scientific categories describe the metric outcome. Pipeline action and Description separately state whether correction ran, was rejected, or could not start.
+For a remaining case with an unknown action and no measurable change, show unavailable with “cannot distinguish rejected from unchanged”, not a guessed category. The above scientific categories describe the metric outcome. Pipeline action and Description separately state whether correction ran, was rejected, or could not start.
 
 Examples (all values illustrative, `reference = 0.10`, hence `boundary = 0.15`, and provisional `epsilon = 0.005`):
 
 | Before → after | Pipeline action | My Criteria | Why |
 | :-- | :-- | :-- | :-- |
-| 0.12 → 0.121 | Applied or left unchanged | correctly preserved | Already acceptable, negligible change |
+| 0.12 → 0.121 | Applied or evaluated trials rejected | preserved | Already acceptable, negligible change |
+| 0.12 → 0.12 | Empty initial model | blocked | No correction trial was possible |
 | 0.12 → 0.10 | Applied | improved | Already acceptable, but measurably better |
 | 0.20 → 0.14 | Applied | solved | Crossed into acceptable range with meaningful improvement |
 | 0.20 → 0.17 | Applied | improved | Better, but still outside the boundary |
 | 0.12 → 0.14 | Applied | degraded | Meaningfully worse despite remaining acceptable |
-| 0.20 → 0.20 | Explicitly skipped/rejected | refused | Needed improvement, no correction applied |
+| 0.20 → 0.20 | Trials evaluated and rejected | rejected | Needed improvement, no correction applied |
 | 0.20 → 0.201 | Applied | unchanged | Needed improvement, processing had negligible benefit |
 | 0.151 → 0.149 | Applied | unchanged | Crossing was smaller than epsilon |
 
-“Correctly preserved” means the already-acceptable metric was preserved within epsilon, not that every visibility, flag, or weight is identical. Describe actual input preservation only when application/flags/weights evidence supports it. Cases with no usable final data remain unavailable. Keep data loss visible even when scalar criteria pass. Known source truth is used only for evaluation, never to select the tested recipe's next action.
+“Preserved” means the already-acceptable metric was preserved within epsilon, not that every visibility, flag, or weight is identical. Describe actual input preservation only when application/flags/weights evidence supports it. Cases with no usable final data remain unavailable. Keep data loss visible even when scalar criteria pass. Known source truth is used only for evaluation, never to select the tested recipe's next action.
 
-**Required correction to code and reports:** remove the rule that any applied gain correction with `after <= reference + 0.05` is solved. Replace the no-gain/reused-only preservation check with the already-acceptable/no-meaningful-change rule above. Update category tests, report help text, counts, and criteria version together. Remove “unchanged (proposed)” from badges and legends. Recompute historical labels from existing measurements without rerunning calibration. Calibration application by itself earns no scientific success label.
+**Required behavior in code and reports (criteria v3):** remove the rule that any applied gain correction with `after <= reference + 0.05` is solved. Replace the no-gain/reused-only preservation check with the already-acceptable/no-meaningful-change rule above. Update category tests, report help text, counts, and criteria version together. Remove “unchanged (proposed)” from badges and legends. Recompute historical labels from existing measurements without rerunning calibration. Calibration application by itself earns no scientific success label.
 
 ### One compact aggregate table, followed by the case table
 
@@ -561,11 +563,12 @@ Suggested columns:
 
 The **My Criteria cell contains a small categorical bar chart**, with categories in the same fixed order, direct counts, and a shared count scale across rows. This is a bar chart of category counts, not a continuous histogram. Do not create a separate table column for every category. Show one shared legend and accessible text/tooltips with full names and counts. Zero categories remain represented. Use the same colors in every chart, badge, filter, and detailed row:
 
-- correctly preserved: teal `#009E73`
+- preserved: teal `#009E73`
 - solved: blue `#0072B2`
 - improved: light blue `#56B4E9`
 - degraded: vermilion `#D55E00`
-- refused: purple `#CC79A7`
+- blocked: amber `#E69F00`
+- rejected: purple `#CC79A7`
 - unchanged: gray `#777777`
 
 Always include text as well as color. Coverage reports pending/error/unavailable counts separately in one compact cell so categories plus accounting states reconcile with the planned case count. Partial configurations are visibly marked partial. Counts from unequal case subsets must not be presented as a completed comparison. Offer a common-case view when useful, without concealing missing cases.
@@ -577,3 +580,12 @@ Below the aggregate table, show the **full per-case table** with configuration, 
 ### Implementation and backfill boundaries
 
 This section requests recording/reporting changes, not changes to calibration heuristics or new expensive checks. Extract existing in-memory pipeline decisions and write compact evidence before cleanup. Do not add visibility scans, re-imaging, or regeneration audits simply to populate descriptions. Existing CHPC reports are read-only mirrors. Rebuild at the run source and sync normally. For old runs, recover structured decisions from retained JSON/context or logs where possible. When cleanup removed the evidence, label the reason unknown. Do not rerun science experiments just to fabricate a complete-looking history. The new damage criterion requires the matched case metadata/metrics at the report source, which the HTML-only mirror need not contain.
+
+
+### Implemented v3 reporting changes (2026-11-12)
+
+Blocked takes precedence over preserved even for a control or noise-only case. Error/unavailable accounting takes precedence over scientific labels. Native sc_lib stop reasons and interval decisions are read before falling back to logs. A “Starting with solint” message alone proves neither a gain solve nor a valid decision. Preserve the distinction between initial prerequisite failure and a later failed attempt after evaluated trials. Unknown decision evidence must remain unknown. Keep QA scoring/rendering exceptions visible as warnings with impact unestablished, rather than automatically dismissing them.
+
+Each aggregate configuration row retains its category-count bars and runtime, and now also has a short Description (counts of blocked, applied, and rejected-trial actions). Show the number initially above the gain-damage boundary and the number with known baseline/reference. This smoke panel has no initially above-boundary cases, so it cannot demonstrate solved outcomes. The synced 20261111-2034 evidence confirms 1024-auto has five initial empty-model blocks and three applications per flagging mode, not seven blocks. Original-size auto has eight blocks. These must not appear as preservation successes.
+
+The category palette retains teal for preserved, blue for solved, light blue for improved, vermilion for degraded, purple for rejected, and gray for unchanged. Amber identifies blocked. Descriptions and category names are present as text, not color alone. Preserve criteria version and provisional epsilon in exports. Calibration logic and numerical tolerances are unchanged by v3. Old report labels can be recomputed from retained evidence without CASA reruns.
