@@ -409,12 +409,14 @@ Scope: one source (0449+113), two cases, 512 px internal images except the reuse
 
 ## Running the experiment grid (2026-11-11)
 
-One `scripts/vla_pipeline_qa.py` run holds one experiment and one set of self-calibration options. Both flagging recipes (`flagging_off`, `flagging_on`) are always included. Image size and masking are stored once per plan, so each B combination is its own run. The full grid is 7 runs:
+One `scripts/vla_pipeline_qa.py` run holds one experiment and one set of self-calibration options. Both flagging recipes (`flagging_off`, `flagging_on`) are always included. Image size and masking are stored once per plan, so each B combination is its own run. The full grid is 9 runs:
 
 | Run | Experiment | `--selfcal-imsize` | `--selfcal-masking` |
 |---|---|---|---|
 | A | A: gaincal with the true model | – | – |
-| B-512-auto | B: hif_selfcal | 512 | auto |
+| B-256-auto | B: hif_selfcal | 256 | auto |
+| B-256-center | B | 256 | center |
+| B-512-auto | B | 512 | auto |
 | B-512-center | B | 512 | center |
 | B-1024-auto | B | 1024 | auto |
 | B-1024-center | B | 1024 | center |
@@ -439,9 +441,9 @@ CASES=representative:3                         # 3 sources spread in S/N, 8 case
 PAR=2                                          # cases run concurrently; keep fixed across runs
 OUT=runs/vla-pipeline-qa-grid-$(date +%Y%m%d)
 
-# Plan: A, then B for 3 image sizes x 2 maskings
+# Plan: A, then B for 4 image sizes x 2 maskings
 qa --output "$OUT-A" --plan --source-run "$SRC" --experiment A --cases "$CASES"
-for size in 512 1024 orig; do
+for size in 256 512 1024 orig; do
   for mask in auto center; do
     opts=(--selfcal-masking "$mask")
     if [[ "$size" != orig ]]; then
@@ -454,6 +456,7 @@ done
 # Execute and report in this order: cheapest first, the pipeline's own image size last
 runs=(
   "$OUT-A"
+  "$OUT-B-256-auto" "$OUT-B-256-center"
   "$OUT-B-512-auto" "$OUT-B-512-center"
   "$OUT-B-1024-auto" "$OUT-B-1024-center"
   "$OUT-B-orig-auto" "$OUT-B-orig-center"
@@ -467,6 +470,10 @@ done
 bin/run ml scripts/vla_pipeline_qa_compare.py --output "$OUT-compare" "${runs[@]}"
 ```
 
+Pipeline weblog (2026-11-11): B now calls `h_init(weblog=False)`, so the pipeline no longer renders its HTML weblog (plotms/matplotlib summary plots) after every task. Nothing in this experiment reads it. Local check on one 256 px center-mask case: recipe 156 → 121 s, case 252 → 201 s, eC/eD identical. `--pipeline-weblog` (B only, stored in `plan.json` options and `recipe_record.pipeline_weblog`) restores it. Plans made before this change also run without it.
+
+Thread cap (2026-11-11): uncapped CASA sizes its OpenMP/BLAS thread pools to every CPU of the node, not the job's share. On CHPC, 8 parallel cases then ran ~1400 threads on 32 CPU threads and self-cal was ~20x slower (iowait ~0; local disk vs NFS made no difference). Now `bin/run` defaults `OMP_NUM_THREADS`, `OPENBLAS_NUM_THREADS`, `MKL_NUM_THREADS` and `NUMEXPR_NUM_THREADS` to the job's CPUs inside Slurm, and `--execute` gives each case CPUs // `--parallel` (Slurm cpuset, or `SLURM_CPUS_PER_TASK` if the cpuset is unrestricted). Values you set yourself are kept. The value is printed by `--execute` and stored in `execute.json`. Tested on CHPC: 8 cases × 4 threads on 32 CPU threads finished in 6 min at 256 px.
+
 Runtime and resuming:
 
 - There is no time limit on the CASA subprocesses. Disabling the optional checks does not bound self-calibration time. The `orig` variants are the expensive ones (the pipeline's own image size took about 18 min per recipe locally), which is why they run last. A stuck case blocks its worker until it is killed by hand or by the job's wall time.
@@ -476,3 +483,97 @@ Runtime and resuming:
 On CHPC, submit each `--execute` as a job with `bin/submit ml-cpu scripts/vla_pipeline_qa.py --output <run> --execute --parallel <N>` and match `<N>` to the job's CPUs. This submission path is UNCONFIRMED for this experiment (it starts CASA pipeline subprocesses inside the ML job). The job's wall time is then the only runtime limit.
 
 `scripts/vla_pipeline_qa_compare.py` only reads the run folders. It writes `comparison.html` and `comparison.json`: one row per run variant × recipe with dispositions, eC outcomes (fixed, already ok, still bad, degraded), median eC before → after, the same medians on the cases measured in every row (paired), fixed counts by corruption type and median recipe/case runtime. B flagging_off rows without the calonly fix are greyed out as superseded.
+
+## Requested report redesign and My Criteria (2026-11-11)
+
+[USER] Specification for the report implementation. This section supersedes the old headline `fixed / already ok / still bad / degraded` classification and wide disposition tables. The first report implementation exists, but the corrected category definitions below supersede its original precedence and still require a corresponding code/test update. This edit changes documentation only. Preserve historical results and record a new criteria version when reports are rebuilt.
+
+### Evidence from the synced CHPC reports
+
+Reviewed `reports/runs/vla-pipeline-qa-grid-20261111-1219-compare/comparison.html` and `...-B-512-center/report.html` in the read-only local CHPC mirror. These runs use `dataset-v2-matched-smoke-chpc`, with the supplied control record identifying J0713+4349, not the local 0449+113 source.
+
+The 512-center report has eight cases per flagging recipe, seven applications and one no-application control. Its current threshold counts are four “already ok” and four “still bad”. They obscure the intended question: phase eC improves about 0.035 to 0.006, phase+noise about 0.116 to 0.088, and the control is unchanged. The current rule treats all noise-bearing cases as unsuccessful because their total eC exceeds 0.05. These displayed rounded numbers are illustrative, not sufficient to calculate new labels.
+
+The comparison also includes partial runs, and A flagging_on has eight result records but only four measured outputs. All planned cases must remain visible in coverage accounting. Missing metrics must not silently disappear from counts or be called refusals. The reported 512-center median recipe times are about 63.6 and 59.1 minutes (off/on), much longer than local pilot estimates. Report measured CHPC runtime rather than substituting local timing.
+
+### Simple labels, with the explanation in Description
+
+Use a short **Pipeline action** label per case: **Applied**, **Left unchanged**, **Could not start**, or **Error**. Applied means final correction tables were actually applied. Left unchanged means a completed decision retained no correction. Could not start means an explicit prerequisite prevented solving (e.g. empty model or insufficient estimated S/N). Error means a runtime or unsupported-input problem. If the evidence cannot distinguish these, show **Unknown**. Flag changes must still be stated in Description even if no calibration was applied.
+
+[USER] Put the explanation in **Description**, separate from **My Criteria**. Interpret “description folder” as a per-case Description field with expandable details and a linked `descriptions/` directory of retained JSON/text evidence. Keep the short explanation directly visible, not accessible only on CHPC. It should say what was tried, what was skipped, and why, using plain language. Example: “Tried phase correction. The first interval slightly reduced S/N and was retained provisionally. The next interval failed the S/N checks, so the first correction was also discarded. Amplitude correction was not reached. No correction applied.”
+
+Preserve native `sc_lib` fields before cleanup: `Stop_Reason`, `SC_success`, `final_solint`, `inf_EB_SNR_decrease`, per-MS/per-interval `Pass`, `Fail_Reason`, relevant before/after S/N, near-field S/N, RMS and beam metrics, and final tables. Include sub-field decisions where present. Save planned versus attempted versus retained intervals separately. The current scalar-only `summarize_selfcal()` drops this nested evidence. Log excerpts must retain final decisions and explicit reasons instead of only the first 12 lines. Preserve ordered events, since a provisional pass can later be revoked. Prefer structured fields and label log-derived interpretations as such. Never infer that an interval ran merely because it appears in `sc_solints`.
+
+For the installed local pipeline, the explicit rollback rule revokes an `inf_EB` solution that reduced S/N if no later interval succeeds. Verify the CHPC version before assigning that specific explanation there. “No accepted improvement” is a pipeline decision. “Correctly preserved” is our evaluation, not a claim that the pipeline knew the injected truth. Empty model does not necessarily mean automasking caused it, particularly with a user mask. Attribute the cause only when supported.
+
+### My Criteria: evaluate removable gain damage, not total noise
+
+[USER] Confirmed categories: **correctly preserved**, **solved**, **improved**, **degraded**, **refused**, **unchanged**. Thermal noise is not a gain corruption to be solved. A control or pure-noise case left unchanged can be correctly preserved even when its eC is above 0.05. The requested 0.05 tolerance is an absolute eC difference, not a 5% relative reduction and not a dirty-error threshold.
+
+Implementation interpretation of the requested damage-based comparison:
+
+- Let `before` and `after` be the original and post-recipe eC, measured by the common evaluation procedure.
+- Let `reference` be eC of the matched source case with **both amplitude and phase injections removed**, retaining the same source, noise seed, noise multiplier, and evaluation settings. For gain-only cases this is the nominal-noise control. For gain+noise cases this is the matched noise-only case. Use the archived unprocessed counterpart, not a different realization or the recipe-processed noise case.
+- Joint gain damage is `before - reference`. Remaining excess is `after - reference`. Reduction is `before - after`. Define the acceptable boundary as `boundary = reference + 0.05`. Solved requires starting outside this boundary and ending inside it with measurable improvement, not merely ending inside it after applying calibration.
+- Match through source-plan recipe/slot/mask identities and verify the counterpart parameters. The matched-v2 masks retain noise with `mask & 4`. Do not approximate joint damage by `d_amp + d_phase`: each stored damage removes just one corruption in the original context, so interactions make that sum invalid. Do not use ML-predicted damage when measured counterparts exist. Retain signed damage and flag zero/negative joint damage rather than silently replacing it with a positive value.
+- This reference operationalizes the user's criterion. It is not a proven physically attainable lower bound: gains act on signal before noise injection, so amplitude inversion can change the output noise. Record that limitation in the report help text. Meeting the criterion means meeting this benchmark, not proving the true antenna gains were recovered.
+
+**Corrected classification precedence (user-confirmed, supersedes the earlier definitions):**
+
+Use `change = before - after` and `boundary = reference + 0.05`. The tolerance **0.05 defines acceptable remaining gain damage**. A separate **epsilon defines meaningful change**, using unrounded metrics. The current code's `epsilon = 0.005` remains provisional, not user-approved or established as numerical repeatability. Record its value and justify it before using counts for science. Do not use 0.05 as the improvement/degradation tolerance.
+
+1. **Accounting first:** incomplete execution, runtime errors, invalid/nonfinite measurements, or missing matched references are **pending**, **error**, or **unavailable**, not scientific categories. A missing or ambiguous pipeline decision must not be invented as a refusal.
+2. **Degraded:** `change < -epsilon`. This takes precedence even if the result remains inside the acceptable boundary.
+3. **Correctly preserved:** `before <= boundary` and `abs(change) <= epsilon`. The case was already acceptable and did not meaningfully change. This applies whether the pipeline did nothing or applied a correction with negligible effect, and whether the case is a control, pure noise, or a gain-corrupted case already within tolerance. Do not require `evaluation_reused=True`. A known empty-model stop can still preserve an already-acceptable case, but Description must expose that reason rather than claim the pipeline recognized that no correction was needed.
+4. **Solved:** amplitude/phase corruption is present, `before > boundary`, `after <= boundary`, `change > epsilon`, and a correction was actually applied. This is a demonstrated transition from unacceptable to acceptable remaining gain damage. A case already inside the boundary is **never solved**, even if calibration ran. A tiny crossing of the boundary with `abs(change) <= epsilon` is not evidence of a solution.
+5. **Improved:** `change > epsilon` and the solved condition is not met. This includes measurable improvement to an already-acceptable case. For noise-only cases, describe this as improved image error, not removal of thermal noise. A measured improvement from flagging alone may be improved, but must not be described as successful gain correction.
+6. **Refused:** `before > boundary`, no meaningful improvement or degradation, and the pipeline explicitly skipped/rejected correction without applying one. Description distinguishes insufficient S/N, empty model, and rejected trials. An already-acceptable case left unchanged is correctly preserved, not refused.
+7. **Unchanged:** `before > boundary`, correction was applied, and `abs(change) <= epsilon`. Processing ran but did not meaningfully improve the case. This category is now confirmed, not proposed. No-effect processing of an already-acceptable control or pure-noise case belongs to correctly preserved instead.
+
+For a remaining case with an unknown action and no measurable change, show unavailable with “cannot distinguish refused from unchanged”, not a guessed category. The above scientific categories describe the metric outcome. Pipeline action and Description separately state whether correction ran, was rejected, or could not start.
+
+Examples (all values illustrative, `reference = 0.10`, hence `boundary = 0.15`, and provisional `epsilon = 0.005`):
+
+| Before → after | Pipeline action | My Criteria | Why |
+| :-- | :-- | :-- | :-- |
+| 0.12 → 0.121 | Applied or left unchanged | correctly preserved | Already acceptable, negligible change |
+| 0.12 → 0.10 | Applied | improved | Already acceptable, but measurably better |
+| 0.20 → 0.14 | Applied | solved | Crossed into acceptable range with meaningful improvement |
+| 0.20 → 0.17 | Applied | improved | Better, but still outside the boundary |
+| 0.12 → 0.14 | Applied | degraded | Meaningfully worse despite remaining acceptable |
+| 0.20 → 0.20 | Explicitly skipped/rejected | refused | Needed improvement, no correction applied |
+| 0.20 → 0.201 | Applied | unchanged | Needed improvement, processing had negligible benefit |
+| 0.151 → 0.149 | Applied | unchanged | Crossing was smaller than epsilon |
+
+“Correctly preserved” means the already-acceptable metric was preserved within epsilon, not that every visibility, flag, or weight is identical. Describe actual input preservation only when application/flags/weights evidence supports it. Cases with no usable final data remain unavailable. Keep data loss visible even when scalar criteria pass. Known source truth is used only for evaluation, never to select the tested recipe's next action.
+
+**Required correction to code and reports:** remove the rule that any applied gain correction with `after <= reference + 0.05` is solved. Replace the no-gain/reused-only preservation check with the already-acceptable/no-meaningful-change rule above. Update category tests, report help text, counts, and criteria version together. Remove “unchanged (proposed)” from badges and legends. Recompute historical labels from existing measurements without rerunning calibration. Calibration application by itself earns no scientific success label.
+
+### One compact aggregate table, followed by the case table
+
+[USER] The combined report starts with **one table with one row per run configuration and flagging mode**. Example configuration label: `B | 512 px | center | flags off`. Include A, both flagging variants, and all requested B configurations. Do not pool flags off/on or omit configurations with no finished results.
+
+Suggested columns:
+
+| Configuration | Coverage | My Criteria | Runtime |
+| :-- | :-- | :-- | :-- |
+| B · 512 · center · flags off | 8/8 finished, 8 classified | compact category count chart | median recipe minutes, range, summed recipe hours |
+
+The **My Criteria cell contains a small categorical bar chart**, with categories in the same fixed order, direct counts, and a shared count scale across rows. This is a bar chart of category counts, not a continuous histogram. Do not create a separate table column for every category. Show one shared legend and accessible text/tooltips with full names and counts. Zero categories remain represented. Use the same colors in every chart, badge, filter, and detailed row:
+
+- correctly preserved: teal `#009E73`
+- solved: blue `#0072B2`
+- improved: light blue `#56B4E9`
+- degraded: vermilion `#D55E00`
+- refused: purple `#CC79A7`
+- unchanged: gray `#777777`
+
+Always include text as well as color. Coverage reports pending/error/unavailable counts separately in one compact cell so categories plus accounting states reconcile with the planned case count. Partial configurations are visibly marked partial. Counts from unequal case subsets must not be presented as a completed comparison. Offer a common-case view when useful, without concealing missing cases.
+
+Runtime means measured wall time: show median and range per recipe and cumulative recipe-process hours. Do not label summed worker time as elapsed run duration. Show actual elapsed run time separately when timestamps support it. Record concurrency and available resource metadata. Whole-case time includes regeneration, both flagging recipes and evaluation, so do not duplicate it as the cost of each flagging variant.
+
+Below the aggregate table, show the **full per-case table** with configuration, source/case, corruption, Pipeline action, **My Criteria**, eC before/after, matched reference, gain-damage reduction/remaining excess, runtime, and **Description**. Group numeric diagnostics or make them expandable if needed to keep the table readable. Description links to the retained evidence. Include all attempted/planned cases, not only successful measurements. Configuration/category filters should connect the aggregate counts to their exact case rows.
+
+### Implementation and backfill boundaries
+
+This section requests recording/reporting changes, not changes to calibration heuristics or new expensive checks. Extract existing in-memory pipeline decisions and write compact evidence before cleanup. Do not add visibility scans, re-imaging, or regeneration audits simply to populate descriptions. Existing CHPC reports are read-only mirrors. Rebuild at the run source and sync normally. For old runs, recover structured decisions from retained JSON/context or logs where possible. When cleanup removed the evidence, label the reason unknown. Do not rerun science experiments just to fabricate a complete-looking history. The new damage criterion requires the matched case metadata/metrics at the report source, which the HTML-only mirror need not contain.

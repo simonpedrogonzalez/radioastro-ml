@@ -155,7 +155,8 @@ def variant_label(options):
 
 
 def plan(output, source_run, experiment, recipes, cases, reproduce, model, model_names, verify_regeneration=False,
-         native_diagnostics=False, selfcal_imsize=None, selfcal_masking="auto", calonly_model_fix=True, keep_work=False):
+         native_diagnostics=False, selfcal_imsize=None, selfcal_masking="auto", calonly_model_fix=True, keep_work=False,
+         pipeline_weblog=False):
     output, source_run = output.resolve(), source_run.resolve()
     sp = json.loads((source_run / "plan.json").read_text())
     committed = {p.parent.name for p in (source_run / "cases").glob("*/case.seal.json")}
@@ -164,11 +165,13 @@ def plan(output, source_run, experiment, recipes, cases, reproduce, model, model
     if any(parse(r)[0] != experiment for r in recipes):
         raise ValueError("All recipes must belong to the chosen experiment")
     repro = set(select_cases(sp, committed, reproduce)) & set(selected) if reproduce != "none" else set()
-    if experiment == "A" and (native_diagnostics or selfcal_imsize or selfcal_masking != "auto" or not calonly_model_fix):
-        raise ValueError("--native-diagnostics, --selfcal-imsize, --selfcal-masking and --no-calonly-model-fix "
-                         "apply to experiment B only")
+    if experiment == "A" and (native_diagnostics or selfcal_imsize or selfcal_masking != "auto" or not calonly_model_fix
+                              or pipeline_weblog):
+        raise ValueError("--native-diagnostics, --selfcal-imsize, --selfcal-masking, --no-calonly-model-fix and "
+                         "--pipeline-weblog apply to experiment B only")
     options = dict(native_diagnostics=bool(native_diagnostics), selfcal_imsize=check_imsize(selfcal_imsize),
-                   selfcal_masking=selfcal_masking, calonly_model_fix=bool(calonly_model_fix)) if experiment == "B" else {}
+                   selfcal_masking=selfcal_masking, calonly_model_fix=bool(calonly_model_fix),
+                   pipeline_weblog=bool(pipeline_weblog)) if experiment == "B" else {}
     options["keep_work"] = bool(keep_work)
     payload = dict(schema=2, design="docs/vla_pipeline_qa_experiment_draft.md", experiment=experiment,
                    verify_regeneration=bool(verify_regeneration), reproduce=reproduce, options=options,
@@ -191,6 +194,29 @@ def runtime_command(runtime, *args):
     return [str(ROOT / "bin/run"), runtime, "scripts/vla_pipeline_qa.py", *map(str, args)]
 
 
+THREAD_VARS = ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS",
+               "VECLIB_MAXIMUM_THREADS")
+
+
+def cap_threads(parallel):
+    """Give each concurrent case CPUs // parallel threads (CASA uncapped sizes its pools to the whole node: on CHPC
+    8 cases then ran ~1400 threads on 32 CPUs). Values set by the user are kept; bin/run's job-wide defaults
+    (marked RADIOASTRO_THREADS_DEFAULTED) are replaced by the per-case share."""
+    slurm = int(os.environ.get("SLURM_CPUS_PER_TASK") or 0)
+    try:
+        cpus = len(os.sched_getaffinity(0))          # Linux: CPUs of the Slurm cpuset
+    except AttributeError:
+        cpus = os.cpu_count() or 1
+    if slurm and cpus > 2 * slurm:                    # cpuset not restricted: use the request
+        cpus = slurm
+    n = max(1, cpus // parallel)
+    default = os.environ.pop("RADIOASTRO_THREADS_DEFAULTED", None)    # the value bin/run filled in, if any
+    for v in THREAD_VARS:
+        if not os.environ.get(v) or os.environ[v] == default:
+            os.environ[v] = str(n)
+    return {v: os.environ[v] for v in THREAD_VARS}
+
+
 def execute(output, parallel):
     from scripts.create_dataset_v2_matched import ml_python, run_pool
     output = output.resolve()
@@ -198,8 +224,16 @@ def execute(output, parallel):
     pending = [u["case"] for u in p["units"] if not (output / "units" / f"{u['case']}.json").exists()]
     jobs = [(c, [*ml_python(), "-m", "scripts.vla_pipeline_qa", "--output", str(output), "--unit", c],
              output / "logs" / f"unit_{c}.log") for c in pending]
-    print(f"EXECUTE {len(p['units'])} cases, {len(pending)} pending, parallel {parallel}", flush=True)
+    threads = cap_threads(parallel)                   # inherited by every case and its CASA subprocesses
+    print(f"EXECUTE {len(p['units'])} cases, {len(pending)} pending, parallel {parallel}, "
+          f"OMP_NUM_THREADS {threads['OMP_NUM_THREADS']}", flush=True)
+    log = output / "execute.json"            # concurrency and elapsed time of each --execute call (report runtime)
+    calls = json.loads(log.read_text()) if log.exists() else []
+    calls.append(dict(parallel=parallel, cpu_count=os.cpu_count(), slurm_cpus=os.environ.get("SLURM_CPUS_PER_TASK"),
+                      host=os.uname().nodename, pending=len(pending), threads=threads, started=time.time()))
     failed = [n for n, code in run_pool(jobs, parallel, "case") if code]
+    calls[-1].update(finished=time.time(), failed=len(failed))
+    write_json(log, calls)
     if failed:
         raise RuntimeError(f"{len(failed)} cases failed: {failed[:10]}; see {output / 'logs'}")
 
@@ -289,7 +323,7 @@ NOTE_PATTERNS = ("Estimated SNR per solint", r"^\s*(inf_EB|inf|int|[0-9.]+s): [0
                  "[Ss]top", "[Pp]assed", "[Ff]ailed")
 
 
-def pipeline_notes(log, limit=40):
+def pipeline_notes(log, limit=400):
     """Self-calibration decision lines from the pipeline log (the stated reason for a skip or rejection)."""
     import re
     if not log.exists():
@@ -930,6 +964,7 @@ def recipe_b(work, regen, gain, flagging, recipe, options, case_id, output):
     if settings["apply_cal_mode_default"]:
         kwargs["apply_cal_mode_default"] = settings["apply_cal_mode_default"]
     size, masking = options.get("selfcal_imsize"), options.get("selfcal_masking", "auto")
+    weblog = bool(options.get("pipeline_weblog", False))
     modification = ["no regcal hif_makeimages"] + (["calonly + no hifv_flagtargetsdata"] if not flagging else [])
     if size:
         kwargs["hm_imsize"] = [int(size), int(size)]
@@ -952,11 +987,15 @@ def recipe_b(work, regen, gain, flagging, recipe, options, case_id, output):
     if options.get("native_diagnostics"):
         log_gaincal_models(solve_log)
     record = dict(pipeline=pipeline.revision, field=field, spws=spws, selfcal_arguments=dict(kwargs, apply=True),
+                  pipeline_weblog=weblog,
                   calonly_model_fix=calonly_fix,
                   flagtargetsdata=settings["flagtargetsdata"], selfcal_imsize=size, selfcal_masking=masking,
                   center_mask=mask_info, modified_recipe=True, modification=", ".join(modification))
     stages = []
-    context = task("h_init")()
+    # The HTML weblog is rendered after every pipeline task and is not used by this experiment (results come from
+    # the task return values and logs). Off unless --pipeline-weblog; old plans without the option also run without it.
+    # h_init(weblog=...) sets pipeline.infrastructure.basetask.DISABLE_WEBLOG, which every task checks.
+    context = task("h_init")(weblog=weblog)
     context.set_state("ProjectSummary", "observatory", "Karl G. Jansky Very Large Array")
     context.set_state("ProjectSummary", "telescope", "EVLA")
     applications, problems = [], []
@@ -1152,16 +1191,34 @@ def automask_log(limit=200, pattern=None):
         return dict(error=f"{type(exc).__name__}: {exc}")
 
 
+def jsonable(x, depth=8):
+    """Nested JSON-safe copy (dicts, lists, scalars, numpy scalars); anything else becomes its short repr."""
+    if isinstance(x, (str, bool, type(None))):
+        return x
+    if isinstance(x, (int, float, np.integer, np.floating)):
+        x = x.item() if hasattr(x, "item") else x
+        return x if not isinstance(x, float) or np.isfinite(x) else str(x)
+    if depth <= 0:
+        return repr(x)[:200]
+    if isinstance(x, dict):
+        return {str(k): jsonable(v, depth - 1) for k, v in x.items()}
+    if isinstance(x, (list, tuple, set)):
+        return [jsonable(v, depth - 1) for v in x]
+    if isinstance(x, np.ndarray) and x.size <= 100:
+        return jsonable(x.tolist(), depth - 1)
+    return repr(x)[:200]
+
+
 def summarize_selfcal(result):
-    """JSON-safe scalars from the hif_selfcal result (acceptance flags, final solints, reasons)."""
+    """JSON-safe hif_selfcal targets, including the nested sc_lib decisions (Stop_Reason, SC_success,
+    final_solint, per-MS/per-interval Pass and Fail_Reason, S/N, RMS, beam), kept before work cleanup."""
     out = dict(type=type(result).__name__)
     items = result if isinstance(result, (list, tuple)) else getattr(result, "results", None) or [result]
     targets = []
     for r in items:
         for t in (getattr(r, "targets", None) or []):
             if isinstance(t, dict):
-                targets.append({k: v for k, v in t.items() if isinstance(v, (str, int, float, bool, type(None))) or
-                                (isinstance(v, (list, tuple)) and all(isinstance(x, (str, int, float)) for x in v))})
+                targets.append(jsonable(t))
     out["targets"] = targets
     out["repr"] = repr(result)[:2000]
     return out
@@ -1226,131 +1283,166 @@ def casa_image(output, case_id, label, ms, dirty_reference="auto"):
 
 # ---------------------------------------------------------------- report (ML)
 
-ACCEPT = 0.05          # [USER] 2026-11-10: acceptable reconstruction is final eC < 0.05. eD is diagnostic only.
-OUTCOMES = ("fixed", "already_ok", "still_bad", "degraded")
+CRITERIA_VERSION = "my-criteria-v2 (2026-11-11, corrected precedence)"   # [USER] supersedes v1 and the eC < 0.05 outcome
+TOLERANCE = 0.05   # [USER] acceptable remaining gain damage: boundary = matched reference eC + 0.05 (absolute eC)
+EPSILON = 0.005    # PROVISIONAL meaningful-change tolerance (not user-approved). Justify before scientific counts
+CATEGORIES = ("correctly_preserved", "solved", "improved", "degraded", "refused", "unchanged")
+ACCOUNTING = ("pending", "error", "unavailable")
+EMPTY_MODEL = ("No regions found by aut", "is empty", "Empty model", "empty model")
+LOW_SNR = ("SNR_too_low_for_solint inf_EB", "S/N too low")
 
 
-def outcome(evaluation):
-    before, after = evaluation["before"]["eC"] < ACCEPT, evaluation["after"]["eC"] < ACCEPT
-    return {(False, True): "fixed", (True, True): "already_ok", (False, False): "still_bad", (True, False): "degraded"}[(before, after)]
+def gain_mask(case):
+    """Injected corruptions as the matched-v2 mask: 1 amplitude, 2 phase, 4 noise."""
+    return (case["A"] != 1) + 2 * (case["phi_deg"] != 0) + 4 * (case["a"] != 1)
+
+
+def _finite(x):
+    return isinstance(x, (int, float)) and bool(np.isfinite(x))
+
+
+def _evidence(rec):
+    return "\n".join(rec.get("pipeline_notes", [])) + json.dumps(rec.get("selfcal_result", {}), default=str)
+
+
+def pipeline_action(rec):
+    """Short label of what the tested recipe did (no use of the injected truth)."""
+    d = rec.get("disposition")
+    if d == "applied" or (d == "no_usable_output" and (rec.get("correction_applied") or {}).get("any")):
+        return "Applied"
+    if d == "no_valid_solutions":
+        return "Could not start"
+    if d == "not_applied":
+        started = any(n.startswith("Starting with solint") for n in rec.get("pipeline_notes", []))
+        text = _evidence(rec)
+        return "Could not start" if not started and any(s in text for s in EMPTY_MODEL + LOW_SNR) else "Left unchanged"
+    if d in ("runtime_failure", "unsupported"):
+        return "Error"
+    return "Unknown"
+
+
+def matched_reference(source_plan, case_id, eC_of):
+    """Archived eC of the same source case with amplitude and phase injections removed (same slot, noise seed and
+    noise multiplier): the nominal-noise control for gain-only cases, the matched noise-only case otherwise."""
+    rows = {r["case"]: r for r in source_plan["rows"]}
+    params = {c["id"]: c for c in source_plan["cases"]}
+    row = rows[case_id]
+    want = row["mask"] & 4
+    if want == row["mask"]:
+        ref = row
+    else:
+        ref = next((r for r in source_plan["rows"] if r["slot"] == row["slot"] and r["mask"] == want and
+                    r["recipe"] == (row["recipe"] if want else None)), None)
+    if ref is None:
+        return dict(status="unavailable", reason="no matched counterpart without gain injections in the source plan")
+    a, b = params[case_id], params[ref["case"]]
+    bad = [k for k in ("source", "slot", "noise_seed", "a") if a.get(k) != b.get(k)]
+    if b["A"] != 1 or b["phi_deg"] != 0:
+        bad.append("counterpart has gain injections")
+    if bad:
+        return dict(status="unavailable", reason=f"matched counterpart {ref['id']} differs: {', '.join(bad)}")
+    eC = eC_of(ref["case"])
+    if not _finite(eC):
+        return dict(status="unavailable", reason=f"no archived eC for counterpart {ref['id']}")
+    return dict(case=ref["case"], id=ref["id"], eC=float(eC))
+
+
+def my_criteria(result, gain, reference):
+    """[USER] 2026-11-11 My Criteria, applied in the design doc's precedence order. gain: amplitude or phase injected.
+    Accounting states (error, unavailable) are not scientific categories; pending is assigned by the report."""
+    rec, ev = result.get("recipe_record", {}), result.get("evaluation", {})
+    action = pipeline_action(rec)
+    out = dict(action=action, gain=bool(gain))
+    if ev.get("status") != "measured":
+        return dict(out, category="error" if action == "Error" else "unavailable",
+                    reason=str(ev.get("reason") or rec.get("reason") or ev.get("status"))[-300:])
+    before, after = ev.get("before", {}).get("eC"), ev.get("after", {}).get("eC")
+    if not (_finite(before) and _finite(after)):
+        return dict(out, category="unavailable", reason="missing or nonfinite eC")
+    if not _finite(reference.get("eC")):
+        return dict(out, category="unavailable", reason=reference.get("reason", "no matched reference"))
+    ref = reference["eC"]
+    boundary, change = ref + TOLERANCE, before - after
+    out.update(before=before, after=after, reference=ref, boundary=boundary, damage=before - ref,
+               remaining=after - ref, reduction=change, nonpositive_damage=bool(gain and before - ref <= 0))
+    if change < -EPSILON:
+        category = "degraded"
+    elif before <= boundary and abs(change) <= EPSILON:
+        category = "correctly_preserved"
+    elif gain and before > boundary and after <= boundary and change > EPSILON and action == "Applied":
+        category = "solved"
+    elif change > EPSILON:
+        category = "improved"
+    elif action in ("Left unchanged", "Could not start"):    # before > boundary, no meaningful change
+        category = "refused"
+    elif action == "Applied":
+        category = "unchanged"
+    else:
+        return dict(out, category="unavailable", reason="cannot distinguish refused from unchanged")
+    return dict(out, category=category)
+
+
+def describe(result, crit):
+    """Plain-language Description: what was tried, skipped and why. Log-derived statements say so."""
+    rec = result.get("recipe_record", {})
+    notes = rec.get("pipeline_notes", [])
+    action, text = crit["action"], _evidence(rec)
+    reason = str(rec.get("reason") or "")
+    parts = []
+    if action == "Applied":
+        final = [n.split(":", 1)[1].strip() for n in notes if n.startswith("Final solint")]
+        parts.append("Applied gain correction" + (f", final solint {final[-1]} (log)." if final else "."))
+    elif action == "Left unchanged":
+        parts.append("Tried self-calibration, no correction retained." if result.get("experiment") == "B"
+                     else "No correction applied.")
+    elif action == "Could not start":
+        why = ("the model was empty (log)" if any(s in text for s in EMPTY_MODEL) else
+               "estimated S/N too low for the first interval (log)" if any(s in text for s in LOW_SNR) else
+               reason or "a prerequisite failed")
+        parts.append(f"Could not start: {why}.")
+    elif action == "Error":
+        parts.append("Error: " + (reason.strip().splitlines() or ["unknown"])[-1][:200])
+    else:
+        parts.append(f"Outcome unknown ({rec.get('disposition')}). {reason[:200]}".strip())
+    tried = [n.split(":", 1)[1].strip() for n in notes if n.startswith("Starting with solint")]
+    if tried:
+        passed = sum("Selfcal passed" in n for n in notes)
+        parts.append(f"Started at solint {tried[0]}; {passed} interval(s) passed (log).")
+    rejected = list(dict.fromkeys(n.split("REASON:", 1)[1].strip() for n in notes if "REASON:" in n))
+    if rejected:
+        parts.append("Rejected trial: " + "; ".join(rejected) + " (log).")
+    for st in rec.get("flag_stages", []):
+        if st.get("status") == "added":
+            parts.append(f"{st['stage']} added flags ({100 * st['added'] / st['after']['total']:.2f}% of data).")
+        elif st.get("status") == "unknown":
+            parts.append(f"{st['stage']}: flag changes unknown ({st.get('reason')}).")
+    if rec.get("flagging_off_violated"):
+        parts.append("Flags were added although flagging was off.")
+    if rec.get("center_mask_fallback"):
+        parts.append("The requested central mask did not (only) reach tclean.")
+    cat = crit.get("category")
+    within = crit.get("boundary") is not None and crit["before"] <= crit["boundary"]
+    if cat == "correctly_preserved":
+        parts.append("Input left unchanged; archived metrics reused." if
+                     result.get("evaluation", {}).get("evaluation_reused") else
+                     "Already within tolerance; eC changed by less than epsilon.")
+    if cat == "improved" and within:
+        parts.append("Already within tolerance before processing, measurably better after.")
+    if cat == "improved" and not crit["gain"]:
+        parts.append("Improved image error (thermal noise is not removed).")
+    if cat == "improved" and action != "Applied":
+        parts.append("Improvement without an applied gain correction (e.g. flagging), not a gain solution.")
+    if crit.get("nonpositive_damage"):
+        parts.append("Matched reference eC is not below eC before (zero/negative joint damage).")
+    if crit.get("reason"):
+        parts.append(f"Not classified: {crit['reason']}")
+    return " ".join(parts)
 
 
 def report(output):
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    output = output.resolve()
-    p = json.loads((output / "plan.json").read_text())
-    results = [json.loads(x.read_text()) for x in sorted((output / "results").glob("*.json"))]
-    units = {u["case"]: json.loads((output / "units" / f"{u['case']}.json").read_text())
-             for u in p["units"] if (output / "units" / f"{u['case']}.json").exists()}
-    source_run = Path(p["source_run"])
-    case = {r["case"]: json.loads((source_run / "cases" / r["case"] / "case.json").read_text())["case"] for r in results}
-
-    def mask(c):
-        return (c["A"] != 1) + 2 * (c["phi_deg"] != 0) + 4 * (c["a"] != 1)
-    names = {0: "control", 1: "amp", 2: "phase", 4: "noise", 3: "amp+phase", 5: "amp+noise", 6: "phase+noise", 7: "amp+phase+noise"}
-    by_recipe = {r: [x for x in results if x["recipe"] == r] for r in p["recipes"]}
-    html = ["<!doctype html><meta charset=utf-8><title>VLA pipeline QA</title><style>body{font-family:sans-serif;"
-            "max-width:1300px;margin:2em auto;padding:0 1em}table{border-collapse:collapse;margin:.6em 0}td,th{border:1px "
-            "solid #ccc;padding:3px 7px;text-align:right}th{background:#f3f3f3}td:first-child{text-align:left}"
-            "img{max-width:100%}</style>",
-            f"<h1>VLA pipeline QA, experiment {p['experiment']}</h1><p>{len(units)}/{len(p['units'])} cases from "
-            f"{source_run.name}. eC: CLEAN recovery error (0 = perfect). eD: dirty error vs I_r(V0). "
-            "Medians over measured cases. Same evaluation imaging for every recipe.</p>"]
-    repro = [u["reproduction"] for u in units.values() if u.get("reproduction", {}).get("status") not in (None, "not performed")]
-    if repro:
-        html.append(f"<p>Reproduction of committed before results: {sum(r['status'] == 'agree' for r in repro)}/{len(repro)} agree.</p>")
-    audit = ("not recorded (older plan, audit was mandatory)" if "verify_regeneration" not in p else "on"
-             if p["verify_regeneration"] else "disabled (archived baseline used under the reproducibility assumption)")
-    html.append(f"<p>Regeneration audit: {audit}. "
-                f"{('Variant: ' + p['variant'] + '. ') if p.get('variant') else ''}Acceptable reconstruction: eC &lt; {ACCEPT}. "
-                "Fixed: before ≥ threshold, after &lt; threshold. Degraded: the reverse.</p>")
-    html.append("<h2>Outcomes per recipe</h2><table><tr><th>recipe</th><th>attempted</th><th>valid</th><th>reused</th>"
-                "<th>applied</th><th>not applied</th><th>no valid sol.</th><th>no usable output</th><th>unsupported</th>"
-                "<th>failure</th><th>fixed</th><th>already ok</th><th>still bad</th><th>degraded</th>"
-                "<th>median eC before</th><th>median eC after</th><th>flag-off violated</th></tr>")
-    med = lambda xs: "–" if not xs else f"{np.median(xs):.3f}"
-    for r, xs in by_recipe.items():
-        ev = [x["evaluation"] for x in xs if x["evaluation"].get("status") == "measured"]
-        disp = [x["recipe_record"].get("disposition") for x in xs]
-        outs = [outcome(e) for e in ev]
-        html.append(f"<tr><td>{r}</td><td>{len(xs)}</td><td>{len(ev)}</td>"
-                    f"<td>{sum(bool(e.get('evaluation_reused')) for e in ev)}</td>" +
-                    "".join(f"<td>{disp.count(k)}</td>" for k in ("applied", "not_applied", "no_valid_solutions",
-                                                                  "no_usable_output", "unsupported", "runtime_failure")) +
-                    "".join(f"<td>{outs.count(k)}</td>" for k in OUTCOMES) +
-                    f"<td>{med([e['before']['eC'] for e in ev])}</td><td>{med([e['after']['eC'] for e in ev])}</td>"
-                    f"<td>{sum(bool(x['recipe_record'].get('flagging_off_violated')) for x in xs)}</td></tr>")
-    secs = lambda xs: (f"{np.median(xs) / 60:.1f}</td><td>{min(xs) / 60:.1f}–{max(xs) / 60:.1f}"
-                                          f"</td><td>{sum(xs) / 3600:.2f}")
-    html.append("</table><h2>Runtime</h2><p>Wall-clock minutes. Recipe: the recipe's own CASA process (gaincal for A, "
-                "hif_selfcal pipeline for B), excluding evaluation imaging. Case: regeneration, all recipes and evaluation "
-                "imaging. Cases run concurrently under <code>--parallel</code> share the CPU.</p><table><tr><th></th>"
-                "<th>timed</th><th>median</th><th>range</th><th>total (h)</th></tr>")
-    for r, xs in by_recipe.items():
-        t = [x["recipe_record"]["seconds"] for x in xs if x["recipe_record"].get("seconds") is not None]
-        html.append(f"<tr><td>recipe {r}</td><td>{len(t)}/{len(xs)}</td><td>{secs(t) if t else '–</td><td>–</td><td>–'}</td></tr>")
-    t = [u["seconds"] for u in units.values() if u.get("seconds") is not None]
-    html.append(f"<tr><td>case (all recipes)</td><td>{len(t)}/{len(units)}</td><td>{secs(t) if t else '–</td><td>–</td><td>–'}</td></tr>")
-    html.append("</table><h2>By injected corruption</h2><p>fixed / initially unacceptable valid cases, and median eC "
-                "before → after on the same valid cases. Controls (no corruption) are listed separately.</p>"
-                "<table><tr><th>corruption</th>" + "".join(f"<th>{r}</th>" for r in p["recipes"]) + "</tr>")
-    for m in (1, 2, 4, 3, 5, 6, 7, 0):
-        row = []
-        for r in p["recipes"]:
-            ev = [x["evaluation"] for x in by_recipe[r] if mask(case[x["case"]]) == m and x["evaluation"].get("status") == "measured"]
-            if not ev:
-                row.append("–")
-                continue
-            bad = [e for e in ev if e["before"]["eC"] >= ACCEPT]
-            fixed = sum(outcome(e) == "fixed" for e in bad)
-            frac = f"{fixed}/{len(bad)} ({100 * fixed / len(bad):.0f}%)" if bad else f"0/0 (n/a)"
-            row.append(f"{frac}<br>{np.median([e['before']['eC'] for e in ev]):.3f} → "
-                       f"{np.median([e['after']['eC'] for e in ev]):.3f} (n={len(ev)})")
-        if m == 0:
-            html.append("<tr><th colspan=99 style=text-align:left>controls</th></tr>")
-        html.append(f"<tr><td>{names[m]}</td>" + "".join(f"<td>{v}</td>" for v in row) + "</tr>")
-    html.append("</table>")
-    fig, axes = plt.subplots(1, len(p["recipes"]), figsize=(3.3 * len(p["recipes"]), 3.4), squeeze=False, layout="constrained")
-    colors = {0: "#000", 1: "#d62728", 2: "#1f77b4", 4: "#2ca02c"}
-    for ax, r in zip(axes[0], p["recipes"]):
-        for x in by_recipe[r]:
-            e = x["evaluation"]
-            if e.get("status") != "measured":
-                continue
-            m = mask(case[x["case"]])
-            ax.scatter(e["before"]["eC"], e["after"]["eC"], s=14, color=colors.get(m, "#9467bd"), alpha=.8)
-        ax.plot([0, 1.2], [0, 1.2], color="#888", lw=.8); ax.set_xlim(0, 1.2); ax.set_ylim(0, 1.2)
-        ax.set_title(r, fontsize=8); ax.set_xlabel("eC before"); ax.set_ylabel("eC after")
-    fig.suptitle("eC before vs after (red amp, blue phase, green noise, purple mixtures, black control)", fontsize=9)
-    fig.savefig(output / "eC_before_after.png", dpi=130); plt.close(fig)
-    html.append("<img src='eC_before_after.png'><h2>Invalid or unavailable comparisons</h2><p>Excluded from every "
-                "count and median above.</p><table><tr><th>case</th><th>recipe</th><th>status</th>"
-                "<th>disposition</th><th>reason</th></tr>")
-    for x in results:
-        if x["evaluation"].get("status") != "measured":
-            reason = str(x["recipe_record"].get("reason") or x["evaluation"].get("reason"))[-300:]
-            html.append(f"<tr><td>{x['case']}</td><td>{x['recipe']}</td><td>{x['evaluation'].get('status')}</td>"
-                        f"<td>{x['recipe_record'].get('disposition')}</td><td style=text-align:left>{reason}</td></tr>")
-    html.append("</table>")
-    skipped = [x for x in results if x["recipe_record"].get("disposition") == "not_applied"]
-    if skipped:
-        html.append("<h2>Corrections not applied: pipeline's stated reason</h2><table><tr><th>case</th><th>recipe</th>"
-                    "<th>pipeline log</th></tr>")
-        for x in skipped:
-            notes = "<br>".join(x["recipe_record"].get("pipeline_notes", [])[:12]) or "–"
-            html.append(f"<tr><td>{x['case']}</td><td>{x['recipe']}</td><td style=text-align:left>{notes}</td></tr>")
-        html.append("</table>")
-    (output / "report.html").write_text("\n".join(html))
-    write_json(output / "summary.json", dict(threshold=ACCEPT, variant=p.get("variant"), recipes={r: [dict(
-        case=x["case"], disposition=x["recipe_record"].get("disposition"), status=x["evaluation"].get("status"),
-        evaluation_reused=x["evaluation"].get("evaluation_reused"), seconds=x["recipe_record"].get("seconds"),
-        outcome=outcome(x["evaluation"]) if x["evaluation"].get("status") == "measured" else None,
-        eC_before=x["evaluation"].get("before", {}).get("eC"), eC_after=x["evaluation"].get("after", {}).get("eC"))
-                                                           for x in xs] for r, xs in by_recipe.items()}))
-    print("REPORT", output / "report.html")
+    """Report of one run: the comparison report (aggregate row per flagging mode, then every case)."""
+    from scripts.vla_pipeline_qa_compare import build
+    build([output], output.resolve(), "report.html")
 
 
 def main():
@@ -1382,6 +1474,8 @@ def main():
     ap.add_argument("--no-calonly-model-fix", action="store_true",
                     help="B: run flagging_off with the unmodified pipeline (no CLEAN model before calonly solves)")
     ap.add_argument("--keep-work", action="store_true", help="Keep work MSs and calibration tables for inspection")
+    ap.add_argument("--pipeline-weblog", action="store_true",
+                    help="B: render the pipeline HTML weblog after each task (off by default: not used, costs runtime)")
     ap.add_argument("--model", type=Path, help="Frozen ml.multitask output folder for exploratory predictions")
     ap.add_argument("--model-names", nargs="*", default=None)
     ap.add_argument("--parallel", type=int, default=1)
@@ -1391,7 +1485,7 @@ def main():
             ap.error("--plan needs --source-run and --experiment")
         plan(a.output, a.source_run, a.experiment, a.recipes, a.cases, a.reproduce, a.model, a.model_names,
              a.verify_regeneration, a.native_diagnostics, a.selfcal_imsize, a.selfcal_masking,
-             not a.no_calonly_model_fix, a.keep_work)
+             not a.no_calonly_model_fix, a.keep_work, a.pipeline_weblog)
     elif a.execute:
         execute(a.output, a.parallel)
     elif a.report:

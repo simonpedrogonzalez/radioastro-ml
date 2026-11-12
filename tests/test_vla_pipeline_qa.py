@@ -111,10 +111,47 @@ class HelperTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 q.check_imsize(bad)
 
-    def test_outcome(self):
-        e = lambda b, a: dict(before=dict(eC=b), after=dict(eC=a))
-        self.assertEqual([q.outcome(e(*x)) for x in ((.1, .01), (.01, .02), (.2, .1), (.01, .2), (.05, .05))],
-                         ["fixed", "already_ok", "still_bad", "degraded", "still_bad"])
+    def test_my_criteria(self):
+        def res(before, after, disposition="applied", reused=False, status="measured"):
+            return dict(recipe_record=dict(disposition=disposition), evaluation=dict(
+                status=status, evaluation_reused=reused, before=dict(eC=before), after=dict(eC=after)))
+        cat = lambda r, gain, ref=.10: q.my_criteria(r, gain, dict(eC=ref))["category"]
+        # Design doc example table: reference 0.10, boundary 0.15, epsilon 0.005
+        for before, after, disposition, expected in (
+                (.12, .121, "applied", "correctly_preserved"), (.12, .121, "not_applied", "correctly_preserved"),
+                (.12, .10, "applied", "improved"), (.20, .14, "applied", "solved"), (.20, .17, "applied", "improved"),
+                (.12, .14, "applied", "degraded"), (.20, .20, "not_applied", "refused"),
+                (.20, .201, "applied", "unchanged"), (.151, .149, "applied", "unchanged")):
+            self.assertEqual(cat(res(before, after, disposition), True), expected, (before, after, disposition))
+        self.assertEqual(cat(res(.20, .14, "not_applied"), True), "improved")       # not solved without application
+        self.assertEqual(cat(res(.20, .14), False, .20), "improved")                # no gain injection: never solved
+        self.assertEqual(cat(res(.2, .2, "not_applied", True), False, .2), "correctly_preserved")  # noisy control
+        self.assertEqual(cat(res(.2, .2), False, .2), "correctly_preserved")        # applied, no effect, pure noise
+        self.assertEqual(cat(res(.2, .2, "not_run"), True), "unavailable")          # unknown action: no guess
+        self.assertEqual(cat(res(.3, .1, "runtime_failure", status="unavailable"), True), "error")
+        self.assertEqual(cat(res(.3, float("nan")), True), "unavailable")
+        self.assertEqual(q.my_criteria(res(.3, .1), True, dict(reason="x"))["category"], "unavailable")
+
+    def test_matched_reference(self):
+        case = lambda cid, A=1., phi=0., a=1.: dict(id=cid, A=A, phi_deg=phi, a=a, source="s", slot=0, noise_seed=7)
+        row = lambda cid, mask, recipe: dict(case=cid, id=cid, mask=mask, recipe=recipe, slot=0)
+        sp = dict(rows=[row("c", 0, None), row("g", 3, "r"), row("n", 4, "r"), row("gn", 7, "r")],
+                  cases=[case("c"), case("g", 2., 10.), case("n", a=5.), case("gn", 2., 10., 5.)])
+        eC = dict(c=.01, g=.5, n=.2, gn=.6).get
+        self.assertEqual(q.matched_reference(sp, "g", eC)["id"], "c")    # gain-only -> nominal-noise control
+        self.assertEqual(q.matched_reference(sp, "gn", eC)["id"], "n")   # gain+noise -> matched noise-only case
+        self.assertEqual(q.matched_reference(sp, "n", eC)["eC"], .2)     # no gain -> itself
+        sp["cases"][2]["noise_seed"] = 8
+        self.assertEqual(q.matched_reference(sp, "gn", eC)["status"], "unavailable")
+
+    def test_pipeline_action(self):
+        self.assertEqual(q.pipeline_action(dict(disposition="applied")), "Applied")
+        self.assertEqual(q.pipeline_action(dict(disposition="not_applied", pipeline_notes=["No regions found by automasking"])),
+                         "Could not start")
+        self.assertEqual(q.pipeline_action(dict(disposition="not_applied", pipeline_notes=[
+            "Starting with solint: inf_EB", "No regions found by automasking"])), "Left unchanged")
+        self.assertEqual(q.pipeline_action(dict(disposition="runtime_failure")), "Error")
+        self.assertEqual(q.pipeline_action(dict(disposition="not_run")), "Unknown")
 
     def test_mask_usage(self):
         self.assertEqual(q.mask_usage(["tclean( vis='a', usemask='user', mask='x.crtf')", 'usemask="auto-multithresh"',

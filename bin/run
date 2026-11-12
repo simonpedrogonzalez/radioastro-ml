@@ -158,8 +158,22 @@ case "$runtime" in
     *) usage ;;
 esac
 
+# Thread cap. Uncapped CASA/OpenMP/BLAS size their pools to every CPU of the node, not the job's share, and
+# parallel processes then oversubscribe the job badly (CHPC 2026-11-11). Inside Slurm, default each pool to the
+# job's CPUs; callers running several processes (vla_pipeline_qa --execute) set smaller values, which win.
+if [[ -n "${SLURM_JOB_ID:-}" ]]; then
+    job_threads=$(nproc 2>/dev/null || echo 1)          # CPUs this process may run on (Slurm cpuset)
+    if [[ -n "${SLURM_CPUS_PER_TASK:-}" ]] && (( job_threads > 2 * SLURM_CPUS_PER_TASK )); then
+        job_threads=$SLURM_CPUS_PER_TASK                 # cpuset not restricted: fall back to the request
+    fi
+    for v in OMP_NUM_THREADS OPENBLAS_NUM_THREADS MKL_NUM_THREADS NUMEXPR_NUM_THREADS; do
+        [[ -n "${!v:-}" ]] || { export "$v=$job_threads"; export RADIOASTRO_THREADS_DEFAULTED=$job_threads; }
+    done
+fi
+
 {
     echo "started_utc=$(date -u +%FT%TZ)"
+    echo "omp_num_threads=${OMP_NUM_THREADS:-unset}"
     echo "runtime=$runtime"
     echo "profile=${RADIOASTRO_PROFILE:-interactive}"
     echo "git_commit=$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || echo unavailable)"
