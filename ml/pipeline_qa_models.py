@@ -78,12 +78,16 @@ def collect(runs, cache, eps_rms, eps_snr):
                     ev = json.loads(path.read_text()).get("evaluation", {})
                     if ev.get("status") == "measured":
                         names = ev["feature_names"]
-                        if len(ev["after"]["X"]) != len(names):
-                            raise ValueError(f"{path}: {len(ev['after']['X'])} after features for {len(names)} names")
-                        # Before = the archived source case. Older QA results stored its 20 committed values
-                        # under all 22 names, so the full row is read from the source dataset instead.
-                        row.update(names=names, X_before=archived_features(sources[run], c["case"]),
-                                   X_after=ev["after"]["X"], reused=bool(ev.get("evaluation_reused")))
+                        reused = bool(ev.get("evaluation_reused"))
+                        # Before = the archived source case. QA results written before 2026-11-12 stored its 20
+                        # committed values under all 22 names, so the full row is read from the source dataset.
+                        before_x = archived_features(sources[run], c["case"])
+                        # A reused evaluation means the input was unchanged (nothing applied, no flags added): its
+                        # after features are the before features (the stored copy has the same 20-value problem).
+                        after_x = before_x if reused else ev["after"]["X"]
+                        if len(after_x) != len(names):
+                            raise ValueError(f"{path}: {len(after_x)} after features for {len(names)} names")
+                        row.update(names=names, X_before=before_x, X_after=after_x, reused=reused)
                 rows.append(row)
     return rows, TOLERANCE
 
