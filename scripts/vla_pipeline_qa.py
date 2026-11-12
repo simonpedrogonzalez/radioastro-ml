@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -231,6 +232,7 @@ def execute(output, parallel):
     calls = json.loads(log.read_text()) if log.exists() else []
     calls.append(dict(parallel=parallel, cpu_count=os.cpu_count(), slurm_cpus=os.environ.get("SLURM_CPUS_PER_TASK"),
                       host=os.uname().nodename, pending=len(pending), threads=threads, started=time.time()))
+    write_json(log, calls)                   # recorded at once: a killed/preempted call still counts (report)
     failed = [n for n, code in run_pool(jobs, parallel, "case") if code]
     calls[-1].update(finished=time.time(), failed=len(failed))
     write_json(log, calls)
@@ -367,13 +369,37 @@ def metric_summary(eC, eD, X, model_flux, iterations, flux):
                 clean_iterations=iterations.get("iterdone"), X=X)
 
 
+def archived_features(source_run, case_id):
+    """All FEATURES of a committed source case. Cases committed with the 20 BASE20 features get CLEAN2 from their
+    sealed sidecar (create_dataset_v2_matched --backfill-features) or, without one, computed in memory from the
+    retained model FITS and stored convergence (read-only)."""
+    from scripts.create_dataset_v2_matched import EXTRA, _sealed
+    from scripts.dataset_v2_matched_extract import BASE20, CLEAN2, FEATURES, clean2
+    path = Path(source_run) / "cases" / case_id / "case.json"
+    rec = json.loads(path.read_text())
+    if rec["feature_names"] == list(FEATURES):
+        return rec["X"]
+    if rec["feature_names"] != list(BASE20):
+        raise ValueError(f"Case has an unknown feature schema: {path}")
+    side = path.with_name(EXTRA)
+    if _sealed(side):
+        extra = json.loads(side.read_text())
+        if extra["feature_names"] != list(CLEAN2):
+            raise ValueError(f"CLEAN2 sidecar has an unknown schema: {side}")
+        return rec["X"] + extra["X"]
+    from astropy.io import fits
+    with fits.open(Path(source_run) / rec["products"]["model"], memmap=False) as hdul:
+        model = np.asarray(np.squeeze(hdul[0].data), np.float64)
+    return rec["X"] + clean2(model, rec["convergence"])
+
+
 def before_metrics(p, case_id):
-    """Archived before result of the committed case, and the known source flux."""
+    """Archived before result of the committed case (all FEATURES), and the known source flux."""
     source_run, _, _, prepared = source_paths(p, case_id)
     committed = json.loads((source_run / "cases" / case_id / "case.json").read_text())
     flux = json.loads((source_run / "sources" / prepared["id"] / "recovery" / "reference.json").read_text())["flux_jy"]
-    before = metric_summary(committed["eC"], committed["eD"], committed["X"], committed["model_flux"]["sum_all_pixels"],
-                            committed["convergence"], flux)
+    before = metric_summary(committed["eC"], committed["eD"], archived_features(source_run, case_id),
+                            committed["model_flux"]["sum_all_pixels"], committed["convergence"], flux)
     return before, flux
 
 
@@ -1426,6 +1452,138 @@ def my_criteria(result, gain, reference):
     return dict(out, category=category)
 
 
+# ---------------------------------------------------------------- v4 outcomes (report only)
+# [USER] 2026-11-12 design doc "Requested v4 update": expectation group fixed before processing, then three independent
+# outcomes. Legacy My Criteria (v3) stays alongside for continuity.
+
+V4_VERSION = "v4 (2026-11-12, expectation groups; independent Pipeline/Recovery/Image)"
+EPSILON_RMS = 0.01   # PROVISIONAL relative tolerance (display only, not a significance test)
+EPSILON_SNR = 0.01   # PROVISIONAL relative tolerance (display only, not a significance test)
+NEAR_ZERO_D = 5e-4   # |D| below this rounds to 0.000 in the report: flagged, sign kept
+EXPECTATIONS = ("no_improvement_expected", "improvement_expected", "expectation_unavailable")
+PIPELINE = ("applied", "blocked", "rejected", "error")
+RECOVERY = ("improved", "similar", "degraded")
+IMAGE = ("cleaner", "similar", "worse", "mixed")
+IMAGE_METRIC_VERSION = "restored-v1: annulus std/mean, peak in true-source ellipse (rho<=1), reference masks"
+
+
+def expectation(mask, before, reference):
+    """Expectation group from the original case and its matched reference only (never the recipe outcome).
+    mask: injected kinds (1 amp, 2 phase, 4 noise). D = eC_before - eC_reference (joint gain damage, signed)."""
+    if not (_finite(before) and _finite(reference)):
+        return dict(expectation="expectation_unavailable", expectation_reason="missing or nonfinite before/reference eC", D=None)
+    D = float(before - reference)
+    out = dict(D=D, near_zero=abs(D) < NEAR_ZERO_D)
+    if mask == 0:
+        return dict(out, expectation="no_improvement_expected", expectation_reason="control")
+    if mask & 3 == 0:
+        return dict(out, expectation="no_improvement_expected", expectation_reason="noise_only")
+    if D > 0:
+        return dict(out, expectation="improvement_expected", expectation_reason="positive_joint_gain_damage")
+    return dict(out, expectation="no_improvement_expected",
+                expectation_reason="negative_joint_gain_damage" if D < 0 else "zero_joint_gain_damage")
+
+
+def pipeline_outcome(action):
+    """v4 Pipeline from the decision evidence (pipeline_action); pending/unknown stay accounting states."""
+    return {"Applied": "applied", "Could not start": "blocked", "Left unchanged": "rejected",
+            "Error": "error"}.get(action, "unknown")
+
+
+def recovery_outcome(before, after, epsilon=EPSILON):
+    if not (_finite(before) and _finite(after)):
+        return "unavailable"
+    delta = before - after
+    return "improved" if delta > epsilon else "degraded" if delta < -epsilon else "similar"
+
+
+def measured_recovery(evaluation):
+    """Recovery from the measured evaluation eC alone (independent of the matched reference and legacy criteria)."""
+    if (evaluation or {}).get("status") != "measured":
+        return "unavailable"
+    return recovery_outcome((evaluation.get("before") or {}).get("eC"), (evaluation.get("after") or {}).get("eC"))
+
+
+def image_outcome(r_rms, r_snr, eps_rms=EPSILON_RMS, eps_snr=EPSILON_SNR):
+    """Cleaner/Similar/Worse/Mixed from benefit-oriented fractional changes (positive = better for both)."""
+    if not (_finite(r_rms) and _finite(r_snr)):
+        return "unavailable"
+    signs = [1 if r > e else -1 if r < -e else 0 for r, e in ((r_rms, eps_rms), (r_snr, eps_snr))]
+    better, worse = 1 in signs, -1 in signs
+    return "mixed" if better and worse else "cleaner" if better else "worse" if worse else "similar"
+
+
+COMPARABLE_KEYS = ("BUNIT", "NAXIS1", "NAXIS2", "BMAJ", "BMIN", "BPA", "CDELT1", "CDELT2", "CRVAL1", "CRVAL2",
+                   "CRPIX1", "CRPIX2")
+
+
+def restored_metrics(path, masks):
+    """Off-source RMS (population std over the fixed annulus), its mean, the peak in the true-source ellipse and
+    peak SNR = (peak - mean) / RMS, from one restored CLEAN FITS image."""
+    from astropy.io import fits
+    with fits.open(path, memmap=False) as hdul:
+        image = np.asarray(np.squeeze(hdul[0].data), np.float64)
+        header = {k: hdul[0].header.get(k) for k in COMPARABLE_KEYS}
+    annulus, source = masks["annulus"], masks["source"]
+    if image.shape != annulus.shape:
+        raise ValueError(f"image {image.shape} and reference masks {annulus.shape} differ")
+    off = image[annulus & np.isfinite(image)]
+    on = image[source & np.isfinite(image)]
+    if off.size < 2 or not on.size:
+        raise ValueError("no usable off-source or source pixels")
+    mean, rms = float(off.mean()), float(np.sqrt(np.mean((off - off.mean()) ** 2)))
+    if not (np.isfinite(rms) and rms > 0):
+        raise ValueError("nonpositive or nonfinite RMS")
+    peak = float(on.max())
+    beam_px = (math.pi * header["BMAJ"] * header["BMIN"] / (4 * math.log(2)) / abs(header["CDELT1"] * header["CDELT2"])
+               if all(_finite(header.get(k)) for k in ("BMAJ", "BMIN", "CDELT1", "CDELT2")) else None)
+    return dict(rms=rms, mean=mean, peak=peak, snr=(peak - mean) / rms, off_pixels=int(off.size),
+                source_pixels=int(on.size), off_beams=off.size / beam_px if beam_px else None, header=header)
+
+
+NUMERIC_KEYS = COMPARABLE_KEYS[1:]                       # all but BUNIT
+
+
+def comparability_problems(b, a):
+    """Reasons the two restored images cannot be compared: required metadata missing/invalid on either side
+    (missing on both is not a match), units not Jy/beam, or numeric metadata differing beyond rel 1e-6."""
+    problems = []
+    for name, h in (("before", b), ("after", a)):
+        if str(h.get("BUNIT") or "").strip().lower().replace(" ", "") != "jy/beam":
+            problems.append(f"{name} BUNIT {h.get('BUNIT')!r} is not Jy/beam")
+        bad = [k for k in NUMERIC_KEYS if not _finite(h.get(k))]
+        if bad:
+            problems.append(f"{name} lacks valid {', '.join(bad)}")
+        if _finite(h.get("BMAJ")) and _finite(h.get("BMIN")) and not (h["BMAJ"] > 0 and h["BMIN"] > 0):
+            problems.append(f"{name} restoring beam is not positive")
+    if problems:
+        return problems
+    diff = [k for k in NUMERIC_KEYS if not math.isclose(b[k], a[k], rel_tol=1e-6, abs_tol=1e-12)]
+    return [f"metadata differs: {', '.join(diff)}"] if diff else []
+
+
+def image_pair(before_path, after_path, masks, eps_rms=EPSILON_RMS, eps_snr=EPSILON_SNR):
+    """Paired before/after restored-image metrics and the Image outcome, or unavailable with the reason."""
+    try:
+        b, a = restored_metrics(before_path, masks), restored_metrics(after_path, masks)
+    except Exception as exc:
+        return dict(image="unavailable", image_reason=str(exc)[:300])
+    problems = comparability_problems(b["header"], a["header"])
+    if problems:
+        return dict(image="unavailable", image_reason="before/after images not comparable: " + "; ".join(problems))
+    r_rms = (b["rms"] - a["rms"]) / b["rms"]
+    r_snr = (a["snr"] - b["snr"]) / b["snr"] if b["snr"] > 0 else None
+    out = dict(rms_before=b["rms"], rms_after=a["rms"], mean_before=b["mean"], mean_after=a["mean"],
+               peak_before=b["peak"], peak_after=a["peak"], snr_before=b["snr"], snr_after=a["snr"],
+               r_rms=r_rms, r_snr=r_snr, off_pixels=b["off_pixels"], source_pixels=b["source_pixels"],
+               off_beams=b["off_beams"], units=b["header"]["BUNIT"], image_metric_version=IMAGE_METRIC_VERSION)
+    out.update(epsilon_rms=eps_rms, epsilon_snr=eps_snr)
+    bad = [w for w, x in (("before", b["snr"]), ("after", a["snr"])) if not (_finite(x) and x > 0)]
+    if bad:
+        return dict(out, image="unavailable", image_reason=f"nonpositive or nonfinite SNR {', '.join(bad)}")
+    return dict(out, image=image_outcome(r_rms, r_snr, eps_rms, eps_snr))
+
+
 def describe(result, crit):
     """Plain-language Description: what was tried, skipped and why. Log-derived statements say so."""
     rec = result.get("recipe_record", {})
@@ -1494,10 +1652,10 @@ def describe(result, crit):
     return " ".join(parts)
 
 
-def report(output):
+def report(output, eps_rms=EPSILON_RMS, eps_snr=EPSILON_SNR):
     """Report of one run: the comparison report (aggregate row per flagging mode, then every case)."""
     from scripts.vla_pipeline_qa_compare import build
-    build([output], output.resolve(), "report.html")
+    build([output], output.resolve(), "report.html", eps_rms, eps_snr)
 
 
 def main():
@@ -1507,6 +1665,10 @@ def main():
     st.add_argument("--plan", action="store_true")
     st.add_argument("--execute", action="store_true")
     st.add_argument("--report", action="store_true")
+    ap.add_argument("--epsilon-rms", type=float, default=EPSILON_RMS,
+                    help="--report: relative RMS change tolerance of the v4 Image outcome (PROVISIONAL default)")
+    ap.add_argument("--epsilon-snr", type=float, default=EPSILON_SNR,
+                    help="--report: relative SNR change tolerance of the v4 Image outcome (PROVISIONAL default)")
     st.add_argument("--unit", metavar="CASE", help=argparse.SUPPRESS)
     st.add_argument("--casa-regen", metavar="CASE", help=argparse.SUPPRESS)
     st.add_argument("--casa-recipe", nargs=2, metavar=("CASE", "RECIPE"), help=argparse.SUPPRESS)
@@ -1544,7 +1706,7 @@ def main():
     elif a.execute:
         execute(a.output, a.parallel)
     elif a.report:
-        report(a.output)
+        report(a.output, a.epsilon_rms, a.epsilon_snr)
     elif a.unit:
         unit(a.output, a.unit)
     elif a.casa_regen:

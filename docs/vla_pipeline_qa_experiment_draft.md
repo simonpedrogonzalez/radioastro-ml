@@ -486,6 +486,8 @@ On CHPC, submit each `--execute` as a job with `bin/submit ml-cpu scripts/vla_pi
 
 ## Requested report redesign and My Criteria (2026-11-11)
 
+**Historical v3 specification:** the 2026-11-12 v4 update below supersedes the combined outcome labels for the new expectation-group summaries. Retain the existing overall summary and legacy My Criteria for continuity; do not confuse them with the new independent Pipeline, Recovery and Image outcomes.
+
 [USER] Specification for the report implementation. This section supersedes the old headline `fixed / already ok / still bad / degraded` classification and wide disposition tables. The first report implementation exists, but the corrected category definitions below supersede its original precedence and still require a corresponding code/test update. This edit changes documentation only. Preserve historical results and record a new criteria version when reports are rebuilt.
 
 ### Evidence from the synced CHPC reports
@@ -589,3 +591,108 @@ Blocked takes precedence over preserved even for a control or noise-only case. E
 Each aggregate configuration row retains its category-count bars and runtime, and now also has a short Description (counts of blocked, applied, and rejected-trial actions). Show the number initially above the gain-damage boundary and the number with known baseline/reference. This smoke panel has no initially above-boundary cases, so it cannot demonstrate solved outcomes. The synced 20261111-2034 evidence confirms 1024-auto has five initial empty-model blocks and three applications per flagging mode, not seven blocks. Original-size auto has eight blocks. These must not appear as preservation successes.
 
 The category palette retains teal for preserved, blue for solved, light blue for improved, vermilion for degraded, purple for rejected, and gray for unchanged. Amber identifies blocked. Descriptions and category names are present as text, not color alone. Preserve criteria version and provisional epsilon in exports. Calibration logic and numerical tolerances are unchanged by v3. Old report labels can be recomputed from retained evidence without CASA reruns.
+
+
+## Requested v4 update: expectation groups and independent outcomes (2026-11-12)
+
+[USER] **Specification; implemented 2026-11-12 in the report path (see Implementation notes at the end of this section).** Keep the existing overall configuration summary, then add a second summary table split into the two expectation groups below. Separate what the pipeline did from recovery accuracy and image quality. This supersedes using v3 My Criteria as the sole scientific verdict. Retain its labels in the existing summary/optional case detail for continuity, explicitly marked legacy v3. Version the new scheme independently as v4 and show its thresholds. No calibration, simulation, regeneration, gain solving, or imaging reruns are permitted to implement/backfill this report.
+
+### Expectation groups: fixed before processing
+
+Use the existing validated matched reference: same source, noise realization and noise multiplier, with **both amplitude and phase injections removed**. Define signed joint gain damage `D = eC_before - eC_reference`. Do not sum individual amplitude/phase damages. Group membership uses only the original case and reference, never the recipe outcome, so a case stays in the same group across configurations.
+
+1. **No improvement expected:** uncorrupted controls (nothing injected), noise-only cases, and gain-containing cases with `D < 0`. Negative D means the archived counterpart without gains has worse recovery error; it does not mean a negative eC. Include exact `D == 0` here as an explicit implementation convention: no benchmark gain benefit. Preserve sub-reasons `control`, `noise_only`, `negative_joint_gain_damage`, `zero_joint_gain_damage` in the detail/filter/export.
+2. **Improvement expected:** all gain-containing cases with `D > 0`, including amp-only, phase-only, amp+phase, and their noise mixtures. This does **not** require D > 0.05 or D > recovery epsilon: small positive benefit still belongs here, although a measured change may be Similar. Keep before/after acceptance against `reference + 0.05` as a separate diagnostic.
+
+Cases with missing/nonfinite or invalidly matched references must show **Expectation unavailable**, with a separate accounting row; never silently place them in either scientific group. Determine injection presence from verified case parameters/metadata, not the source name. Preserve unrounded signed D and flag values close to zero for interpretation rather than changing their sign through display rounding.
+
+“No improvement expected” means no expected benefit in this matched-reference recovery benchmark, not that RMS or SNR cannot improve. “Improvement expected” is not proof of recoverability by this recipe. The reference is not a physical lower bound: gains act on signal before noise is added, and inverse amplitude correction changes noise. Replace report help-text claims that `eC_solvable` is precisely what perfect correction removes with **joint gain damage / excess over matched reference**.
+
+### Independent Pipeline, Recovery and Image columns
+
+**Pipeline** has four measured outcomes:
+
+- **Applied:** final gain correction retained/applied, even if a later interval was rejected.
+- **Blocked:** an explicit prerequisite prevented correction trials (empty initial model, insufficient initial SNR, etc.).
+- **Rejected:** trials were evaluated but no correction was retained, regardless of starting eC or expectation group. A provisional pass later rolled back still belongs here.
+- **Error:** execution failed. Keep QA/rendering warnings separate unless they actually invalidate execution or measurement.
+
+Use existing structured decision evidence before logs. A “Starting with solint” line alone proves neither a trial nor application. Preserve pending/unknown as accounting states rather than inventing one of the four outcomes. Record flag-only changes separately in Description; do not pretend they are applied gain corrections. An unsupported disposition is an error with its reason.
+
+**Recovery** uses the common-evaluation eC, independently of Pipeline and expectation:
+
+- `delta_C = eC_before - eC_after`.
+- **Improved:** delta_C > epsilon_C.
+- **Similar:** abs(delta_C) <= epsilon_C.
+- **Degraded:** delta_C < -epsilon_C.
+
+Keep the existing absolute `epsilon_C = 0.005` **provisional**, not scientifically validated or user-approved. The 0.05 acceptance boundary is not this change threshold. A blocked case with verified unchanged evaluation can be Recovery Similar; an applied case can also be Similar. Do not let Pipeline precedence overwrite measurable Recovery. Missing/invalid final measurements are unavailable, not Similar; do not use intermediate products from a failed run as its final result.
+
+**Image** uses paired off-source RMS and peak SNR from the common evaluation images, not arbitrary native self-calibration iterations:
+
+- RMS: background standard deviation `sqrt(mean((I - mean(I))**2))`, in Jy/beam, on a fixed off-source region of the restored CLEAN image. Record the mean as well. Exclude source emission, invalid pixels and image edges consistently. Do not compute whole-image RMS including the source.
+- SNR: `(source_peak - background_mean) / RMS`, using the maximum within a fixed source aperture. Call this peak image SNR / dynamic range, not integrated-flux significance. Peak and background must come from the same restored image.
+- Use the same predeclared source aperture and off-source region before/after; derive them from existing reference masks/geometry, never independently from the resulting automask. Record region provenance, pixel counts and approximate independent beam counts. Require a usable region and positive finite RMS/SNR; otherwise mark Image unavailable with the reason.
+- Require comparable units, WCS, restoring beam, weighting and evaluation settings. Check existing metadata. If comparison cannot be supported by retained products, mark unavailable; do not reimage to fix it. Never measure these from the convolved CLEAN **model** alone or from rendered PNGs. Native pipeline SNR/RMS are useful supporting evidence, not substitutes for the paired evaluation metric.
+
+Define benefit-oriented fractional changes:
+
+`r_RMS = (RMS_before - RMS_after) / RMS_before` (positive = better)
+
+`r_SNR = (SNR_after - SNR_before) / SNR_before` (positive = better)
+
+For each, classify improved when r > its epsilon, worse when r < -epsilon, otherwise similar (equality included). **Proposed implementation defaults only:** epsilon_RMS = epsilon_SNR = 0.01 (1% relative). These are unvalidated display tolerances, not significance tests or approved scientific cutoffs. Make them configurable, export them, and label summaries provisional until justified using existing uncertainty/region statistics. Do not launch repeated pipeline runs to choose them. Keep epsilon_C separate because its units and purpose differ.
+
+| RMS direction | SNR direction | Image |
+| :-- | :-- | :-- |
+| Lower | Higher | Cleaner |
+| Lower | Similar | Cleaner |
+| Similar | Higher | Cleaner |
+| Similar | Similar | Similar |
+| Higher | Lower | Worse |
+| Higher | Similar | Worse |
+| Similar | Lower | Worse |
+| Lower | Lower | Mixed |
+| Higher | Higher | Mixed |
+
+Directions in this table mean changes exceeding the corresponding tolerance. This explicitly resolves the one-metric-stable case: one improves and neither worsens => Cleaner; one worsens and neither improves => Worse. RMS and SNR have **opposite desirable numeric directions**. Image Cleaner is not proof of correct flux or morphology. Retain before/after flux error against known truth alongside eC. Near-source artefact diagnostics may be shown separately but are not part of this two-metric Image rule.
+
+### Summary layout and exact drill-down
+
+After the existing overall summary, render one additional summary table with two clearly labelled sections, **No improvement expected** first and **Improvement expected** second. Within each section, show one row per configuration/flagging mode; never pool configurations. Include a visible expectation-unavailable accounting row when needed.
+
+| Expectation group | Configuration | Coverage | Pipeline | Recovery | Image | Runtime |
+| :-- | :-- | :-- | :-- | :-- | :-- | :-- |
+| No improvement expected | B · 256 · center · flags on | planned/finished/available | category count bars | category count bars | category count bars | median/range, recipe-hours |
+| Improvement expected | B · 256 · center · flags on | planned/finished/available | category count bars | category count bars | category count bars | median/range, recipe-hours |
+
+Each outcome cell is a compact categorical count chart, **not one table column per category**. Show counts, zeros, text labels/tooltips and consistent category order/colors in every summary, detailed badge and filter. Use dimension-specific legends: Applied blue, Blocked amber, Rejected purple, Error vermilion; Recovery Improved blue, Similar gray, Degraded vermilion; Image Cleaner blue, Similar gray, Worse vermilion, Mixed purple. Use shared count scales across comparable rows within a dimension. Display denominators and missing/pending counts per dimension so missing image products do not silently remove cases from the Pipeline totals. Runtime retains measured median/range and cumulative recipe-hours; elapsed wall time is separate and must cover the whole run, not just its last resume call.
+
+Every bar must filter the full case table by the exact intersection **configuration AND expectation group AND selected dimension/category**. For example, clicking Cleaner in the Improvement expected section selects only `(config=B256-center-on, expectation=improvement_expected, image=cleaner)`, regardless of those rows' Recovery or Pipeline category. Do not map that click to legacy My Criteria improved. Clicking a group or configuration label selects that whole subset. Existing overall-summary/legacy-bar filtering must keep working.
+
+Represent filter state explicitly with `configuration`, `expectation`, `pipeline`, `recovery`, `image` and optional `legacy_criteria`. A summary-bar click replaces previous outcome filters (including legacy) with the clicked subset, so hidden stale filters cannot make the count disagree; provide explicit controls to intersect further. Show active filters, visible/total count and a reset button; scroll to the detail table and support keyboard activation. Clicking any bar must yield exactly its displayed count. Use stable row identities `(run, case_id, recipe)` so cases from different runs are not collapsed.
+
+Detailed rows show expectation + reason/D, Pipeline, Recovery, Image, eC before/after, RMS before/after (Jy/beam), SNR before/after, fractional changes, flux error, runtime, image links and Description/evidence. Keep original inputs, matched reference, legacy acceptance status and decision reasons accessible. Export the same fields and metric provenance so a displayed category is reproducible.
+
+### Implementation plan: existing outputs only
+
+1. Add pure expectation/outcome classifiers to `scripts/vla_pipeline_qa.py`; keep Pipeline, Recovery and Image independent. Extend `scripts/vla_pipeline_qa_compare.py` and the shared single-run report path with the new table, detail fields, legends and filter state. Preserve historical raw results; write new derived/versioned evidence rather than overwriting archived measurements.
+2. Inventory existing result JSON, feature vectors, matched-case records and retained FITS/array products at the CHPC run source. The HTML mirror is read-only and may lack these inputs. Existing `residual_rms_jy` is currently derived from `metrics.residual.scaled_mad_jy_per_beam`: it is a **robust residual noise estimate**, not the restored-image RMS defined here. Do not silently relabel it or mix it with restored-image SNR. Existing features may be reused only if estimator, masks, beam and provenance match the v4 definition.
+3. Backfill missing RMS, peak and SNR by reading existing restored CLEAN FITS (including `.fits.gz`) or retained equivalent numerical outputs; verify product identity/units before use. The report currently locates `cases/<case>/imaging/clean.fits.gz`; inspect its metadata and record to confirm restored-image semantics. Read masks/metadata already retained. If only compatible residual products exist, expose their metrics separately, not as an undocumented replacement. Cache calculations by product identity, region definition and metric version, processing one pair at a time. Do not load all images at once or add visibility scans.
+4. Reuse before metrics as after **only when existing execution/evaluation evidence establishes the final input was unchanged**, including relevant flags/weights. Blocked or Rejected labels alone do not prove that. If files were deleted and no equivalent measurements remain, record unavailable + missing product/reason. Fetching/copying retained outputs from CHPC is allowed; regenerating them is not.
+5. Save raw paired measurements, units, source paths/identities, estimator, region definitions, validation status, thresholds, reference identity and classification version in derived JSON/CSV and Description evidence. Build HTML from those records. Use ordinary report/backfill operations only: **no `--execute`, no `--reproduce`, no regeneration audit, no tclean, no CASA self-calibration, no new simulation or experiment run**. No automatic fallback may invoke them. Rebuild at the source and sync the reports normally.
+6. Validate with small pure-function/synthetic-array tests and existing saved outputs: negative/zero/positive joint damage, control/noise cases, missing reference, all nine Image combinations, epsilon boundaries, invalid denominators, missing products, blocked-but-changed flags, Applied+Recovery Similar+Image Cleaner, and Recovery Degraded+Image Cleaner. Check summary totals and exact clicked row IDs for each bar/group/config, including missing states and legacy filters. Assert report/backfill paths cannot call execution or imaging. No science reruns for validation.
+
+### Implementation notes (2026-11-12)
+
+[CODE] Report-only; no execution, imaging or regeneration path is called.
+
+- Classifiers: `expectation`, `pipeline_outcome`, `recovery_outcome`, `image_outcome`, `restored_metrics`, `image_pair` in `scripts/vla_pipeline_qa.py` (`V4_VERSION`). Pipeline maps the existing decision evidence: Applied → applied, Could not start → blocked, Left unchanged → rejected, Error → error; anything else stays the accounting state `unknown`.
+- Expectation uses the archived before eC of the source case and the validated matched reference; an unavailable reference keeps its reason. `near_zero` flags |D| < 5e-4 (would display as 0.000); the sign is kept.
+- Image regions: the source's existing `reference_masks.npz` (written with the reference geometry, never from an automask): off-source = `annulus` (3 beams to border minus 1 beam, valid pixels), source aperture = `source` (true-source ellipse, rho ≤ 1). Before = archived case `cases/<id>/imaging/clean.fits.gz`; after = QA evaluation `cases/<id>/<recipe>/imaging/clean.fits.gz`, or the before image when the QA evaluation was reused (no calibration applied, no flags added). Comparability: both images must carry BUNIT = Jy/beam and finite shape, positive restoring beam, cell and reference pixel/value (missing on both is not a match), and these must agree within relative 1e-6; otherwise unavailable. Before and after SNR must be positive and finite, otherwise unavailable. Weighting/evaluation settings are identical by construction (common evaluation imaging). Measurements cached in `<report>/image_metrics/` by product identity, metric version and tolerances. Exported per case: RMS/mean/peak/SNR before/after, r_RMS, r_SNR, pixel and approximate independent-beam counts, units, metric version.
+- epsilon_C = 0.005, epsilon_RMS = epsilon_SNR = 0.01: all PROVISIONAL, exported with the summary and per case. epsilon_RMS/SNR are configurable: `--report --epsilon-rms X --epsilon-snr Y` (also on `vla_pipeline_qa_compare.py` and `ml/pipeline_qa_models.py`).
+- Recovery uses the measured evaluation eC directly (`measured_recovery`), so a missing reference makes only Expectation and legacy v3 unavailable.
+- Filters carry run identity: every bar selects run AND configuration AND group AND outcome, so identical configuration labels of different runs stay separate; group headings select the group across all configurations. Per-case evidence JSON is written after the image measurements and includes them.
+- Elapsed: `--execute` now records each call at its start; the report ends a call that never recorded its finish at its last completed case. Runs executed earlier recorded only finished calls, so their elapsed time can miss killed (preempted/time-limit) calls.
+- `ml/pipeline_qa_models.py` (frozen multitask models on QA cases) tabulates expectation group × each v4 dimension against the presence classifier; the v3 table is kept collapsed.
+

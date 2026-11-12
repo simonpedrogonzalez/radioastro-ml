@@ -3,6 +3,8 @@ result unwrapping, plan option checks and recovery outcomes. Pipeline end-to-end
 scripts/vla_pipeline_qa_checks.py (they need the CASA pipeline and take minutes)."""
 import unittest
 
+import numpy as np
+
 from scripts import vla_pipeline_qa as q
 
 
@@ -192,6 +194,168 @@ class HelperTests(unittest.TestCase):
     def test_calonly_fix_text(self):
         self.assertEqual(q.CALONLY_GUARD.strip(), 'if applymode == "calflag":')
         self.assertTrue(q.CALONLY_FIX.startswith('if applymode == "calflag" or '))
+
+
+class V4OutcomeTests(unittest.TestCase):
+    def test_expectation_groups(self):
+        e = q.expectation
+        self.assertEqual(e(0, .1, .1)["expectation_reason"], "control")
+        self.assertEqual(e(4, .2, .1)["expectation_reason"], "noise_only")          # noise only: never expected
+        self.assertEqual(e(5, .09, .1)["expectation_reason"], "negative_joint_gain_damage")
+        self.assertEqual(e(3, .1, .1)["expectation_reason"], "zero_joint_gain_damage")
+        x = e(6, .1003, .1)
+        self.assertEqual((x["expectation"], x["near_zero"]), ("improvement_expected", True))   # any D > 0, flagged
+        self.assertEqual(e(1, .3, .1)["expectation"], "improvement_expected")
+        self.assertEqual(e(1, None, .1)["expectation"], "expectation_unavailable")
+        self.assertEqual(e(1, .3, float("nan"))["expectation"], "expectation_unavailable")
+
+    def test_pipeline_and_recovery(self):
+        self.assertEqual([q.pipeline_outcome(a) for a in ("Applied", "Could not start", "Left unchanged", "Error", "Unknown")],
+                         ["applied", "blocked", "rejected", "error", "unknown"])
+        eps = q.EPSILON
+        self.assertEqual(q.recovery_outcome(.1, .1 - eps * 1.01), "improved")
+        self.assertEqual(q.recovery_outcome(.1, .1 - eps * .99), "similar")
+        self.assertEqual(q.recovery_outcome(.1, .1 + eps * 1.01), "degraded")
+        self.assertEqual(q.recovery_outcome(.1, None), "unavailable")
+
+    def test_image_table(self):
+        up, same, down = .05, 0., -.05              # benefit-oriented: positive r = better
+        table = {(up, up): "cleaner", (up, same): "cleaner", (same, up): "cleaner", (same, same): "similar",
+                 (down, down): "worse", (down, same): "worse", (same, down): "worse", (up, down): "mixed",
+                 (down, up): "mixed"}
+        for (r_rms, r_snr), want in table.items():
+            self.assertEqual(q.image_outcome(r_rms, r_snr), want, (r_rms, r_snr))
+        self.assertEqual(q.image_outcome(q.EPSILON_RMS, 0), "similar")          # equality is similar
+        self.assertEqual(q.image_outcome(None, 0), "unavailable")
+
+    def test_restored_metrics_and_pair(self):
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+        from astropy.io import fits
+        rng = np.random.default_rng(1)
+        source = np.zeros((32, 32), bool); source[15:17, 15:17] = True
+        annulus = np.zeros((32, 32), bool); annulus[:6] = True
+        masks = dict(source=source, annulus=annulus)
+        header = dict(BUNIT="Jy/beam", BMAJ=2e-4, BMIN=1e-4, BPA=0., CDELT1=-4e-5, CDELT2=4e-5, CRVAL1=1., CRVAL2=2.,
+                      CRPIX1=17., CRPIX2=17.)
+
+        def image(path, noise, peak, **change):
+            data = rng.normal(0, noise, (32, 32)); data[16, 16] = peak
+            hdu = fits.PrimaryHDU(data[None, None]); hdu.header.update({**header, **change})
+            hdu.writeto(path)
+        with tempfile.TemporaryDirectory() as tmp, patch("subprocess.run", side_effect=AssertionError("no execution")):
+            b, a, other = (Path(tmp) / n for n in ("b.fits", "a.fits", "o.fits"))
+            image(b, .01, 1.); image(a, .001, 1.); image(other, .001, 1., BMAJ=3e-4)
+            m = q.restored_metrics(b, masks)
+            off = fits.getdata(b).squeeze()[annulus]
+            self.assertAlmostEqual(m["rms"], float(np.std(off)))
+            self.assertAlmostEqual(m["snr"], (1. - off.mean()) / np.std(off))
+            pair = q.image_pair(b, a, masks)
+            self.assertEqual(pair["image"], "cleaner")
+            self.assertGreater(pair["r_rms"], 0); self.assertGreater(pair["r_snr"], 0)
+            self.assertEqual(q.image_pair(a, b, masks)["image"], "worse")
+            bad = q.image_pair(b, other, masks)
+            self.assertEqual(bad["image"], "unavailable"); self.assertIn("BMAJ", bad["image_reason"])
+            self.assertEqual(q.image_pair(b, Path(tmp) / "missing.fits", masks)["image"], "unavailable")
+
+
+class ElapsedTests(unittest.TestCase):
+    def test_killed_call_counts_until_last_case(self):
+        from scripts.vla_pipeline_qa_compare import elapsed_hours
+        calls = [dict(started=0.), dict(started=10000., finished=10000. + 3600.)]     # first call killed
+        units = [1800., 3600., 10100.]                                                 # cases it completed
+        self.assertAlmostEqual(elapsed_hours(calls, units), 2.)
+        self.assertAlmostEqual(elapsed_hours([dict(started=0.)], []), 0.)
+        self.assertIsNone(elapsed_hours([], []))
+
+
+class V4ReviewFixTests(unittest.TestCase):
+    """Regression tests for the 2026-11-12 v4 review findings."""
+
+    def test_recovery_ignores_missing_reference(self):
+        ev = dict(status="measured", before=dict(eC=.3), after=dict(eC=.1))
+        self.assertEqual(q.measured_recovery(ev), "improved")
+        crit = q.my_criteria(dict(recipe_record=dict(disposition="applied"), evaluation=ev), True,
+                             dict(status="unavailable", reason="no matched counterpart"))
+        self.assertEqual(crit["category"], "unavailable")        # legacy needs the reference, Recovery does not
+        self.assertEqual(q.measured_recovery(dict(status="failed")), "unavailable")
+
+    def _fits(self, path, noise, peak, header, drop=()):
+        from astropy.io import fits
+        data = np.random.default_rng(2).normal(0, noise, (32, 32)); data[16, 16] = peak
+        hdu = fits.PrimaryHDU(data[None, None]); hdu.header.update(header)
+        for k in drop:
+            del hdu.header[k]
+        hdu.writeto(path)
+
+    def test_image_rejects_missing_metadata_and_nonpositive_snr(self):
+        import tempfile
+        from pathlib import Path
+        source = np.zeros((32, 32), bool); source[15:17, 15:17] = True
+        annulus = np.zeros((32, 32), bool); annulus[:6] = True
+        masks = dict(source=source, annulus=annulus)
+        header = dict(BUNIT="Jy/beam", BMAJ=2e-4, BMIN=1e-4, BPA=0., CDELT1=-4e-5, CDELT2=4e-5, CRVAL1=1., CRVAL2=2.,
+                      CRPIX1=17., CRPIX2=17.)
+        with tempfile.TemporaryDirectory() as tmp:
+            t = Path(tmp)
+            self._fits(t / "b.fits", .01, 1., header); self._fits(t / "a.fits", .001, 1., header)
+            self._fits(t / "nb.fits", .01, 1., header, drop=("BUNIT", "BMAJ")); self._fits(t / "na.fits", .001, 1., header, drop=("BUNIT", "BMAJ"))
+            self._fits(t / "neg.fits", .001, -1., header)
+            missing = q.image_pair(t / "nb.fits", t / "na.fits", masks)          # missing on both: not a match
+            self.assertEqual(missing["image"], "unavailable")
+            self.assertIn("BUNIT", missing["image_reason"]); self.assertIn("BMAJ", missing["image_reason"])
+            neg = q.image_pair(t / "b.fits", t / "neg.fits", masks)
+            self.assertEqual(neg["image"], "unavailable"); self.assertIn("after", neg["image_reason"])
+            self.assertEqual(q.image_pair(t / "b.fits", t / "a.fits", masks)["image"], "cleaner")
+            loose = q.image_pair(t / "b.fits", t / "a.fits", masks, eps_rms=1e9, eps_snr=1e9)   # configurable
+            self.assertEqual((loose["image"], loose["epsilon_rms"]), ("similar", 1e9))
+
+    def _rows(self):
+        cases = lambda run: [dict(case=f"{run}{i}", id=f"{run}|c{i}|B", label="s:r00:m3:slot0", corruption="amp+phase",
+                                  mask=3, action="Applied", expectation="improvement_expected", expectation_reason="x",
+                                  D=.1, pipeline="applied", recovery="improved", image="cleaner", category="improved",
+                                  description="d", seconds=60.) for i in range(1)]
+        return [dict(run=run, config="B · 256 px · center · flags on", key=run, recipe="B:phase_amp:flagging_on",
+                     cases=cases(run), calls=[], superseded=False) for run in ("run1", "run2")]
+
+    def test_bar_filters_keep_run_identity(self):
+        import html, json, re, tempfile
+        from pathlib import Path
+        from scripts import vla_pipeline_qa_compare as cmp
+        rows = self._rows()
+        with tempfile.TemporaryDirectory() as tmp:
+            cmp.write_report(Path(tmp), [cmp.summarize(r) for r in rows], rows, [Path("run1"), Path("run2")], "r.html",
+                             cmp.summarize_v4(rows))
+            text = (Path(tmp) / "r.html").read_text()
+        trs = [dict(re.findall(r"data-([a-z]+)='([^']*)'", tr)) for tr in re.findall(r"<tr data-run=[^>]*>", text)]
+        trs = [{k: html.unescape(v) for k, v in t.items()} for t in trs]
+        self.assertEqual(len(trs), 2)
+        bars = re.findall(r"class=bar [^>]*data-filter='([^']*)'><span class=lab>[^<]*</span><span[^>]*></span><span>(\d+)",
+                          text)
+        self.assertTrue(bars)
+        for flt, shown in bars:                                   # exact-match semantics of the page script
+            flt = json.loads(html.unescape(flt))
+            self.assertIn("run", flt)
+            hit = sum(all(t.get(k) == v for k, v in flt.items() if v != "other") for t in trs)
+            self.assertEqual(hit, int(shown), flt)
+        self.assertIn('data-filter=\'{&quot;expectation&quot;: &quot;improvement_expected&quot;}\'', text)
+
+    def test_evidence_written_after_image_metrics(self):
+        import json, tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+        from scripts import vla_pipeline_qa_compare as cmp
+        rows = self._rows()[:1]
+        rows[0]["cases"][0].update(image=None, evidence=dict(recipe_record={}, evaluation={}, reference={}))
+
+        def measure(rows, cache, *a):
+            rows[0]["cases"][0].update(image="cleaner", rms_before=2., rms_after=1., snr_before=10., snr_after=20.)
+        with tempfile.TemporaryDirectory() as tmp, patch.object(cmp, "load", return_value=rows), \
+                patch.object(cmp, "add_image_metrics", side_effect=measure):
+            cmp.build([Path("run1")], Path(tmp), "r.html")
+            ev = json.loads(next((Path(tmp) / "descriptions").glob("*.json")).read_text())
+        self.assertEqual((ev["v4"]["image"], ev["v4"]["rms_after"], ev["v4"]["snr_after"]), ("cleaner", 1., 20.))
 
 
 if __name__ == "__main__":
