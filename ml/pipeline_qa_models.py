@@ -1,28 +1,24 @@
-"""Frozen Dataset v2 multitask models on VLA pipeline QA cases: do they see whether the pipeline worked?
+"""Frozen Dataset v2 multitask models on VLA pipeline QA cases: final (after-pipeline) eC regression, v5 report.
 
-Reads the image features of every case: before = the archived corrupted case (all 22 features from the source
-dataset, CLEAN2 from its sidecar), after = evaluation.after.X stored by the QA evaluation of the tested recipe, applies frozen multitask
-models (default xgb_xgb and xgb_mlp, with their two XGB experts) and writes one report. No CASA, no refit, run
-folders are only read.
+[USER] design doc "Requested v5 evaluation setup" (2026-11-16), "Model result report": the frozen models see the
+image features of the evaluation AFTER the recipe; the target is the measured total eC after the recipe and the
+prediction is the model's own total-eC output (never a sum of per-kind damages, the before eC, the injected class or
+the remaining gain damage). Cases are labelled with the same v5 classifiers as the pipeline report
+(scripts/vla_pipeline_qa.py via scripts/vla_pipeline_qa_compare.load).
+
+Per run configuration and model:
+  Section 1, by Pipeline Result: Table 1 Success / Partial success / Failure (all cases), Table 2 within each parent
+    group, Table 3 within each No improvement expected subgroup;
+  Section 2, by Recovery: the same three tables with Solved / Improved / Similar / Degraded.
+Columns: total cases, valid prediction/target pairs (coverage), after-eC R² and RMSE computed from the pooled pairs of
+each displayed subset. Accounting states (pending, error, unavailable) stay visible as their own rows.
+
+After features: the stored after-recipe evaluation features; for a reused evaluation (the QA run established that
+nothing was applied and no flags were added, so the input was unchanged) the archived features of the case, and only
+when its stored after eC equals its before eC. Inference only: no CASA, no refit, no threshold selection; run folders
+are only read.
 
   bin/run ml ml/pipeline_qa_models.py --model ml/runs/<multitask run> --output ml/runs/<name> QA_RUN [QA_RUN ...]
-
-Report:
-  1. Before (the models' usual task on these cases): the multitask regression and presence metrics
-     (ml.multitask.task_metrics) against the archived labels, and predicted-against-true diagonals.
-  2. After the recipe. Per-type truth is unknown after the pipeline, so only these are scored:
-     - eC after (regression);
-     - remaining gain damage = eC after - reference eC (My Criteria remaining excess) against predicted
-       d_amp + d_phase (the per-type damages need not add up, so this is an approximation);
-     - noise presence: b_noise does not change (self-calibration does not remove thermal noise);
-     - "gain damage remains" = eC after > boundary (reference + tolerance), scored by the presence outputs
-       (max of amp/phase probability, flag at 0.5) and by predicted gain damage (flag above the tolerance),
-       next to two baselines: the pipeline's own status (flag when it did not apply a correction) and residual
-       peak/MAD of the image.
-  3. Per configuration, v4 (design doc 2026-11-12): expectation group x each independent outcome (Pipeline,
-     Recovery, Image) against the corruption types the presence classifier assigns after the recipe ("clean" = none
-     assigned), with the same table for the before image. The legacy v3 My Criteria table is kept in a collapsed
-     section.
 """
 from __future__ import annotations
 
@@ -34,13 +30,12 @@ from pathlib import Path
 import numpy as np
 
 from ml import multitask as mt
-from scripts.vla_pipeline_qa import EPSILON_RMS, EPSILON_SNR, V4_VERSION
 from scripts.preprocessing.schema import atomic_write_json
+from scripts.vla_pipeline_qa import EXCEPTION, GROUPS, RECOVERY, RESULTS, SUBGROUPS, V5_VERSION
 
 DEFAULT_MODELS = ("xgb_xgb", "xgb_mlp")
-SETS = tuple("+".join(k for j, k in enumerate(mt.KINDS) if m >> j & 1) or "clean" for m in range(8))
-SET_ORDER = (0, 1, 2, 3, 4, 5, 6, 7)          # clean, amp, phase, amp+phase, noise, amp+noise, phase+noise, all
-BASELINE_FEATURE = "metrics.residual.peak_over_scaled_mad"
+SECTIONS = (("result", "Pipeline Result", RESULTS), ("recovery", "Recovery", RECOVERY))
+ACCOUNTING = ("unavailable", "error", "unknown", "pending")
 
 
 def feature_columns(summary):
@@ -55,222 +50,159 @@ def feature_columns(summary):
     return names
 
 
-def collect(runs, cache, eps_rms, eps_snr):
-    """One row per (run, recipe, case) with the v4 outcomes, legacy My Criteria and the before/after features.
-    cache: folder for the v4 Image measurements (restored-image RMS/SNR, read from retained FITS only)."""
-    from scripts.vla_pipeline_qa import TOLERANCE, archived_features, safe
-    from scripts.vla_pipeline_qa_compare import add_image_metrics, load
+def after_features(source_run, case_id, ev):
+    """(feature names, after-recipe feature row, source, reason-if-missing) of one measured evaluation."""
+    from scripts.vla_pipeline_qa import archived_features
+    if ev.get("status") != "measured":
+        return None, None, None, f"no measured evaluation ({ev.get('status') or 'missing'})"
+    names = ev.get("feature_names")
+    if not names:
+        return None, None, None, "no stored feature names"
+    if ev.get("evaluation_reused"):
+        before, after = (ev.get("before") or {}).get("eC"), (ev.get("after") or {}).get("eC")
+        if before is None or before != after:
+            return None, None, None, "reused evaluation without identical before/after eC (unchanged input not verified)"
+        # QA results written before 2026-11-12 stored 20 values under 22 names: read the full archived row instead
+        x, source = archived_features(source_run, case_id), f"archived case (input unchanged: {ev.get('reason')})"
+    else:
+        x, source = (ev.get("after") or {}).get("X"), "after-recipe evaluation"
+        if x is None:
+            return None, None, None, "no stored after features"
+    if len(x) != len(names):
+        return None, None, None, f"{len(x)} after features stored for {len(names)} names"
+    return names, x, source, None
+
+
+def collect(runs):
+    """One row per (run, recipe, case) with the v5 labels, the measured after eC and the after features."""
+    from scripts.vla_pipeline_qa import safe
+    from scripts.vla_pipeline_qa_compare import load
     rows = []
-    sources = {run: Path(json.loads((Path(run) / "plan.json").read_text())["source_run"]) for run in runs}
     for run in runs:
-        configs = load(run)
-        add_image_metrics(configs, cache, eps_rms, eps_snr)
-        for config in configs:
+        run = Path(run).resolve()
+        source = Path(json.loads((run / "plan.json").read_text())["source_run"])
+        for config in load(run):
             for c in config["cases"]:
-                row = dict(run=config["run"], config=config["config"], recipe=config["recipe"], case=c["case"],
-                           label=c["label"], mask=c.get("mask", 0), category=c["category"], action=c.get("action"),
-                           expectation=c["expectation"], pipeline=c.get("pipeline"), recovery=c.get("recovery"),
-                           image=c.get("image"),
-                           before=c.get("before"), after=c.get("after"), reference=c.get("reference"),
-                           boundary=c.get("boundary"), d=c.get("d"), X_before=None, X_after=None)
-                path = Path(run).resolve() / "results" / f"{c['case']}__{safe(config['recipe'])}.json"
-                if path.exists():
+                row = dict(run=config["run"], run_id=config["run_id"], config=config["config"], recipe=config["recipe"], case=c["case"],
+                           label=c["label"], mask=c["mask"], group=c["group"], subgroup=c["subgroup"],
+                           result=c["result"], recovery=c["recovery"], application=c["application"],
+                           after=c["eC_after"], names=None, X=None, after_source=None, missing=None)
+                path = run / "results" / f"{c['case']}__{safe(config['recipe'])}.json"
+                if not path.exists():
+                    row["missing"] = f"no result record ({c['application']})"
+                else:
                     ev = json.loads(path.read_text()).get("evaluation", {})
-                    if ev.get("status") == "measured":
-                        names = ev["feature_names"]
-                        reused = bool(ev.get("evaluation_reused"))
-                        # Before = the archived source case. QA results written before 2026-11-12 stored its 20
-                        # committed values under all 22 names, so the full row is read from the source dataset.
-                        before_x = archived_features(sources[run], c["case"])
-                        # A reused evaluation means the input was unchanged (nothing applied, no flags added): its
-                        # after features are the before features (the stored copy has the same 20-value problem).
-                        after_x = before_x if reused else ev["after"]["X"]
-                        if len(after_x) != len(names):
-                            raise ValueError(f"{path}: {len(after_x)} after features for {len(names)} names")
-                        row.update(names=names, X_before=before_x, X_after=after_x, reused=reused)
+                    names, x, src, why = after_features(source, c["case"], ev)
+                    row.update(names=names, X=x, after_source=src, missing=why)
                 rows.append(row)
-    return rows, TOLERANCE
+    return rows
 
 
-def matrix(rows, key, columns):
+def matrix(rows, columns):
+    """After-feature matrix in model column order; rows without (all model) features stay NaN with their reason."""
     out = np.full((len(rows), len(columns)), np.nan)
     for i, r in enumerate(rows):
-        lookup = dict(zip(r["names"], r[key]))
+        if r["X"] is None:
+            continue
+        lookup = dict(zip(r["names"], r["X"]))
         missing = set(columns) - set(lookup)
         if missing:
-            raise ValueError(f"{r['case']}: stored features lack {sorted(missing)}")
+            r.update(X=None, missing=f"stored features lack {', '.join(sorted(missing))}")
+            continue
         out[i] = [np.nan if lookup[n] is None else lookup[n] for n in columns]
     return out
 
 
 def predict(model_dir, names, x):
-    """Decoded predictions of each requested frozen model (stacked ones get the expert matrix)."""
+    """Decoded total-eC predictions of each requested frozen model (stacked ones get the expert matrix). Rows with
+    missing features give NaN."""
+    eC = mt.OUTPUTS.index("eC")
+    ok = np.isfinite(x).all(axis=1)
     needed = set(names) | ({"xgb_independent", "xgb_shared"} if set(names) & set(mt.STACKED) else set())
     fitted = {n: mt.load_frozen(model_dir, n) for n in needed}
-    stage = (np.column_stack((x, mt._expert_matrix(fitted["xgb_independent"], fitted["xgb_shared"], x)))
+    out = {n: np.full(len(x), np.nan) for n in names}
+    if not ok.any():
+        return out
+    xs = x[ok]
+    stage = (np.column_stack((xs, mt._expert_matrix(fitted["xgb_independent"], fitted["xgb_shared"], xs)))
              if set(names) & set(mt.STACKED) else None)
-    out = {}
     for n in names:
-        xi = stage if n in mt.STACKED else x
+        xi = stage if n in mt.STACKED else xs
         raw = mt.predict_mlp(fitted[n], xi) if n in mt.MLP_NAMES else mt.predict_xgb(fitted[n]["model"], xi)
-        out[n] = mt.decode(raw, fitted[n]["scale"])
+        out[n][ok] = mt.decode(raw, fitted[n]["scale"])[:, eC]
     return out
 
 
-def dataset_labels(runs):
-    """Row id -> (d, o, pi, b) from the source datasets' split npz files (sparse damage labels, as in training)."""
-    labels = {}
-    for run in runs:
-        source = Path(json.loads((Path(run) / "plan.json").read_text())["source_run"])
-        for path in sorted(source.glob("*.npz")):
-            if path.stem not in ("train", "val", "test"):
-                continue
-            with np.load(path, allow_pickle=False) as z:
-                if not {"row_ids", "d", "o", "pi", "b"} <= set(z.files):
-                    continue
-                for i, rid in enumerate(z["row_ids"]):
-                    labels[str(rid)] = (z["d"][i], z["o"][i], z["pi"][i], z["b"][i])
-    return labels
+def regression(prediction, target):
+    """After-eC R² and RMSE from the finite pairs of one subset. RMSE needs one pair; R² needs two and a nonconstant
+    target (negative R² kept)."""
+    prediction, target = np.asarray(prediction, float), np.asarray(target, float)
+    keep = np.isfinite(prediction) & np.isfinite(target)
+    p, t = prediction[keep], target[keep]
+    n = int(keep.sum())
+    rmse = float(np.sqrt(np.mean((p - t) ** 2))) if n else None
+    r2 = (float(1 - np.sum((p - t) ** 2) / np.sum((t - t.mean()) ** 2))
+          if n >= 2 and np.ptp(t) > 0 else None)
+    return dict(pairs=n, rmse=rmse, r2=r2)
 
 
-def before_truth(rows, labels=None):
-    """multitask label arrays for the archived (before) cases: per-type damage d (with the dataset's observation
-    mask o and probability pi when its npz is available, else dense from rows.json), presence b, total eC."""
-    n = len(rows)
-    labels = labels or {}
-    b = np.asarray([[r["mask"] >> k & 1 for k in range(3)] for r in rows], float)
-    d, o, pi = np.full((n, 3), np.nan), np.zeros((n, 3)), np.ones((n, 3))
-    for i, r in enumerate(rows):
-        if r["label"] in labels:
-            di, oi, pii, bi = labels[r["label"]]
-            if not np.array_equal(bi, b[i]):
-                raise ValueError(f"{r['label']}: dataset presence {bi} differs from the plan mask {r['mask']}")
-            d[i], o[i], pi[i] = di, oi, pii
-        elif r["d"] is not None:
-            d[i] = [np.nan if v is None else v for v in r["d"]]
-            o[i] = np.isfinite(d[i])
-    return dict(X=np.zeros((n, 1)), d=d, o=o, pi=pi, b=b, y_all=np.asarray([r["before"] for r in rows], float))
+def subset(rows, prediction, idx):
+    """Scores and coverage of the rows idx (prediction aligned with rows)."""
+    after = np.asarray([np.nan if rows[i]["after"] is None else rows[i]["after"] for i in idx], float)
+    out = regression(prediction[idx], after) if idx else dict(pairs=0, rmse=None, r2=None)
+    valid = [i for i, a in zip(idx, after) if np.isfinite(prediction[i]) and np.isfinite(a)]
+    missing = {}
+    for i in set(idx) - set(valid):
+        why = rows[i]["missing"] or "no measured after eC or prediction"
+        missing[why] = missing.get(why, 0) + 1
+    return dict(out, total=len(idx), missing=missing,
+                reused_pairs=sum((rows[i]["after_source"] or "").startswith("archived") for i in valid))
 
 
-def classification(truth, score, threshold):
-    """Macro precision/recall/F1 at the threshold (as the multitask report), AUROC/AUPRC of the score, counts."""
-    from sklearn.metrics import average_precision_score, precision_recall_fscore_support, roc_auc_score
-    truth = np.asarray(truth, bool)
-    flag = np.asarray(score) >= threshold
-    p, r, f, _ = precision_recall_fscore_support(truth, flag, average="macro", labels=[False, True], zero_division=0)
-    both = truth.any() and (~truth).any()
-    return dict(rows=int(len(truth)), positives=int(truth.sum()), flagged=int(flag.sum()),
-                tp=int((flag & truth).sum()), fp=int((flag & ~truth).sum()), fn=int((~flag & truth).sum()),
-                recall_yes=float((flag & truth).sum() / truth.sum()) if truth.any() else None,
-                false_alarm=float((flag & ~truth).sum() / (~truth).sum()) if (~truth).any() else None,
-                precision=float(p), recall=float(r), f1=float(f),
-                auroc=float(roc_auc_score(truth, score)) if both else None,
-                auprc=float(average_precision_score(truth, score)) if both else None)
+def section(rows, prediction, key, cats):
+    """Tables 1-3 of one outcome dimension, each a list of (group, [(outcome, scores), ...]); 'all' = whole group."""
+    values = list(cats) + [a for a in ACCOUNTING if any(r[key] == a for r in rows)]
+
+    def split(members, no_partial=False):
+        out = [("all", subset(rows, prediction, members))]
+        for v in values:
+            idx = [i for i in members if rows[i][key] == v]
+            if not (no_partial and v == "partial_success") and (idx or v in cats):
+                out.append((v, subset(rows, prediction, idx)))
+        return out
+
+    everything = list(range(len(rows)))
+    groups = list(GROUPS) + [g for g in (EXCEPTION, "unavailable") if any(r["group"] == g for r in rows)]
+    return dict(
+        table1=[("", split(everything))],
+        table2=[(g, split([i for i in everything if rows[i]["group"] == g], g != "improvement_expected"))
+                for g in groups],
+        table3=[(s, split([i for i in everything if rows[i]["subgroup"] == s], True)) for s in SUBGROUPS])
 
 
-def after_scores(rows, pred, xa, columns, tolerance):
-    """Scores of one model's after-recipe predictions (and its before predictions, for the same quantities)."""
-    after = np.asarray([r["after"] for r in rows], float)
-    before = np.asarray([r["before"] for r in rows], float)
-    ref = np.asarray([r["reference"] for r in rows], float)
-    boundary = np.asarray([r["boundary"] for r in rows], float)
-    b_noise = np.asarray([r["mask"] >> 2 & 1 for r in rows], bool)
-    gain = np.asarray([r["mask"] & 3 != 0 for r in rows], bool)
-    not_applied = np.asarray([r["action"] != "Applied" for r in rows], float)
-    residual = xa[:, columns.index(BASELINE_FEATURE)] if BASELINE_FEATURE in columns else None
-    out = {}
-    for when, p, true_eC in (("after", pred["after"], after), ("before", pred["before"], before)):
-        remains = true_eC > boundary
-        gain_pred = p[:, 0] + p[:, 1]
-        presence = np.maximum(p[:, 4], p[:, 5])
-        out[when] = dict(
-            eC=mt.total_scores(p[:, 3], true_eC),
-            gain_damage=mt.total_scores(gain_pred, true_eC - ref),
-            gain_damage_injected=mt.total_scores(gain_pred[gain], (true_eC - ref)[gain]) if gain.any() else None,
-            noise_presence=classification(b_noise, p[:, 6], .5),
-            remains={"presence amp/phase (max p ≥ 0.5)": classification(remains, presence, .5),
-                     f"predicted gain damage > {tolerance}": classification(remains, gain_pred, tolerance)})
-    remains = after > boundary
-    out["after"]["remains"]["baseline: pipeline did not apply a correction"] = classification(remains, not_applied, .5)
-    if residual is not None:
-        thr = float(np.nanmedian(residual))
-        out["after"]["remains"][f"baseline: residual peak/MAD ≥ median ({thr:.3g})"] = classification(
-            remains, np.nan_to_num(residual, nan=thr), thr)
-    return out
-
-
-def _counts(rows, sets, keep):
-    return dict(total=len(keep), above_after=int(sum(rows[i]["after"] > rows[i]["boundary"] for i in keep)),
-                gain_flagged=int(np.sum(sets[keep] & 3 != 0)),
-                sets={SETS[m]: int(np.sum(sets[keep] == m)) for m in SET_ORDER})
-
-
-def crosstab(rows, probabilities):
-    """Legacy v3: My Criteria category -> {total, above boundary after, gain flagged, predicted set counts}."""
-    from scripts.vla_pipeline_qa import ACCOUNTING, CATEGORIES
-    sets = (probabilities >= .5).astype(int).dot(1 << np.arange(3)) if len(rows) else np.zeros(0, int)
-    table = {}
-    for k in CATEGORIES + ACCOUNTING:
-        keep = [i for i, r in enumerate(rows) if r["category"] == k]
-        if keep:
-            table[k] = _counts(rows, sets, keep)
-    return table
-
-
-def crosstab_v4(rows, probabilities):
-    """v4: expectation group -> dimension -> outcome -> counts (all = whole group). Dimensions are independent, so
-    each one partitions the group on its own; accounting states (unavailable, pending, ...) are kept as rows."""
-    from scripts.vla_pipeline_qa import EXPECTATIONS, IMAGE, PIPELINE, RECOVERY
-    sets = (probabilities >= .5).astype(int).dot(1 << np.arange(3)) if len(rows) else np.zeros(0, int)
-    table = {}
-    for group in EXPECTATIONS:
-        members = [i for i, r in enumerate(rows) if r["expectation"] == group]
-        if not members:
-            continue
-        table[group] = {"all": {"all": _counts(rows, sets, members)}}
-        for dim, cats in (("pipeline", PIPELINE), ("recovery", RECOVERY), ("image", IMAGE)):
-            values = list(cats) + sorted({rows[i][dim] for i in members} - set(cats), key=str)
-            table[group][dim] = {str(v): _counts(rows, sets, [i for i in members if rows[i][dim] == v])
-                                 for v in values if any(rows[i][dim] == v for i in members)}
-    return table
-
-
-def plot(output, name, rows, pred, truth):
+def plot(output, name, rows, prediction):
+    """Predicted against measured after eC, colored by Recovery."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    from matplotlib.lines import Line2D
-    masks = np.asarray([r["mask"] for r in rows])
-    observed = truth["o"].astype(bool)
-    after = np.asarray([r["after"] for r in rows], float)
-    ref = np.asarray([r["reference"] for r in rows], float)
-    pb, pa = pred["before"], pred["after"]
-    d = np.where(observed, truth["d"], np.nan)           # observed labels only, as in the multitask diagonals
-    panels = [("before: $d_{\\rm amp}$", d[:, 0], pb[:, 0]), ("before: $d_{\\rm phase}$", d[:, 1], pb[:, 1]),
-              ("before: $d_{\\rm noise}$", d[:, 2], pb[:, 2]), ("before: $e_C$", truth["y_all"], pb[:, 3]),
-              ("after: gain damage\n$e_C$ − reference vs $d_{\\rm amp}+d_{\\rm phase}$", after - ref, pa[:, 0] + pa[:, 1]),
-              ("after: $e_C$", after, pa[:, 3])]
-    fig, axes = plt.subplots(2, 4, figsize=(11.6, 6.2))
-    for ax, (title, x, y) in zip(axes.flat, panels):
-        keep = np.isfinite(x) & np.isfinite(y)
-        for m in range(8):
-            sel = keep & (masks == m)
-            if sel.any():
-                ax.scatter(x[sel], y[sel], s=7, alpha=.45, c=mt.MASK_COLORS[m], marker=mt.MASK_MARKERS[m], linewidths=0)
-        if keep.any():
-            lo, hi = float(min(x[keep].min(), y[keep].min())), float(max(x[keep].max(), y[keep].max()))
-            pad = .04 * (hi - lo or 1.)
-            ax.plot([lo - pad, hi + pad], [lo - pad, hi + pad], color="#444", lw=.8)
-            ax.set_xlim(lo - pad, hi + pad); ax.set_ylim(lo - pad, hi + pad)
-        ax.set_title(title, fontsize=10); ax.grid(alpha=.2); ax.tick_params(labelsize=7)
-        ax.set_xlabel("true", fontsize=8); ax.set_ylabel("predicted", fontsize=8)
-    for ax in axes.flat[len(panels):]:
-        ax.axis("off")
-    handles = [Line2D([], [], ls="", marker=mt.MASK_MARKERS[m], color=mt.MASK_COLORS[m], markersize=7,
-                      label=mt.MASK_LABELS[m]) for m in range(8)]
-    axes.flat[-1].legend(handles=handles, loc="center", frameon=False, title="Injected corruption types", fontsize=8)
+    from scripts.vla_pipeline_qa_compare import COLORS, NAMES
+    after = np.asarray([np.nan if r["after"] is None else r["after"] for r in rows], float)
+    rec = np.asarray([r["recovery"] for r in rows])
+    keep = np.isfinite(after) & np.isfinite(prediction)
+    fig, ax = plt.subplots(figsize=(5.2, 4.8))
+    for k in RECOVERY:
+        sel = keep & (rec == k)
+        if sel.any():
+            ax.scatter(after[sel], prediction[sel], s=8, alpha=.5, c=COLORS[k], linewidths=0,
+                       label=f"{NAMES[k]} ({sel.sum()})")
+    if keep.any():
+        lo = float(min(after[keep].min(), prediction[keep].min()))
+        hi = float(max(after[keep].max(), prediction[keep].max()))
+        ax.plot([lo, hi], [lo, hi], color="#444", lw=.8)
+    ax.set_xlabel("measured eC after the recipe"); ax.set_ylabel("predicted eC (after features)")
+    ax.set_title(name, fontsize=10); ax.grid(alpha=.2); ax.legend(fontsize=8, title="Recovery", title_fontsize=8)
     fig.tight_layout()
-    path = output / "report_assets" / f"diagonal_{name}.png"
+    path = output / "report_assets" / f"after_eC_{name}.png"
     path.parent.mkdir(exist_ok=True)
     fig.savefig(path, dpi=140); plt.close(fig)
     return f"report_assets/{path.name}"
@@ -281,129 +213,61 @@ def fmt(v, d=3):
 
 
 def write_html(output, summary, plots):
-    from scripts.vla_pipeline_qa_compare import COLORS, name as cat_name
+    from scripts.vla_pipeline_qa_compare import COLORS, NAMES
     e = html.escape
-    tol = summary["tolerance"]
-    parts = ["<!doctype html><meta charset=utf-8><title>Multitask models on pipeline QA</title><style>body{font:15px "
-             "system-ui;max-width:1500px;margin:auto;padding:1.5rem;color:#1b2932}table{border-collapse:collapse;margin:.4rem "
-             "0 1.4rem}th,td{border:1px solid #ccd;padding:.3rem .5rem;text-align:right}th{background:#f1f4f6;text-align:"
-             "center}td:first-child{text-align:left}.scroll{overflow-x:auto}img{max-width:100%}.note{color:#4a5a63}"
-             ".badge{padding:1px 6px;border-radius:3px;font-size:12px;color:#fff;white-space:nowrap}</style>",
-             "<h1>Multitask models on pipeline-processed cases</h1>",
-             f"<p>Model run: <code>{e(summary['model'])}</code> ({e(summary['feature_view'])}); models "
+    name = lambda k: NAMES.get(k, k)
+    parts = ["<!doctype html><meta charset=utf-8><title>Models on pipeline QA</title><style>body{font:15px system-ui;"
+             "max-width:1300px;margin:auto;padding:1.5rem;color:#1b2932}table{border-collapse:collapse;margin:.4rem 0 1.2rem}"
+             "th,td{border:1px solid #ccd;padding:.3rem .5rem;text-align:right}th{background:#f1f4f6;text-align:center}"
+             "td.l{text-align:left}.scroll{overflow-x:auto}img{max-width:100%}.note{color:#4a5a63}.badge{padding:1px 6px;"
+             "border-radius:3px;font-size:12px;color:#fff;white-space:nowrap}</style>",
+             "<h1>Frozen models on pipeline-processed cases: final eC regression</h1>",
+             f"<p>Model run: <code>{e(summary['model'])}</code> ({e(str(summary['feature_view']))}); models "
              f"{', '.join(summary['models'])}. QA runs: {', '.join(e(Path(r).name) for r in summary['runs'])}. "
-             f"{summary['evaluated']} of {summary['cases']} case rows have stored features (the rest are pending, failed "
-             "or unavailable). No CASA was run; features were computed by the QA evaluation.</p>",
-             "<ul class=note><li><b>Before</b>: the archived corrupted case, the models' usual task.</li>"
-             "<li><b>After</b>: the evaluation image after the recipe. Per-type truth is unknown there; scored are eC "
-             "after, remaining gain damage (eC after − reference eC) against predicted d<sub>amp</sub>+d<sub>phase</sub> "
-             "(per-type damages need not add up), noise presence (unchanged by self-calibration) and whether gain damage "
-             f"remains (eC after &gt; reference + {tol}).</li>"
-             "<li>The QA cases come from the split they were planned on; if that is the validation split, it also "
-             "selected the models' settings, so these are not held-out numbers.</li></ul>"]
+             f"Labels: {e(summary['v5_version'])}.</p>",
+             "<ul class=note><li><b>Target</b>: measured total eC after the recipe. <b>Prediction</b>: the model's "
+             "total-eC output on the after-recipe image features. No per-kind sums, before eC, injected class or "
+             "remaining gain damage are scored; the initial error type is context only.</li>"
+             "<li><b>R²</b> = 1 − Σ(pred − after)² / Σ(after − mean)², <b>RMSE</b> = √mean((pred − after)²), both from "
+             "the pooled pairs of each row (never averaged over rows); R² is — for fewer than two pairs or a constant "
+             "target; negative values are kept.</li>"
+             "<li><b>Pairs</b>: finite prediction/target pairs (coverage, not a score); <i>reused</i> = pairs whose after "
+             "features are the archived features because the QA run verified an unchanged input. Missing pairs are "
+             "listed with their reason.</li>"
+             f"<li>{summary['evaluated']} of {summary['cases']} case rows have after features. The QA cases come from the "
+             "split they were planned on; if that is the validation split, it also selected the models' settings, so "
+             "these are not held-out numbers.</li></ul>"]
 
-    def table(head, body):
-        return (f"<div class=scroll><table><tr>{''.join(f'<th>{h}</th>' for h in head)}</tr>"
-                + "".join(f"<tr>{''.join(f'<td>{c}</td>' for c in row)}</tr>" for row in body) + "</table></div>")
+    def badge(k):
+        color = COLORS.get(k)
+        return f"<span class=badge style='background:{color}'>{e(name(k))}</span>" if color else e(name(k))
 
-    # 1. Before: same metrics as the multitask report
-    parts.append("<h2>1. Before the recipe: multitask metrics</h2>")
-    head = ["Model", "e<sub>C</sub> RMSE", "e<sub>C</sub> R²"] + [
-        f"d<sub>{k}</sub> {m}" for k in mt.KINDS for m in ("RMSE", "R²", "RMSE active", "R² active", "RMSE absent")]
-    body = []
-    for n in summary["models"]:
-        m = summary["metrics"][n]["before_multitask"]
-        row = [e(n), fmt(m["y_all"]["rmse"], 4), fmt(m["y_all"]["r2"])]
-        for k in mt.KINDS:
-            mk = m[k]
-            row += [fmt(mk["damage_rmse"], 4), fmt(mk["damage_r2"]), fmt(mk["damage_active"]["rmse"], 4),
-                    fmt(mk["damage_active"].get("r2")), fmt(mk["damage_absent"]["rmse"], 4)]
-        body.append(row)
-    parts.append(table(head, body))
-    head = ["Model"] + [f"b<sub>{k}</sub> {m}" for k in mt.KINDS for m in ("precision", "recall", "F1", "AUROC", "AUPRC")]
-    body = []
-    for n in summary["models"]:
-        m = summary["metrics"][n]["before_multitask"]
-        row = [e(n)]
-        for k in mt.KINDS:
-            c = mt.classification_scores(m[k], summary["evaluated"])
-            row += [fmt(c[x]) for x in ("precision", "recall", "f1", "auroc", "auprc")]
-        body.append(row)
-    parts.append("<p>Presence classification (macro scores at 0.5, as in the multitask report):</p>" + table(head, body))
+    def table(first, body):
+        head = ([first] if first else []) + ["Outcome", "Cases", "Pairs (reused)", "after eC R²", "after eC RMSE",
+                                             "Missing pairs"]
+        out = [f"<div class=scroll><table><tr>{''.join(f'<th>{h}</th>' for h in head)}</tr>"]
+        for group, outcomes in body:
+            for n, (k, s) in enumerate(outcomes):
+                miss = "; ".join(f"{v} {e(why)}" for why, v in s["missing"].items())
+                lead = (f"<td class=l rowspan={len(outcomes)}><b>{e(name(group))}</b></td>" if first and n == 0 else "")
+                out.append(f"<tr>{lead}<td class=l>{'<b>all</b>' if k == 'all' else badge(k)}</td><td>{s['total']}</td>"
+                           f"<td>{s['pairs']} ({s['reused_pairs']})</td><td>{fmt(s['r2'])}</td>"
+                           f"<td>{fmt(s['rmse'], 4)}</td><td class=l><small>{miss}</small></td></tr>")
+        return "".join(out) + "</table></div>"
 
-    # 2. After
-    parts.append("<h2>2. After the recipe</h2><p>Regression (before shown for the same quantities):</p>")
-    head = ["Model", "when", "e<sub>C</sub> RMSE", "e<sub>C</sub> R²", "gain damage RMSE", "gain damage R²",
-            "gain damage R² (amp/phase injected)", "noise presence F1", "noise presence AUROC"]
-    body = []
-    for n in summary["models"]:
-        for when in ("before", "after"):
-            m = summary["metrics"][n][when]
-            gi = m["gain_damage_injected"] or {}
-            body.append([e(n), when, fmt(m["eC"]["rmse"], 4), fmt(m["eC"]["r2"]), fmt(m["gain_damage"]["rmse"], 4),
-                         fmt(m["gain_damage"]["r2"]), fmt(gi.get("r2")), fmt(m["noise_presence"]["f1"]),
-                         fmt(m["noise_presence"]["auroc"])])
-    parts.append(table(head, body))
-    parts.append(f"<p><b>Does gain damage remain?</b> Truth: eC &gt; reference + {tol}. Recall = share of those cases "
-                 "flagged; false alarm = share of fine cases flagged; macro scores as above. Baselines use no model.</p>")
-    head = ["Model", "when", "detector", "positives / rows", "flagged", "recall", "false alarm", "macro F1", "AUROC", "AUPRC"]
-    body = []
-    for n in summary["models"]:
-        for when in ("before", "after"):
-            for det, c in summary["metrics"][n][when]["remains"].items():
-                if det.startswith("baseline") and n != summary["models"][0]:
-                    continue
-                body.append([e(n if not det.startswith("baseline") else "—"), when, e(det),
-                             f"{c['positives']} / {c['rows']}", c["flagged"], fmt(c["recall_yes"]),
-                             fmt(c["false_alarm"]), fmt(c["f1"]), fmt(c["auroc"]), fmt(c["auprc"])])
-    parts.append(table(head, body))
-
-    # Plots
-    parts.append("<h2>Predicted against true</h2><p>Top row before (archived labels), bottom row after the recipe. "
-                 "Colors/markers: injected corruption types.</p>")
-    for n in summary["models"]:
-        parts.append(f"<h3>{e(n)}</h3><img src='{plots[n]}' alt='{e(n)} predicted against true'>")
-
-    # 3. Category x predicted set
-    from scripts.vla_pipeline_qa_compare import DIMENSIONS, EXPECTATION_NAMES
-    sets_head = list(SETS[m] for m in SET_ORDER)
-    head = ["Expectation group", "Dimension", "Outcome", "Total", "Above boundary (after)", "Gain flagged"] + sets_head
-    parts.append("<h2>3. Pipeline outcomes against the presence classifier (v4)</h2><p>Per configuration and model. "
-                 "Rows: expectation group (fixed before processing), then each independent outcome dimension (Pipeline, "
-                 "Recovery, Image) split into its categories; each dimension partitions the group on its own. Columns "
-                 "after <i>Total</i> count the corruption types the classifier assigns (p ≥ 0.5) to the image after the "
-                 "recipe; <i>clean</i> = none. <i>Gain flagged</i> = amp or phase assigned; <i>Above boundary</i> = eC "
-                 "after still above reference + tolerance. If the models see whether the pipeline worked, gain flags "
-                 "should concentrate where Recovery is not improved and eC stays above the boundary. The before table "
-                 "is the same classifier on the archived corrupted image.</p>")
-    for config, per_model in summary["crosstab_v4"].items():
-        parts.append(f"<h3>{e(config)}</h3>")
-        for n, tables in per_model.items():
-            for when in ("after", "before"):
-                body = []
-                for group, dims in tables[when].items():
-                    for dim, outcomes in dims.items():
-                        for k, t in outcomes.items():
-                            color = DIMENSIONS.get(dim, ((), {}))[1].get(k)
-                            badge = (f"<span class=badge style='background:{color}'>{e(k)}</span>" if color else e(k))
-                            body.append([e(EXPECTATION_NAMES[group]) if dim == "all" else "", "" if dim == "all" else dim,
-                                         "<b>all</b>" if dim == "all" else badge, t["total"], t["above_after"],
-                                         t["gain_flagged"]] + [t["sets"][x] or "" for x in sets_head])
-                parts.append(f"<p><b>{e(n)}</b>, classifier on the {when} image</p>" + table(head, body))
-    parts.append("<details><summary><b>Legacy v3 My Criteria</b> against the presence classifier</summary>")
-    for config, per_model in summary["crosstab"].items():
-        parts.append(f"<h3>{e(config)}</h3>")
-        for n, tables in per_model.items():
-            for when in ("after", "before"):
-                head3 = ["Category", "Total", "Above boundary (after)", "Gain flagged"] + sets_head
-                body = []
-                for k, t in tables[when].items():
-                    badge = (f"<span class=badge style='background:{COLORS[k]}'>{e(cat_name(k))}</span>" if k in COLORS
-                             else e(cat_name(k)))
-                    body.append([badge, t["total"], t["above_after"], t["gain_flagged"]]
-                                + [t["sets"][x] or "" for x in sets_head])
-                parts.append(f"<p><b>{e(n)}</b>, classifier on the {when} image</p>" + table(head3, body))
-    parts.append("</details>")
+    for config, per_model in summary["tables"].items():
+        parts.append(f"<h2>{e(config)}</h2>")
+        for model, sections in per_model.items():
+            parts.append(f"<h3>{e(model)}</h3>")
+            for i, (key, title, _) in enumerate(SECTIONS, 1):
+                t = sections[key]
+                parts.append(f"<h4>Section {i}, by {title}</h4><p>Table 1. All cases</p>" + table("", t["table1"])
+                             + "<p>Table 2. By initial group (Partial success applies only to Improvement expected)</p>"
+                             + table("Group", t["table2"]) + "<p>Table 3. No improvement expected, by subgroup</p>"
+                             + table("Subgroup", t["table3"]))
+    parts.append("<h2>Predicted against measured after eC</h2>")
+    for n, path in plots.items():
+        parts.append(f"<h3>{e(n)}</h3><img src='{path}' alt='{e(n)} predicted against measured after eC'>")
     (output / "report.html").write_text("".join(parts))
 
 
@@ -413,47 +277,31 @@ def main():
     ap.add_argument("--model", type=Path, required=True, help="ml.multitask output folder (results.json + models)")
     ap.add_argument("--models", nargs="+", default=list(DEFAULT_MODELS))
     ap.add_argument("--output", type=Path, required=True)
-    ap.add_argument("--epsilon-rms", type=float, default=EPSILON_RMS, help="v4 Image RMS tolerance (PROVISIONAL)")
-    ap.add_argument("--epsilon-snr", type=float, default=EPSILON_SNR, help="v4 Image SNR tolerance (PROVISIONAL)")
     a = ap.parse_args()
     summary_model = json.loads((a.model / "results.json").read_text())
     columns = feature_columns(summary_model)
     a.output.mkdir(parents=True, exist_ok=True)
-    all_rows, tolerance = collect(a.runs, a.output / "image_metrics", a.epsilon_rms, a.epsilon_snr)
-    rows = [r for r in all_rows if r["X_after"] is not None and r["after"] is not None and r["boundary"] is not None]
-    if not rows:
-        raise SystemExit("No QA case has stored before/after features")
-    xb, xa = matrix(rows, "X_before", columns), matrix(rows, "X_after", columns)
-    preds = {"before": predict(a.model, a.models, xb), "after": predict(a.model, a.models, xa)}
-    a.output.mkdir(parents=True, exist_ok=True)
-    labels = dataset_labels(a.runs)
-    truth = before_truth(rows, labels)
-    metrics, plots = {}, {}
-    for n in a.models:
-        p = dict(before=preds["before"][n], after=preds["after"][n])
-        metrics[n] = dict(before_multitask=mt.task_metrics(p["before"], truth),
-                          **after_scores(rows, p, xa, list(columns), tolerance))
-        plots[n] = plot(a.output, n, rows, p, truth)
-    configs = sorted({r["config"] for r in rows})
-    crosstabs, crosstabs_v4 = {}, {}
-    for config in configs:
-        idx = [i for i, r in enumerate(rows) if r["config"] == config]
+    rows = collect(a.runs)
+    if not any(r["X"] is not None for r in rows):
+        raise SystemExit("No QA case has stored after features")
+    preds = predict(a.model, a.models, matrix(rows, columns))
+    tables = {}
+    for config in dict.fromkeys((r["run_id"], r["config"]) for r in rows):     # absolute run path: never pooled
+        idx = [i for i, r in enumerate(rows) if (r["run_id"], r["config"]) == config]
         sub = [rows[i] for i in idx]
-        crosstabs[config] = {n: {when: crosstab(sub, preds[when][n][idx, 4:7]) for when in ("after", "before")}
-                             for n in a.models}
-        crosstabs_v4[config] = {n: {when: crosstab_v4(sub, preds[when][n][idx, 4:7]) for when in ("after", "before")}
-                                for n in a.models}
-    np.savez_compressed(a.output / "predictions.npz", case=[r["case"] for r in rows], recipe=[r["recipe"] for r in rows],
-                        run=[r["run"] for r in rows], category=[r["category"] for r in rows],
-                        expectation=[r["expectation"] for r in rows], pipeline=[str(r["pipeline"]) for r in rows],
-                        recovery=[str(r["recovery"]) for r in rows], image=[str(r["image"]) for r in rows],
-                        **{f"{when}_{n}": preds[when][n] for when in preds for n in a.models})
+        tables[f"{config[1]} ({config[0]})"] = {
+            n: {key: section(sub, preds[n][idx], key, cats) for key, _, cats in SECTIONS} for n in a.models}
+    plots = {n: plot(a.output, n, rows, preds[n]) for n in a.models}
+    np.savez_compressed(a.output / "predictions.npz", run=[r["run_id"] for r in rows], recipe=[r["recipe"] for r in rows],
+                        case=[r["case"] for r in rows], group=[r["group"] for r in rows],
+                        subgroup=[str(r["subgroup"]) for r in rows], result=[r["result"] for r in rows],
+                        recovery=[r["recovery"] for r in rows], after_source=[str(r["after_source"]) for r in rows],
+                        after=np.asarray([np.nan if r["after"] is None else r["after"] for r in rows], float),
+                        **{f"pred_eC_{n}": preds[n] for n in a.models})
     summary = dict(model=str(a.model.resolve()), feature_view=summary_model.get("feature_view"), models=a.models,
-                   runs=[str(r.resolve()) for r in a.runs], cases=len(all_rows), evaluated=len(rows),
-                   tolerance=tolerance, labels_from_npz=sum(r["label"] in labels for r in rows), outputs=list(mt.outputs(mt.has_dirty(np.asarray(
-                       summary_model["selected"][a.models[0]]["scale"])))), metrics=metrics, crosstab=crosstabs,
-                   crosstab_v4=crosstabs_v4, v4_version=V4_VERSION,
-                   epsilon_rms=a.epsilon_rms, epsilon_snr=a.epsilon_snr)
+                   runs=[str(r.resolve()) for r in a.runs], cases=len(rows),
+                   evaluated=sum(r["X"] is not None for r in rows), v5_version=V5_VERSION, target="measured eC after",
+                   prediction="model eC output on after features", tables=tables)
     atomic_write_json(a.output / "results.json", summary)
     write_html(a.output, summary, plots)
     print("REPORT", (a.output / "report.html").resolve())

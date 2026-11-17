@@ -1,48 +1,59 @@
-"""Compare several VLA pipeline QA runs (one experiment/variant each) in one report.
+"""Report of one or several VLA pipeline QA runs (one experiment/variant each), v5 evaluation.
 
-Each run of scripts/vla_pipeline_qa.py holds one experiment (A or B) with one set of self-calibration
-options (image size, masking), and both flagging recipes. This reads the per-case results of several such
-runs and writes (design doc, "Requested report redesign and My Criteria"):
+Each run of scripts/vla_pipeline_qa.py holds one experiment (A or B) with one set of self-calibration options (image
+size, masking) and its flagging recipes. This reads the retained per-case results, labels every case with the v5
+evaluation (design doc, "Requested v5 evaluation setup", 2026-11-16) and writes:
 
-  1. one aggregate row per run configuration and flagging mode: coverage, a My Criteria category-count bar
-     chart on a shared scale, and measured recipe runtime;
-  2. the full per-case table (every planned case, pending ones included) with Corruption (per-kind removal damage,
-     total and solvable eC), Pipeline action, My Criteria, eC before/after, CLEAN images before and after the
-     recipe on one shared color scale per case, matched reference, damage reduction/remaining excess, runtime and
-     Description.
+  Table 0  glossary: one phrase per dimension/category, thresholds and the reference definition;
+  then per run and recipe configuration (never pooled across runs):
+  Table 1  one ungrouped row: Config (coverage, runtime) | Pipeline Result | Recovery | Image | Run;
+  Table 2  the same columns for Improvement expected / No improvement expected (+ exception/unavailable accounting);
+  Table 3  the same columns for the No improvement expected subgroups (Uncorrupted, Noise only, Cancelling, Small);
+  Cases    filters and one row per planned case and recipe (pending ones included).
 
-Retained per-case evidence is written to descriptions/, the image thumbnails to images/ (rendered from the FITS
-the eC evaluation used; existing PNGs are reused). Run folders are only read.
+Every bar selects exactly its own cases (run, configuration, group/subgroup, dimension, category, blocked reason).
+Retained per-case evidence (all raw metrics, thresholds, reasons, version, legacy v3 labels as history) is written to
+descriptions/, image thumbnails to images/ (rendered from the FITS the eC evaluation used; existing PNGs are reused).
+Restored-image metrics are cached in image_metrics/ without labels. Run folders are only read; nothing is executed.
 
   bin/run ml scripts/vla_pipeline_qa_compare.py --output runs/vla-pipeline-qa-compare RUN [RUN ...]
 """
 from __future__ import annotations
 
 import argparse
+import hashlib
 import html as htmllib
 import json
+from collections import Counter
 from pathlib import Path
 
 import numpy as np
 
-from scripts.vla_pipeline_qa import (ACCOUNTING, CATEGORIES, CRITERIA_VERSION, EPSILON, EPSILON_RMS, EPSILON_SNR,
-                                     EXPECTATIONS, IMAGE, IMAGE_METRIC_VERSION, PIPELINE, RECOVERY, TOLERANCE,
-                                     V4_VERSION, describe, expectation, gain_mask, image_pair, matched_reference,
-                                     measured_recovery, my_criteria, pipeline_outcome, safe, write_json)
+from scripts.vla_pipeline_qa import (ACCOUNTING_STATES, BLOCKED_REASONS, CRITERIA_VERSION, EPSILON_RMS, EPSILON_SNR,
+                                     EXCEPTION, GROUPS, IMAGE, IMAGE_METRIC_VERSION, RECOVERY, RESULTS, SUBGROUPS,
+                                     TOL_CHANGE, TOL_REFERENCE, V5_VERSION, check_tolerance, describe, gain_mask,
+                                     image_label, image_measure, matched_reference, my_criteria, safe, v5_labels,
+                                     write_json)
 
 CORRUPTIONS = {0: "control", 1: "amp", 2: "phase", 4: "noise", 3: "amp+phase", 5: "amp+noise", 6: "phase+noise",
                7: "amp+phase+noise"}
-COLORS = dict(preserved="#009E73", solved="#0072B2", improved="#56B4E9", degraded="#D55E00",
-              blocked="#E69F00", rejected="#CC79A7", unchanged="#777777")
-NAMES = {}
+TEAL, BLUE, VERMILION, GRAY, PURPLE, AMBER, LIGHT = "#009E73", "#0072B2", "#D55E00", "#777777", "#CC79A7", "#E69F00", "#bbbbbb"
+NAMES = dict(success="Success", partial_success="Partial success", failure="Failure", solved="Solved",
+             improved="Improved", similar="Similar", degraded="Degraded", cleaner="Cleaner", worse="Worse", mixed="Mixed",
+             applied="Applied", blocked="Blocked", unavailable="unavailable", error="error", unknown="unknown",
+             pending="pending", improvement_expected="Improvement expected",
+             no_improvement_expected="No improvement expected", exception="Exception: gain-only negative D",
+             uncorrupted="Uncorrupted", noise_only="Noise only", cancelling="Cancelling Corruptions", small="Small",
+             low_initial_snr="Low Initial SNR", solution_lowers_snr="Solution Lowers SNR", empty_model="Empty Model/Mask",
+             other="Other", reason_unknown="Reason unknown")
+COLORS = dict(success=TEAL, partial_success=BLUE, failure=VERMILION, solved=TEAL, improved=BLUE, similar=GRAY,
+              degraded=VERMILION, cleaner=BLUE, worse=VERMILION, mixed=PURPLE, applied=BLUE, blocked=AMBER)
+# Report dimensions in column order: key in the case rows / filters, heading, scientific categories
+DIMENSIONS = (("result", "Pipeline Result", RESULTS), ("recovery", "Recovery", RECOVERY), ("image", "Image", IMAGE),
+              ("application", "Run", ("applied", "blocked")))
+NAMED_REASONS = ("low_initial_snr", "solution_lowers_snr")     # always shown; other reasons only when present
+FILTER_KEYS = ("run", "config", "group", "subgroup", "result", "recovery", "image", "application", "reason")
 name = lambda k: NAMES.get(k, k)
-# v4 dimensions: categories, colors (design doc legends) and accounting states shown as "other"
-BLUE, AMBER, PURPLE, VERMILION, GRAY = "#0072B2", "#E69F00", "#CC79A7", "#D55E00", "#777777"
-DIMENSIONS = {"pipeline": (PIPELINE, dict(applied=BLUE, blocked=AMBER, rejected=PURPLE, error=VERMILION)),
-              "recovery": (RECOVERY, dict(improved=BLUE, similar=GRAY, degraded=VERMILION)),
-              "image": (IMAGE, dict(cleaner=BLUE, similar=GRAY, worse=VERMILION, mixed=PURPLE))}
-EXPECTATION_NAMES = dict(no_improvement_expected="No improvement expected", improvement_expected="Improvement expected",
-                         expectation_unavailable="Expectation unavailable")
 
 
 def configuration(p, recipe):
@@ -84,7 +95,8 @@ def superseded(result):
     return not (isinstance(fix, dict) and fix.get("applied"))
 
 
-def load(run):
+def load(run, tol_change=TOL_CHANGE, tol_ref=TOL_REFERENCE):
+    """One row per recipe of the run, holding every planned case with its v5 labels (Image is added later)."""
     run = run.resolve()
     p = json.loads((run / "plan.json").read_text())
     source_run = Path(p["source_run"])
@@ -114,112 +126,82 @@ def load(run):
             cid = u["case"]
             splan = plan_of[cid]
             params = next(c for c in splan["cases"] if c["id"] == cid)
-            dmg = damage_of.get(cid, {})
+            mask = gain_mask(params)
             ref = matched_reference(splan, cid, eC_of)
-            item = dict(case=cid, label=next(r["id"] for r in splan["rows"] if r["case"] == cid),
-                        corruption=CORRUPTIONS[gain_mask(params)], mask=gain_mask(params), action="–",
-                        d=dmg.get("d"), eC_total=dmg.get("eC", eC_of(cid)),
-                        clean_before=clean_image(source_run, cid), masks=masks_of.get(splan["source"]),
-                        id=f"{run.name}|{cid}|{recipe}")
-            # Expectation: original case and matched reference only (never the recipe outcome)
-            item.update(expectation(gain_mask(params), eC_of(cid), ref.get("eC")))
-            if ref.get("status") == "unavailable":     # e.g. invalid matched counterpart: keep its reason
-                item.update(expectation="expectation_unavailable", D=None, expectation_reason=ref.get("reason"))
             path = run / "results" / f"{cid}__{safe(recipe)}.json"
-            if not path.exists():
-                missing = "error" if cid in units else "pending"
-                item.update(category=missing, pipeline=missing, recovery="unavailable" if cid in units else "pending",
-                            image="unavailable" if cid in units else "pending",
+            result = json.loads(path.read_text()) if path.exists() else None
+            labels = v5_labels(mask, eC_of(cid), ref.get("eC"), result, cid in units, tol_change, tol_ref)
+            if labels["group"] == "unavailable" and ref.get("status") == "unavailable":
+                labels["group_reason"] = ref.get("reason")
+            item = dict(case=cid, label=next(r["id"] for r in splan["rows"] if r["case"] == cid),
+                        corruption=CORRUPTIONS[mask], mask=mask, d=damage_of.get(cid, {}).get("d"),
+                        eC_archived=eC_of(cid), reference_id=ref.get("id"), reference_reason=ref.get("reason"),
+                        clean_before=clean_image(source_run, cid), masks=masks_of.get(splan["source"]),
+                        id=f"{run}|{cid}|{recipe}", **labels)
+            if result is None:
+                item.update(action="–", legacy=dict(category=labels["application"]),
                             description="No result record although the case finished." if cid in units else
                             "Not run yet (no result record).")
             else:
-                result = json.loads(path.read_text())
-                crit = my_criteria(result, gain_mask(params) & 3 != 0, ref)
-                reused = result.get("evaluation", {}).get("evaluation_reused")
                 ev = result.get("evaluation", {})
-                item.update(pipeline=pipeline_outcome(crit["action"]),
-                            # independent of the legacy classifier (and of the reference): measured eC only
-                            recovery=measured_recovery(ev),
-                            eC_before_measured=(ev.get("before") or {}).get("eC") if ev.get("status") == "measured" else None,
-                            eC_after_measured=(ev.get("after") or {}).get("eC") if ev.get("status") == "measured" else None,
+                crit = my_criteria(result, mask & 3 != 0, ref)          # legacy v3: historical metadata only
+                reused = bool(ev.get("evaluation_reused"))
+                item.update(action=crit["action"], legacy=crit, seconds=result["recipe_record"].get("seconds"),
+                            evaluation_reused=reused,
+                            clean_after=item["clean_before"] if reused else clean_image(run, f"{cid}/{safe(recipe)}"),
                             flux_before=(ev.get("before") or {}).get("flux_error"),
-                            flux_after=(ev.get("after") or {}).get("flux_error"))
-                item.update({k: v for k, v in crit.items() if k != "reason"}, criteria_reason=crit.get("reason"),
-                            reference_id=ref.get("id"), seconds=result["recipe_record"].get("seconds"),
-                            evaluation_reused=bool(reused), clean_after=(
-                                item["clean_before"] if reused else clean_image(run, f"{cid}/{safe(recipe)}")),
-                            superseded=superseded(result), description=describe(result, crit),
+                            flux_after=(ev.get("after") or {}).get("flux_error"),
+                            superseded=superseded(result), description=describe(result, labels),
                             notes=result["recipe_record"].get("pipeline_notes", []),
                             evidence=dict(recipe_record=result["recipe_record"], evaluation={
-                                k: v for k, v in result["evaluation"].items() if k not in ("before", "after")},
-                                reference=ref))
+                                k: v for k, v in ev.items() if k not in ("before", "after")}, reference=ref))
             cases.append(item)
-        rows.append(dict(run=run.name, config=label, key=key, recipe=recipe, cases=cases, calls=calls,
-                         unit_times=unit_times,
-                         superseded=any(c.get("superseded") for c in cases)))
+        rows.append(dict(run=run.name, run_id=str(run), tag=run.name, config=label, key=key, recipe=recipe, cases=cases, calls=calls,
+                         unit_times=unit_times, superseded=any(c.get("superseded") for c in cases)))
     return rows
 
 
-V4_FIELDS = ("expectation", "expectation_reason", "D", "near_zero", "pipeline", "recovery", "eC_before_measured",
-             "eC_after_measured", "image", "image_reason", "epsilon_rms", "epsilon_snr",
-             "rms_before", "rms_after", "mean_before", "mean_after", "peak_before", "peak_after", "snr_before",
-             "snr_after", "r_rms", "r_snr", "off_pixels", "source_pixels", "off_beams", "units", "flux_before",
-             "flux_after", "image_metric_version")
+V5_FIELDS = ("group", "subgroup", "group_reason", "D", "reference", "reference_id", "reference_reason", "eC_archived",
+             "eC_before", "eC_after", "change", "remaining", "recovery", "recovery_reason", "result", "application",
+             "blocked_reason", "stop_reasons", "image", "image_reason", "epsilon_rms", "epsilon_snr", "rms_before",
+             "rms_after", "mean_before", "mean_after", "peak_before", "peak_after", "snr_before", "snr_after", "r_rms",
+             "r_snr", "off_pixels", "source_pixels", "off_beams", "units", "flux_before", "flux_after",
+             "image_metric_version", "evaluation_reused")
 
 
 def add_image_metrics(rows, cache, eps_rms=EPSILON_RMS, eps_snr=EPSILON_SNR):
-    """v4 Image outcome per case from the retained restored CLEAN FITS (before: archived case, after: evaluation
-    image) and the source's fixed reference masks. Results are cached by product identity and metric version.
+    """Image dimension per case from the retained restored CLEAN FITS (before: archived case, after: evaluation image)
+    and the source's fixed reference masks. Raw metrics are cached by product identity and metric version only; the
+    label is applied at the requested tolerances every time, so changing a tolerance never reuses old categories.
     Before is reused as after only when the QA evaluation established an unchanged input (evaluation_reused)."""
-    import hashlib
     cache.mkdir(parents=True, exist_ok=True)
     masks_cache, done, reused = {}, 0, 0
     for row in rows:
         for c in row["cases"]:
-            if c.get("image") == "pending" or c["category"] in ("pending", "error"):
+            if c["application"] in ("pending", "error"):
+                c.update(image=c["application"], image_reason="no after image")
                 continue
             before, after, masks = c.get("clean_before"), c.get("clean_after"), c.get("masks")
             if not (before and after and masks and Path(masks).exists()):
                 c.update(image="unavailable", image_reason="missing restored CLEAN FITS or reference masks "
                          f"(before={bool(before)}, after={bool(after)}, masks={bool(masks)})")
                 continue
-            ident = [IMAGE_METRIC_VERSION, "strict-meta-v2", eps_rms, eps_snr] + [
+            ident = [IMAGE_METRIC_VERSION, "strict-meta-v2", "raw-v1"] + [
                 (x, Path(x).stat().st_size, Path(x).stat().st_mtime) for x in (before, after, masks)]
             path = cache / (hashlib.sha256(json.dumps(ident).encode()).hexdigest()[:24] + ".json")
             if path.exists():
-                c.update(json.loads(path.read_text()))
+                raw = json.loads(path.read_text())
                 reused += 1
-                continue
-            if masks not in masks_cache:
-                with np.load(masks, allow_pickle=False) as z:
-                    masks_cache[masks] = dict(annulus=np.asarray(z["annulus"], bool), source=np.asarray(z["source"], bool))
-            out = image_pair(before, after, masks_cache[masks], eps_rms, eps_snr)
-            path.write_text(json.dumps(out))
-            c.update(out)
-            done += 1
+            else:
+                if masks not in masks_cache:
+                    with np.load(masks, allow_pickle=False) as z:
+                        masks_cache[masks] = dict(annulus=np.asarray(z["annulus"], bool),
+                                                  source=np.asarray(z["source"], bool))
+                raw = image_measure(before, after, masks_cache[masks])
+                path.write_text(json.dumps(raw))
+                done += 1
+            c.update(image_label(raw, eps_rms, eps_snr))
     print(f"IMAGE METRICS computed {done}, cached {reused}")
-
-
-def summarize_v4(rows):
-    """One summary per (configuration, expectation group): coverage, per-dimension counts and runtime."""
-    out = []
-    for row in rows:
-        for group in EXPECTATIONS:
-            cases = [c for c in row["cases"] if c["expectation"] == group]
-            if not cases:
-                continue
-            counts = {}
-            for dim, (cats, _) in DIMENSIONS.items():
-                counts[dim] = {k: sum(c.get(dim) == k for c in cases) for k in cats}
-                counts[dim]["other"] = len(cases) - sum(counts[dim][k] for k in cats)
-            secs = [c["seconds"] for c in cases if c.get("seconds") is not None]
-            out.append(dict(run=row["run"], config=row["config"], expectation=group, planned=len(cases),
-                            finished=sum(c["category"] != "pending" for c in cases),
-                            image_available=sum(c.get("image") in IMAGE for c in cases), counts=counts,
-                            runtime=dict(timed=len(secs), median_min=float(np.median(secs)) / 60,
-                                         min_min=min(secs) / 60, max_min=max(secs) / 60,
-                                         recipe_hours=sum(secs) / 3600) if secs else dict(timed=0)))
-    return out
 
 
 def elapsed_hours(calls, unit_times):
@@ -239,78 +221,75 @@ def elapsed_hours(calls, unit_times):
     return total / 3600 if calls else None
 
 
-def summarize(row):
-    cases = row["cases"]
-    counts = {k: sum(c["category"] == k for c in cases) for k in CATEGORIES + ACCOUNTING}
+def stats(cases):
+    """Coverage, per-dimension counts (blocked split by reason) and recipe runtime of a set of cases."""
     secs = [c["seconds"] for c in cases if c.get("seconds") is not None]
-    runtime = dict(timed=len(secs), median_min=float(np.median(secs)) / 60, min_min=min(secs) / 60,
-                   max_min=max(secs) / 60, recipe_hours=sum(secs) / 3600) if secs else dict(timed=0)
-    elapsed = elapsed_hours(row["calls"], row.get("unit_times", []))
-    actions = {a: sum(c.get("action") == a for c in cases) for a in
-               ("Applied", "Left unchanged", "Could not start", "Error", "Unknown")}
-    description = "; ".join(f"{n} {label}" for a, label in (
-        ("Could not start", "blocked before correction trials"), ("Applied", "applied corrections"),
-        ("Left unchanged", "retained no correction after trials"), ("Error", "execution errors"),
-        ("Unknown", "unknown decisions")) if (n := actions[a]))
-    initial_known = [c for c in cases if c.get("before") is not None and c.get("boundary") is not None]
-    return dict(run=row["run"], config=row["config"], recipe=row["recipe"], superseded=row["superseded"],
-                planned=len(cases), finished=len(cases) - counts["pending"],
-                classified=sum(counts[k] for k in CATEGORIES), counts=counts, runtime=runtime,
-                description=description, initially_above=sum(c["before"] > c["boundary"] for c in initial_known),
-                initial_known=len(initial_known),
-                elapsed_hours=elapsed,
+    return dict(ids=[c["id"] for c in cases], planned=len(cases),
+                finished=sum(c["application"] != "pending" for c in cases),
+                available=sum(c["recovery"] in RECOVERY for c in cases),
+                image_available=sum(c.get("image") in IMAGE for c in cases),
+                counts={key: dict(Counter(str(c.get(key)) for c in cases)) for key, _, _ in DIMENSIONS},
+                reasons=dict(Counter(c["blocked_reason"] for c in cases if c["application"] == "blocked")),
+                runtime=dict(timed=len(secs), median_min=float(np.median(secs)) / 60, min_min=min(secs) / 60,
+                             max_min=max(secs) / 60, recipe_hours=sum(secs) / 3600) if secs else dict(timed=0))
+
+
+def summarize(row):
+    """Tables 1-3 of one run configuration. Group/subgroup partitions must reconcile with the ungrouped total."""
+    cases = row["cases"]
+    groups = list(GROUPS) + [g for g in (EXCEPTION, "unavailable") if any(c["group"] == g for c in cases)]
+    table2 = {g: stats([c for c in cases if c["group"] == g]) for g in groups}
+    table3 = {s: stats([c for c in cases if c["subgroup"] == s]) for s in SUBGROUPS}
+    if sum(t["planned"] for t in table2.values()) != len(cases):
+        raise ValueError(f"{row['run']} {row['config']}: groups do not reconcile with the total")
+    if sum(t["planned"] for t in table3.values()) != table2["no_improvement_expected"]["planned"]:
+        raise ValueError(f"{row['run']} {row['config']}: subgroups do not reconcile with No improvement expected")
+    for st in [stats(cases)] + list(table2.values()) + list(table3.values()):   # every case in exactly one bar
+        for key, _, _ in DIMENSIONS:
+            if sum(n for _, _, n, _ in entries(key, st)) != st["planned"]:
+                raise ValueError(f"{row['run']} {row['config']}: {key} bars do not cover every case")
+    return dict(run=row["run"], run_id=row["run_id"], config=row["config"], recipe=row["recipe"], superseded=row["superseded"],
+                table1=stats(cases), table2=table2, table3=table3,
+                elapsed_hours=elapsed_hours(row["calls"], row.get("unit_times", [])),
                 parallel=sorted({c["parallel"] for c in row["calls"]}),
                 cpus=sorted({str(c.get("slurm_cpus") or c.get("cpu_count")) for c in row["calls"]}))
 
 
+def entries(key, st, no_partial=False):
+    """(label, filter part, count, color) of every bar of one dimension: all scientific categories (zero included),
+    blocked split by reason (the two named reasons always), then the accounting states that occur."""
+    counts = st["counts"][key]
+    if key == "application":
+        out = [("Applied", dict(application="applied"), counts.get("applied", 0), COLORS["applied"])]
+        out += [(f"Blocked — {name(r)}", dict(application="blocked", reason=r), st["reasons"].get(r, 0), AMBER)
+                for r in BLOCKED_REASONS if r in NAMED_REASONS or st["reasons"].get(r)]
+    else:
+        cats = next(c for k, _, c in DIMENSIONS if k == key)
+        out = [(name(k), {key: k}, counts.get(k, 0), COLORS[k]) for k in cats if not (no_partial and k == "partial_success")]
+    return out + [(name(a), {key: a}, counts[a], LIGHT) for a in ACCOUNTING_STATES if counts.get(a)]
+
+
 def bar(label, n, scale, color, flt):
-    """One clickable count bar; flt is the exact filter state it selects (replaces previous outcome filters)."""
+    """One clickable count bar; flt is the exact filter state it selects (replaces all previous filters)."""
     esc = htmllib.escape
     return (f"<div class=bar tabindex=0 role=button title='{esc(label)}: {n}' data-filter='{esc(json.dumps(flt))}'>"
             f"<span class=lab>{esc(label)}</span><span class=fill style='width:{100 * n / scale:.0f}px;"
             f"background:{color}'></span><span>{n}</span></div>")
 
 
-def bars(counts, scale, run, config):
-    return "".join(bar(name(k), counts[k], scale, COLORS[k], dict(run=run, configuration=config, legacy=k))
-                   for k in CATEGORIES)
-
-
-def v4_bars(dim, counts, scale, run, config, group):
-    """Each bar selects run AND configuration AND expectation group AND this outcome (run: identical labels of
-    different runs stay separate)."""
-    cats, colors = DIMENSIONS[dim]
-    base = dict(run=run, configuration=config, expectation=group)
-    out = [bar(k, counts[k], scale, colors[k], {**base, dim: k}) for k in cats]
-    if counts["other"]:
-        out.append(bar("pending/unavailable", counts["other"], scale, "#bbb", {**base, dim: "other"}))
-    return "".join(out)
-
-
-def v4_badge(dim, k):
-    color = DIMENSIONS[dim][1].get(k)
-    style = f"background:{color};color:#fff" if color else "border:1px dashed #999"
-    return f"<span class=badge style='{style}'>{k}</span>"
-
-
 def badge(k):
     style = f"background:{COLORS[k]};color:#fff" if k in COLORS else "border:1px dashed #999"
-    return f"<span class=badge style='{style}'>{name(k)}</span>"
+    return f"<span class=badge style='{style}'>{htmllib.escape(name(k))}</span>"
 
 
 def corruption_cell(c):
-    """Kind, per-kind removal damage of the injected kinds, total eC and eC_solvable: the gain (amp+phase) damage,
-    eC before − matched reference eC, which a perfect gain solution would remove."""
+    """Kind, per-kind removal damage of the injected kinds and the archived total eC."""
     out = [c["corruption"]]
     d, mask = c.get("d"), c.get("mask", 0)
     if d is not None and mask:
         out.append(" / ".join(f"d_{k} {d[i]:.3f}" for i, k in enumerate(("amp", "phase", "noise")) if mask >> i & 1))
-    total = c.get("eC_total", c.get("before"))
-    line = f"eC={total:.3f}" if total is not None else ""
-    if mask & 3 and c.get("damage") is not None:
-        line += f" (eC_solvable={c['damage']:.3f})"
-    if line:
-        out.append(line)
+    if c.get("eC_archived") is not None:
+        out.append(f"eC={c['eC_archived']:.3f}")
     return "<br>".join(out)
 
 
@@ -324,138 +303,149 @@ def image_cell(c, key):
     return f"<td><a href='{path}'><img src='{path}' loading=lazy width=160></a>{note}</td>"
 
 
-def write_report(output, summaries, rows, runs, filename, v4, eps_rms=EPSILON_RMS, eps_snr=EPSILON_SNR):
+def glossary(eps_rms, eps_snr):
+    """Table 0: one phrase per dimension/category, thresholds and the reference definition."""
+    t, r = TOL_CHANGE, TOL_REFERENCE
+    rows = [
+        ("Quantities", "eC, reference, D, change, remaining",
+         "eC: relative L2 error of the recovered CLEAN model at the evaluation beam against the known truth (0 = perfect). "
+         "Reference: archived eC of the same case with both amplitude and phase injections removed (same source, noise "
+         "realization, noise multiplier and evaluation settings; match validated). D = before − reference (signed joint "
+         "gain damage); change = after − before (positive = worse); remaining = after − reference."),
+        ("Thresholds", f"eC {t} / {r} absolute, image {eps_rms:.0%} / {eps_snr:.0%} relative",
+         f"Recovery change counts only if |change| > {t}; Solved if after ≤ reference + {r}; RMS/SNR change counts only "
+         f"if > {eps_rms:.0%} / {eps_snr:.0%}. A value exactly at a tolerance is Similar / within tolerance. Practical "
+         "tolerances, not significance tests."),
+        ("Group", name("improvement_expected"), f"amplitude/phase injected and D > {r}."),
+        ("Group", name("no_improvement_expected"), "no expected benefit in this benchmark (RMS/SNR may still change):"),
+        ("Subgroup", name("uncorrupted"), "nothing injected."),
+        ("Subgroup", name("noise_only"), "only noise injected, any amount."),
+        ("Subgroup", name("cancelling"), "noise and gains injected, D < 0: removing the gains alone makes recovery worse."),
+        ("Subgroup", name("small"), f"gains injected, 0 ≤ D ≤ {r}."),
+        ("Group", name(EXCEPTION), "gain only with D < 0: unexpected, kept visible pending investigation."),
+        ("Pipeline Result", "Success / Partial success / Failure",
+         "evaluation label, not the pipeline's QA score. Improvement expected: Solved → Success, Improved → Partial "
+         "success, Similar/Degraded → Failure. No improvement expected: Degraded → Failure, otherwise Success."),
+        ("Recovery", name("solved"), f"change < −{t} and remaining ≤ {r}."),
+        ("Recovery", name("improved"), f"change < −{t} and remaining > {r}."),
+        ("Recovery", name("similar"), f"|change| ≤ {t}."),
+        ("Recovery", name("degraded"), f"change > {t}."),
+        ("Image", "RMS, SNR",
+         "restored CLEAN images on fixed regions of the reference geometry: RMS = standard deviation over the off-source "
+         "annulus (Jy/beam), SNR = (peak in the true-source ellipse − annulus mean) / RMS; same units/beam/geometry required."),
+        ("Image", name("cleaner"), "both better, or one better and the other similar."),
+        ("Image", name("similar"), "both similar."),
+        ("Image", name("worse"), "both worse, or one worse and the other similar."),
+        ("Image", name("mixed"), "one better, one worse."),
+        ("Run", name("applied"), "a final gain correction was retained (a later failed trial does not override it)."),
+        ("Run", f"Blocked — {name('low_initial_snr')}", "initial S/N checks prevented correction trials."),
+        ("Run", f"Blocked — {name('solution_lowers_snr')}",
+         "trials failed the S/N checks and no correction remains (incl. a revoked provisional first interval)."),
+        ("Run", f"Blocked — {name('empty_model')} / {name('other')} / {name('reason_unknown')}",
+         "other evidence (e.g. RMS increase only, no valid solutions), shown only when present."),
+        ("Accounting", "unavailable, error, unknown, pending",
+         "missing measurement, failed execution, unknown decision, not run yet: never scientific outcomes."),
+    ]
+    return ("<h2>Table 0. Glossary</h2><div class=scroll><table><tr><th>Dimension</th><th>Category</th><th>Meaning</th></tr>"
+            + "".join(f"<tr><td>{a}</td><td>{htmllib.escape(b)}</td><td>{htmllib.escape(c)}</td></tr>" for a, b, c in rows)
+            + "</table></div>")
+
+
+def write_report(output, summaries, rows, runs, filename, eps_rms=EPSILON_RMS, eps_snr=EPSILON_SNR):
     f = lambda x, d=3: "–" if x is None else f"{x:.{d}f}"
     esc = htmllib.escape
-    scale = max([1] + [s["counts"][k] for s in summaries for k in CATEGORIES])
-    out = ["<!doctype html><meta charset=utf-8><title>VLA pipeline QA comparison</title><style>body{font-family:"
-           "sans-serif;max-width:1600px;margin:2em auto;padding:0 1em}table{border-collapse:collapse;margin:0}.scroll{overflow-x:auto;margin:.6em 0}"
-           "td,th{border:1px solid #ccc;padding:3px 7px;text-align:left;vertical-align:top}th{background:#f3f3f3}"
-           "td.n{text-align:right}tr.old td{color:#999}.bar{display:flex;align-items:center;gap:4px;font-size:12px;"
-           "cursor:pointer;line-height:15px}.bar .lab{width:135px}.fill{display:inline-block;height:11px}"
-           ".badge{padding:1px 6px;border-radius:3px;font-size:12px;white-space:nowrap}.partial{color:#D55E00;"
-           "font-weight:bold}details{font-size:12px}small{color:#555}.grp{cursor:pointer;text-decoration:underline dotted}"
-           ".filters label{margin-right:.6em;white-space:nowrap}</style>",
-           f"<h1>VLA pipeline QA comparison</h1><p>{len(runs)} run(s): {', '.join(esc(r.name) for r in runs)}. "
-           f"Outcomes: {V4_VERSION}; legacy My Criteria: {CRITERIA_VERSION}.</p>",
-           "<h3>v4 outcomes</h3><ul>"
-           "<li><b>Expectation group</b> (fixed before processing, same in every configuration), from the joint gain damage "
-           "D = eC before − matched reference eC: <i>No improvement expected</i> = control, noise only, or gain-containing "
-           "with D ≤ 0; <i>Improvement expected</i> = gain-containing with D &gt; 0 (any size). Not proof of recoverability.</li>"
-           "<li><b>Pipeline</b>: applied (a gain correction was retained), blocked (a prerequisite stopped the trials), "
-           "rejected (trials ran, nothing retained), error.</li>"
-           f"<li><b>Recovery</b> from Δ = eC before − eC after: improved (Δ &gt; {EPSILON}), similar, degraded (Δ &lt; −{EPSILON}). "
-           "ε PROVISIONAL.</li>"
-           "<li><b>Image</b> from the restored CLEAN images on fixed regions of the reference geometry: RMS = standard "
-           "deviation over the off-source annulus (3 beams to 1 beam from the edge), SNR = (peak in the true-source "
-           "ellipse − annulus mean) / RMS. r_RMS = (RMS before − after) / before, r_SNR = (SNR after − before) / before, "
-           f"both positive = better, tolerances {eps_rms} / {eps_snr} (PROVISIONAL, configurable). Cleaner: one better, none "
-           "worse; Worse: one worse, none better; Mixed: one of each; Similar: neither. Cleaner is not proof of correct "
-           "flux or morphology.</li>"
-           "<li>The three outcomes are independent: none overrides another.</li></ul>"
-           "<details><summary><b>Legacy v3 My Criteria</b> (kept for continuity)</summary><ul>"
-           "<li><b>eC</b>: CLEAN recovery error at the common restoring beam (0 = perfect).</li>"
-           "<li><b>Reference eC</b>: what eC should be once the gain errors are solved; archived eC of the same source case with amplitude and phase injections "
-           "removed, keeping the noise seed and multiplier (nominal-noise control for gain-only cases, matched "
-           "noise-only case otherwise).</li>"
-           "<li><b>Quantities</b>: damage (eC_solvable) = before − reference; remaining excess = after − reference; "
-           "change = before − after.</li>"
-           f"<li><b>Boundary</b> = reference + {TOLERANCE} (acceptable remaining gain damage).</li>"
-           f"<li><b>ε = {EPSILON}</b>: meaningful-change tolerance (PROVISIONAL, not yet justified).</li></ul>"
-           "<p>Categories, checked in this order (after errors and missing measurements):</p><ol>"
-           "<li><b>blocked</b>: a prerequisite prevented correction trials, regardless of initial quality.</li>"
-           "<li><b>degraded</b>: change &lt; −ε (even inside the boundary).</li>"
-           "<li><b>preserved</b>: before ≤ boundary and |change| ≤ ε (after a valid processing decision, never an "
-           "empty-model block).</li>"
-           "<li><b>solved</b>: amplitude/phase injected, before &gt; boundary, after ≤ boundary, change &gt; ε, and a "
-           "correction was applied.</li>"
-           "<li><b>improved</b>: change &gt; ε otherwise.</li>"
-           "<li>before &gt; boundary and |change| ≤ ε: <b>rejected</b> if trials ran but no correction was retained, "
-           "<b>unchanged</b> if a correction was applied (unknown action: unavailable).</li></ol>"
-           "<p>Notes:</p><ul>"
-           "<li>Applying calibration earns no success label by itself.</li>"
-           "<li>The reference is a benchmark, not a proven attainable bound: gains act before noise injection, so "
-           "inverting amplitude errors can change the output noise.</li>"
-           "<li>Meeting it does not prove the true antenna gains were recovered.</li>"
-           "<li>Pending, error and unavailable are accounting states, not scientific outcomes.</li></ul></details>"]
+    out = ["<!doctype html><meta charset=utf-8><title>VLA pipeline QA report</title><style>body{font-family:"
+           "sans-serif;max-width:1600px;margin:2em auto;padding:0 1em}table{border-collapse:collapse;margin:0}"
+           ".scroll{overflow-x:auto;margin:.6em 0}td,th{border:1px solid #ccc;padding:3px 7px;text-align:left;"
+           "vertical-align:top}th{background:#f3f3f3}td.n{text-align:right}tr.old td{color:#999}.bar{display:flex;"
+           "align-items:center;gap:4px;font-size:12px;cursor:pointer;line-height:15px}.bar .lab{width:170px}"
+           ".fill{display:inline-block;height:11px}.badge{padding:1px 6px;border-radius:3px;font-size:12px;"
+           "white-space:nowrap}.partial{color:#D55E00;font-weight:bold}details{font-size:12px}small{color:#555}"
+           ".grp{cursor:pointer;text-decoration:underline dotted}.filters label{margin-right:.6em;white-space:nowrap}"
+           "</style>",
+           f"<h1>VLA pipeline QA report</h1><p>{len(runs)} run(s): {', '.join(esc(r.name) for r in runs)}. "
+           f"Labels: {V5_VERSION}. Target self-calibration on simulated residual corruptions, not the full "
+           "calibrator-transfer VLA pipeline. Legacy v3 My Criteria labels are kept only in the exported evidence.</p>",
+           glossary(eps_rms, eps_snr)]
     if any(s["superseded"] for s in summaries):
         out.append("<p><b>Grey rows</b>: B flagging_off without the calonly model-write fix (superseded, reference "
                    "only).</p>")
-    out.append("<h2>Configurations (legacy v3 My Criteria)</h2><p>Legend: " + " ".join(badge(k) for k in CATEGORIES) + ". Bars share one "
-               "count scale; click a bar to list its cases. Runtime: measured wall time of the recipe's own CASA "
-               "process (median, range) and summed recipe-process hours, which is not elapsed run time. Elapsed: "
-               "summed duration of all the run's recorded --execute calls (whole cases: regeneration, both flagging "
-               "recipes, evaluation), shared by both flagging rows; a call killed before recording its end counts until "
-               "its last completed case. Calls of runs executed before 2026-11-12 were only recorded when they finished, "
-               "so their elapsed time can miss killed calls.</p><div class=scroll><table><tr><th>Configuration</th><th>Coverage</th>"
-               "<th>My Criteria</th><th>Runtime</th><th>Description</th></tr>")
+    # one count scale per dimension over all tables
+    scale = {key: max([1] + [n for s in summaries for st in [s["table1"]] for _, _, n, _ in entries(key, st)])
+             for key, _, _ in DIMENSIONS}
+    head = "".join(f"<th>{h}</th>" for _, h, _ in DIMENSIONS)
+
+    def cells(st, base, no_partial=False):
+        return "".join("<td>" + "".join(bar(label, n, scale[key], color, {**base, **part})
+                                        for label, part, n, color in entries(key, st, no_partial)) + "</td>"
+                       for key, _, _ in DIMENSIONS)
+
+    def runtime(st):
+        r = st["runtime"]
+        return (f"{f(r['median_min'], 1)} min (range {f(r['min_min'], 1)}–{f(r['max_min'], 1)}), "
+                f"{f(r['recipe_hours'], 2)} recipe-h, {r['timed']} timed" if r["timed"] else "no timed recipe")
+
+    def cover(st):
+        partial = " <span class=partial>partial</span>" if st["finished"] < st["planned"] else ""
+        return (f"{st['planned']} planned / {st['finished']} finished / {st['available']} eC available / "
+                f"{st['image_available']} image available{partial}")
+
+    def label(text, flt, st):
+        return (f"<b class=grp tabindex=0 role=button data-filter='{esc(json.dumps(flt))}'>{esc(text)}</b><br>"
+                f"<small>{cover(st)}<br>{runtime(st)}</small>")
+
     for s in summaries:
-        c, r = s["counts"], s["runtime"]
-        partial = " <span class=partial>partial</span>" if s["finished"] < s["planned"] else ""
-        cover = (f"{s['finished']}/{s['planned']} finished, {s['classified']} classified{partial}<br><small>pending "
-                 f"{c['pending']} · error {c['error']} · unavailable {c['unavailable']}</small>")
-        runtime = (f"{f(r['median_min'], 1)} min (range {f(r['min_min'], 1)}–{f(r['max_min'], 1)}), "
-                   f"{f(r['recipe_hours'], 2)} recipe-h, {r['timed']} timed" if r["timed"] else "–")
-        runtime += (f"<br><small>elapsed {f(s['elapsed_hours'], 2)} h" if s["elapsed_hours"] is not None
-                    else "<br><small>elapsed not recorded") + (
-            f", parallel {'/'.join(map(str, s['parallel']))}, CPUs {'/'.join(s['cpus'])}"
-            if s["parallel"] else "") + f"; run {esc(s['run'])}</small>"
-        out.append(f"<tr{' class=old' if s['superseded'] else ''}><td>{esc(s['config'])}</td><td>{cover}</td>"
-                   f"<td>{bars(c, scale, s['run'], s['config'])}</td><td>{runtime}</td>"
-                   f"<td>{esc(s['description'])}<br><b>{s['initially_above']}/{s['initial_known']} with known baseline "
-                   "initially exceed the gain-damage boundary.</b></td></tr>")
-    # v4 summary: one section per expectation group, one row per configuration
-    v4scale = {dim: max([1] + [x["counts"][dim][k] for x in v4 for k in x["counts"][dim]]) for dim in DIMENSIONS}
-    out.append("</table></div><h2>Outcomes by expectation group (v4)</h2><p>Click a bar to list exactly its cases "
-               "(configuration AND expectation group AND that outcome); click a group/configuration label for the whole "
-               "subset of that run, or a group heading for the group across all configurations. Bars share one count scale per dimension. Coverage: planned / finished / with Image measurement.</p>"
-               "<div class=scroll><table><tr><th>Expectation group</th><th>Configuration</th><th>Coverage</th>"
-               "<th>Pipeline</th><th>Recovery</th><th>Image</th><th>Runtime</th></tr>")
-    for group in EXPECTATIONS:
-        items = [x for x in v4 if x["expectation"] == group]
-        for n, x in enumerate(items):
-            flt = esc(json.dumps(dict(run=x["run"], configuration=x["config"], expectation=group)))
-            gflt = esc(json.dumps(dict(expectation=group)))
-            label = (f"<td rowspan={len(items)}><b class=grp tabindex=0 role=button data-filter='{gflt}'>"
-                     f"{EXPECTATION_NAMES[group]}</b><br><small>all configurations</small></td>" if n == 0 else "")
-            r = x["runtime"]
-            runtime = (f"{f(r['median_min'], 1)} min (range {f(r['min_min'], 1)}–{f(r['max_min'], 1)}), "
-                       f"{f(r['recipe_hours'], 2)} recipe-h" if r["timed"] else "–")
-            out.append(f"<tr>{label}<td><span class=grp tabindex=0 role=button data-filter='{flt}'>{esc(x['config'])}"
-                       f"</span><br><small>{esc(x['run'])}</small></td><td>{x['planned']} / {x['finished']} / {x['image_available']}</td>"
-                       + "".join(f"<td>{v4_bars(dim, x['counts'][dim], v4scale[dim], x['run'], x['config'], group)}</td>"
-                                 for dim in DIMENSIONS) + f"<td>{runtime}</td></tr>")
-    out.append("</table></div>")
+        base = dict(run=s["run_id"], config=s["config"])
+        old = " class=old" if s["superseded"] else ""
+        elapsed = (f"known elapsed {f(s['elapsed_hours'], 2)} h (sum of the run's recorded --execute calls, whole "
+                   "cases and all recipes of the run" + (f", parallel {'/'.join(map(str, s['parallel']))}, CPUs "
+                                                          f"{'/'.join(s['cpus'])}" if s["parallel"] else "") + ")"
+                   if s["elapsed_hours"] is not None else "elapsed not recorded")
+        out.append(f"<h2>{esc(s['config'])}</h2><p><small>run {esc(s['run_id'])} · {elapsed}. Runtime per row: the "
+                   "recipe's own CASA process (median, range) and summed recipe-hours, not elapsed time. Click a bar "
+                   "to list exactly its cases, a row label for the whole row.</small></p>")
+        out.append(f"<h3>Table 1. All cases</h3><div class=scroll><table><tr><th>Config</th>{head}</tr>"
+                   f"<tr{old}><td>{label(s['config'], base, s['table1'])}</td>{cells(s['table1'], base)}</tr>"
+                   "</table></div>")
+        out.append(f"<h3>Table 2. By initial group</h3><div class=scroll><table><tr><th>Group</th>{head}</tr>")
+        for g, st in s["table2"].items():
+            flt = {**base, "group": g}
+            out.append(f"<tr{old}><td>{label(name(g), flt, st)}</td>"
+                       f"{cells(st, flt, no_partial=g != 'improvement_expected')}</tr>")
+        out.append("</table></div><p><small>Partial success applies only to Improvement expected.</small></p>"
+                   f"<h3>Table 3. No improvement expected, by subgroup</h3><div class=scroll><table><tr><th>Subgroup</th>"
+                   f"{head}</tr>")
+        for sg, st in s["table3"].items():
+            flt = {**base, "group": "no_improvement_expected", "subgroup": sg}
+            out.append(f"<tr{old}><td>{label(name(sg), flt, st)}</td>{cells(st, flt, no_partial=True)}</tr>")
+        out.append("</table></div>")
 
     # Cases: filters and table
-    def select(key, label, values):
-        return (f"<label>{label} <select data-key={key}><option value=''>all</option>"
+    def select(key, text, values):
+        return (f"<label>{text} <select data-key={key}><option value=''>all</option>"
                 + "".join(f"<option value='{esc(v)}'>{esc(t)}</option>" for v, t in values) + "</select></label> ")
-    configs = list(dict.fromkeys(s["config"] for s in summaries))
-    out.append("<h2>Cases</h2><ul>"
-               "<li><b>Expectation</b>: group, reason and signed joint gain damage D (≈0: |D| &lt; 0.0005, sign kept).</li>"
-               "<li><b>Reference eC</b>: eC of the same case without the amp/phase injections (same noise).</li>"
-               "<li><b>eC_solvable</b> = eC − reference eC: joint gain damage, i.e. excess over the matched reference, "
-               "before → after (negative after: below the reference). The reference is a benchmark, not a physical bound.</li>"
-               "<li><b>reduction</b> = before − after (positive = better); the same number for eC and eC_solvable.</li>"
-               "<li><b>RMS</b> (Jy/beam, off-source annulus) and <b>SNR</b> (peak image SNR) of the restored images, with "
-               "r_RMS / r_SNR (positive = better).</li>"
-               "<li><b>Flux error</b>: model flux / true flux − 1, before → after.</li></ul>"
-               "<p class=filters>" + select("run", "Run", [(r, r) for r in dict.fromkeys(s["run"] for s in summaries)])
-               + select("configuration", "Configuration", [(c, c) for c in configs])
-               + select("expectation", "Expectation", [(g, EXPECTATION_NAMES[g]) for g in EXPECTATIONS])
-               + "".join(select(dim, dim.capitalize(), [(k, k) for k in cats] + [("other", "pending/unavailable")])
-                         for dim, (cats, _) in DIMENSIONS.items())
-               + select("legacy", "Legacy v3", [(k, name(k)) for k in CATEGORIES + ACCOUNTING])
+    present = lambda key: list(dict.fromkeys(str(c.get(key)) for r in rows for c in r["cases"] if c.get(key) is not None))
+    ordered = lambda key, cats: [(k, name(k)) for k in list(cats) + [x for x in present(key) if x not in cats]]
+    out.append("<h2>Cases</h2><p class=filters>"
+               + select("run", "Run", list(dict.fromkeys((s["run_id"], s["run"]) for s in summaries)))
+               + select("config", "Configuration", [(c, c) for c in dict.fromkeys(s["config"] for s in summaries)])
+               + select("group", "Group", ordered("group", GROUPS + (EXCEPTION, "unavailable")))
+               + select("subgroup", "Subgroup", ordered("subgroup", SUBGROUPS))
+               + select("result", "Pipeline Result", ordered("result", RESULTS))
+               + select("recovery", "Recovery", ordered("recovery", RECOVERY))
+               + select("image", "Image", ordered("image", IMAGE))
+               + select("application", "Run outcome", ordered("application", ("applied", "blocked")))
+               + select("reason", "Blocked reason", ordered("blocked_reason", BLOCKED_REASONS))
                + "<button id=reset>reset</button> <b id=count></b> <span id=active></span></p>"
-               "<p><b>Corruption</b>: injected kinds; d_k = eC(case) − eC(same case with kind k removed), archived removal "
-               "damage (per-kind values need not add up); eC = archived total. <b>Images</b>: restored CLEAN image used for "
-               "eC, before (archived case) and after the recipe, canonical plot style with one shared linear scale per case "
-               "(±99.5th percentile of |pixel| over both images, shown under the after image); click to enlarge.</p>"
+               "<p><small><b>Corruption</b>: injected kinds; d_k = eC(case) − eC(same case with kind k removed), archived "
+               "removal damage (per-kind values do not add up to D). <b>Images</b>: restored CLEAN image used for eC, "
+               "before (archived case) and after the recipe, one shared linear scale per case (±99.5th percentile of "
+               "|pixel| over both, shown under the after image); click to enlarge. r_RMS = (RMS before − after) / before, "
+               "r_SNR = (SNR after − before) / before: positive = better.</small></p>"
                "<div class=scroll><table id=cases><tr><th>Configuration</th><th>Source / case</th><th>Corruption</th>"
-               "<th>Expectation</th><th>Pipeline</th><th>Recovery</th><th>Image</th><th>eC before → after</th>"
-               "<th>CLEAN before</th><th>CLEAN after</th><th>eC_solvable before → after</th><th>RMS before → after</th>"
-               "<th>SNR before → after</th><th>Flux error</th><th>Legacy v3</th><th>Recipe runtime (min)</th>"
+               "<th>Group</th><th>Pipeline Result</th><th>Recovery</th><th>Image</th><th>Run</th>"
+               "<th>eC before → after</th><th>Reference eC / D / remaining</th><th>CLEAN before</th><th>CLEAN after</th>"
+               "<th>RMS before → after</th><th>SNR before → after</th><th>Flux error</th><th>Recipe runtime (min)</th>"
                "<th>Description</th></tr>")
     g = lambda x, d=4: "–" if x is None else f"{x:.{d}g}"
     for row in rows:
@@ -466,41 +456,41 @@ def write_report(output, summaries, rows, runs, filename, v4, eps_rms=EPSILON_RM
                        + (f"<br><a href='{esc(link)}'>{esc(link)}</a>" if link else "") + "</details>"
                        if notes or link else "")
             D = c.get("D")
-            exp = (f"{EXPECTATION_NAMES[c['expectation']]}<br><small>{esc(c.get('expectation_reason') or '')}"
-                   + (f"<br>D = {D:+.4f}{' (≈0)' if c.get('near_zero') else ''}" if D is not None else "") + "</small>")
+            group = (f"{esc(name(c['group']))}" + (f"<br>{esc(name(c['subgroup']))}" if c.get("subgroup") else "")
+                     + f"<br><small>{esc(c.get('group_reason') or '')}</small>")
+            run_cell = badge(c["application"]) + (f"<br><small>{esc(name(c['blocked_reason']))}</small>"
+                                                  if c.get("blocked_reason") else "")
+            rec_note = f"<br><small>{esc(c['recovery_reason'])}</small>" if c.get("recovery_reason") else ""
             image_note = (f"<br><small>{esc(c['image_reason'])}</small>" if c.get("image_reason") else
                           f"<br><small>r_RMS {c['r_rms']:+.3f}<br>r_SNR {c['r_snr']:+.3f}</small>"
                           if c.get("r_rms") is not None and c.get("r_snr") is not None else "")
-            attrs = dict(run=row["run"], configuration=row["config"], expectation=c["expectation"], pipeline=c.get("pipeline"),
-                         recovery=c.get("recovery"), image=c.get("image"), legacy=c["category"], id=c["id"])
+            attrs = dict(run=row["run_id"], config=row["config"], group=c["group"], subgroup=c.get("subgroup") or "",
+                         result=c["result"], recovery=c["recovery"], image=c.get("image"), application=c["application"],
+                         reason=c.get("blocked_reason") or "", id=c["id"])
             out.append(
                 "<tr " + " ".join(f"data-{k}='{esc(str(v))}'" for k, v in attrs.items())
                 + f"{' class=old' if c.get('superseded') else ''}><td>{esc(row['config'])}</td>"
                 f"<td>{esc(c['label'])}<br><small>{c['case']}</small></td><td>{corruption_cell(c)}</td>"
-                f"<td>{exp}</td><td>{v4_badge('pipeline', c.get('pipeline'))}<br><small>{esc(c['action'])}</small></td>"
-                f"<td>{v4_badge('recovery', c.get('recovery'))}</td><td>{v4_badge('image', c.get('image'))}{image_note}</td>"
-                f"<td class=n>{f(c.get('eC_before_measured', c.get('before')))} → "
-                f"{f(c.get('eC_after_measured', c.get('after')))}<br>reduction {f(c.get('reduction'))}</td>"
+                f"<td>{group}</td><td>{badge(c['result'])}</td><td>{badge(c['recovery'])}{rec_note}</td>"
+                f"<td>{badge(c.get('image'))}{image_note}</td><td>{run_cell}</td>"
+                f"<td class=n>{f(c.get('eC_before'))} → {f(c.get('eC_after'))}<br>change {f(c.get('change'))}</td>"
+                f"<td class=n>{f(c.get('reference'))}<br>D {f(D, 4)}<br>remaining {f(c.get('remaining'))}"
+                f"<br><small>{esc(c.get('reference_id') or c.get('reference_reason') or '–')}</small></td>"
                 f"{image_cell(c, 'before')}{image_cell(c, 'after')}"
-                f"<td class=n>{f(c.get('damage'))} → {f(c.get('remaining'))}<br>reduction {f(c.get('reduction'))}"
-                f"<br><small>reference eC {f(c.get('reference'))} ({esc(c.get('reference_id') or '–')})</small></td>"
-                f"<td class=n>{g(c.get('rms_before'))} → {g(c.get('rms_after'))}</td>"
-                f"<td class=n>{g(c.get('snr_before'))} → {g(c.get('snr_after'))}</td>"
+                f"<td class=n>{g(c.get('rms_before'))} → {g(c.get('rms_after'))}<br><small>r_RMS {f(c.get('r_rms'))}</small></td>"
+                f"<td class=n>{g(c.get('snr_before'))} → {g(c.get('snr_after'))}<br><small>r_SNR {f(c.get('r_snr'))}</small></td>"
                 f"<td class=n>{f(c.get('flux_before'))} → {f(c.get('flux_after'))}</td>"
-                f"<td>{badge(c['category'])}</td>"
                 f"<td class=n>{f(c['seconds'] / 60 if c.get('seconds') is not None else None, 1)}</td>"
                 f"<td>{esc(c['description'])}{details}</td></tr>")
-    known = {dim: list(cats) for dim, (cats, _) in DIMENSIONS.items()}
-    out.append("</table></div><script>const KNOWN=" + json.dumps(known) + ";"
+    out.append("</table></div><script>"
                "const sel=[...document.querySelectorAll('select[data-key]')],rows=[...document.querySelectorAll("
                "'#cases tr[data-id]')];"
-               "function match(tr,k,v){const x=tr.dataset[k];return !v||(v==='other'&&KNOWN[k]?!KNOWN[k].includes(x):x===v)}"
-               "function apply(){let n=0;for(const tr of rows){const ok=sel.every(s=>match(tr,s.dataset.key,s.value));"
-               "tr.style.display=ok?'':'none';n+=ok}document.getElementById('count').textContent=n+' / '+rows.length+"
-               "' cases';document.getElementById('active').textContent=sel.filter(s=>s.value).map(s=>s.dataset.key+"
-               "'='+s.value).join(', ')}"
-               "function setFilter(f){for(const s of sel)s.value=f[s.dataset.key]||'';apply();"
-               "document.getElementById('cases').scrollIntoView()}"
+               "function apply(){let n=0;for(const tr of rows){const ok=sel.every(s=>!s.value||tr.dataset[s.dataset.key]"
+               "===s.value);tr.style.display=ok?'':'none';n+=ok}document.getElementById('count').textContent=n+' / '+"
+               "rows.length+' cases';document.getElementById('active').textContent=sel.filter(s=>s.value).map(s=>"
+               "s.dataset.key+'='+s.value).join(', ')}"
+               "function setFilter(f){for(const s of sel){const v=f[s.dataset.key]||'';if(v&&![...s.options].some(o=>"
+               "o.value===v))s.add(new Option(v,v));s.value=v}apply();document.getElementById('cases').scrollIntoView()}"
                "for(const s of sel)s.onchange=apply;document.getElementById('reset').onclick=()=>setFilter({});"
                "for(const b of document.querySelectorAll('[data-filter]')){const go=()=>setFilter(JSON.parse(b.dataset.filter));"
                "b.onclick=go;b.onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();go()}}}"
@@ -508,21 +498,30 @@ def write_report(output, summaries, rows, runs, filename, v4, eps_rms=EPSILON_RM
     (output / filename).write_text("\n".join(out))
 
 
-def build(runs, output, filename="comparison.html", eps_rms=EPSILON_RMS, eps_snr=EPSILON_SNR):
-    rows = [row for run in runs for row in load(run)]
+def build(runs, output, filename="comparison.html", eps_rms=EPSILON_RMS, eps_snr=EPSILON_SNR,
+          tol_change=TOL_CHANGE, tol_ref=TOL_REFERENCE):
+    eps_rms, eps_snr = check_tolerance("epsilon_rms", eps_rms), check_tolerance("epsilon_snr", eps_snr)
+    tol_change, tol_ref = check_tolerance("tol_change", tol_change), check_tolerance("tol_ref", tol_ref)
+    rows = [row for run in runs for row in load(run, tol_change, tol_ref)]
     rows.sort(key=lambda r: r["key"])
+    paths_of = {}
+    for row in rows:                        # identity = absolute run path; file names stay readable when unique
+        paths_of.setdefault(row["run"], set()).add(row["run_id"])
+    for row in rows:
+        if len(paths_of[row["run"]]) > 1:
+            row["tag"] = f"{row['run']}-{hashlib.sha256(row['run_id'].encode()).hexdigest()[:8]}"
     output.mkdir(parents=True, exist_ok=True)
     add_image_metrics(rows, output / "image_metrics", eps_rms, eps_snr)
+    thresholds = dict(tol_change=tol_change, tol_reference=tol_ref, epsilon_rms=eps_rms, epsilon_snr=eps_snr)
     for row in rows:      # retained evidence per case (after the image metrics), linked from Description
         for c in row["cases"]:
             if "evidence" in c:
-                c["evidence_file"] = f"descriptions/{row['run']}__{c['case']}__{safe(row['recipe'])}.json"
+                c["evidence_file"] = f"descriptions/{row['tag']}__{c['case']}__{safe(row['recipe'])}.json"
                 write_json(output / c["evidence_file"], dict(
-                    run=row["run"], configuration=row["config"], case=c["case"], label=c["label"],
-                    description=c["description"], my_criteria={k: c.get(k) for k in (
-                        "category", "action", "before", "after", "reference", "boundary", "reference_id", "damage", "remaining",
-                        "reduction", "nonpositive_damage", "criteria_reason")}, v4={k: c.get(k) for k in V4_FIELDS},
-                    **c.pop("evidence")))
+                    run=row["run"], run_path=row["run_id"], configuration=row["config"], case=c["case"], label=c["label"],
+                    description=c["description"], v5_version=V5_VERSION, thresholds=thresholds,
+                    v5={k: c.get(k) for k in V5_FIELDS},
+                    legacy_v3=dict(c["legacy"], criteria_version=CRITERIA_VERSION), **c.pop("evidence")))
 
     images = output / "images"
     images.mkdir(exist_ok=True)
@@ -532,7 +531,7 @@ def build(runs, output, filename="comparison.html", eps_rms=EPSILON_RMS, eps_snr
             before, after = c.pop("clean_before", None), c.pop("clean_after", None)
             if not (before and after):
                 continue
-            stem = f"images/{row['run']}__{c['case']}__{safe(row['recipe'])}"
+            stem = f"images/{row['tag']}__{c['case']}__{safe(row['recipe'])}"
             pb, pa, scale = output / f"{stem}__before.png", output / f"{stem}__after.png", output / f"{stem}.json"
             newest = max(Path(before).stat().st_mtime, Path(after).stat().st_mtime)
             if pb.exists() and pa.exists() and scale.exists() and scale.stat().st_mtime >= newest:
@@ -549,15 +548,12 @@ def build(runs, output, filename="comparison.html", eps_rms=EPSILON_RMS, eps_snr
             c["before_png"], c["after_png"] = f"{stem}__before.png", f"{stem}__after.png"
     print(f"IMAGES rendered {rendered}, reused {reused}")
     summaries = [summarize(r) for r in rows]
-    v4 = summarize_v4(rows)
     write_json(output / filename.replace(".html", ".json"), dict(
-        criteria_version=CRITERIA_VERSION, tolerance=TOLERANCE, epsilon=EPSILON, epsilon_status="provisional",
-        v4_version=V4_VERSION, epsilon_rms=eps_rms, epsilon_snr=eps_snr, image_metric_version=IMAGE_METRIC_VERSION,
-        v4_thresholds_status="provisional", v4_summary=v4,
-        runs=[str(r.resolve()) for r in runs], rows=summaries,
-        cases={f"{r['run']} | {r['config']}": [{k: v for k, v in c.items() if k != "notes"} for c in r["cases"]]
+        v5_version=V5_VERSION, thresholds=thresholds, image_metric_version=IMAGE_METRIC_VERSION,
+        legacy_criteria_version=CRITERIA_VERSION, runs=[str(r.resolve()) for r in runs], summaries=summaries,
+        cases={f"{r['run_id']} | {r['config']}": [{k: v for k, v in c.items() if k != "notes"} for c in r["cases"]]
                for r in rows}))
-    write_report(output, summaries, rows, runs, filename, v4, eps_rms, eps_snr)
+    write_report(output, summaries, rows, runs, filename, eps_rms, eps_snr)
     print("REPORT", (output / filename).resolve())
 
 
@@ -566,9 +562,9 @@ def main():
     ap.add_argument("runs", nargs="+", type=Path, help="vla_pipeline_qa output folders")
     ap.add_argument("--output", type=Path, required=True)
     ap.add_argument("--epsilon-rms", type=float, default=EPSILON_RMS,
-                    help="relative RMS change tolerance of the v4 Image outcome (PROVISIONAL default)")
+                    help="relative RMS change tolerance of the Image dimension (default 0.05 = 5%%)")
     ap.add_argument("--epsilon-snr", type=float, default=EPSILON_SNR,
-                    help="relative SNR change tolerance of the v4 Image outcome (PROVISIONAL default)")
+                    help="relative SNR change tolerance of the Image dimension (default 0.05 = 5%%)")
     args = ap.parse_args()
     build(args.runs, args.output, eps_rms=args.epsilon_rms, eps_snr=args.epsilon_snr)
 

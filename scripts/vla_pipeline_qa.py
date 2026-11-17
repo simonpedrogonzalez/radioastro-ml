@@ -1452,63 +1452,151 @@ def my_criteria(result, gain, reference):
     return dict(out, category=category)
 
 
-# ---------------------------------------------------------------- v4 outcomes (report only)
-# [USER] 2026-11-12 design doc "Requested v4 update": expectation group fixed before processing, then three independent
-# outcomes. Legacy My Criteria (v3) stays alongside for continuity.
+# ---------------------------------------------------------------- v5 evaluation labels (report only)
+# [USER] 2026-11-16 design doc "Requested v5 evaluation setup": one initial group per case fixed before processing
+# (never from the outcome or a model), then independent Run, Recovery and Image dimensions and the Pipeline Result
+# evaluation label derived from group + Recovery. Legacy My Criteria (v3) is kept only as historical metadata.
 
-V4_VERSION = "v4 (2026-11-12, expectation groups; independent Pipeline/Recovery/Image)"
-EPSILON_RMS = 0.01   # PROVISIONAL relative tolerance (display only, not a significance test)
-EPSILON_SNR = 0.01   # PROVISIONAL relative tolerance (display only, not a significance test)
-NEAR_ZERO_D = 5e-4   # |D| below this rounds to 0.000 in the report: flagged, sign kept
-EXPECTATIONS = ("no_improvement_expected", "improvement_expected", "expectation_unavailable")
-PIPELINE = ("applied", "blocked", "rejected", "error")
-RECOVERY = ("improved", "similar", "degraded")
+V5_VERSION = "v5 (2026-11-16, initial groups/subgroups; Run, Recovery, Image, Pipeline Result)"
+TOL_CHANGE = 0.05      # [USER] absolute eC: a recovery change counts only if |after - before| > this (strict)
+TOL_REFERENCE = 0.05   # [USER] absolute eC: Solved if after <= reference + this; Small if 0 <= D <= this
+TOL_IMAGE = 0.05       # [USER] relative RMS/SNR change counts only if > this (strict). Replaces the provisional 1%
+ROUNDOFF = 1e-9        # float roundoff margin of the tolerance comparisons: e.g. 0.20 - 0.15 = 0.05000000000000002
+                       # is AT the tolerance. Far below any reported precision; sign tests (D < 0) stay exact
+EPSILON_RMS = EPSILON_SNR = TOL_IMAGE
+GROUPS = ("improvement_expected", "no_improvement_expected")
+SUBGROUPS = ("uncorrupted", "noise_only", "cancelling", "small")       # parent: no_improvement_expected
+EXCEPTION = "exception"         # gain-only case with D < 0: unexpected, pending investigation (no parent group)
+RECOVERY = ("solved", "improved", "similar", "degraded")
 IMAGE = ("cleaner", "similar", "worse", "mixed")
+RESULTS = ("success", "partial_success", "failure")
+APPLICATION = ("applied", "blocked")
+BLOCKED_REASONS = ("low_initial_snr", "solution_lowers_snr", "empty_model", "other", "reason_unknown")
+ACCOUNTING_STATES = ("unavailable", "error", "unknown", "pending")      # never scientific outcomes
 IMAGE_METRIC_VERSION = "restored-v1: annulus std/mean, peak in true-source ellipse (rho<=1), reference masks"
 
 
-def expectation(mask, before, reference):
-    """Expectation group from the original case and its matched reference only (never the recipe outcome).
-    mask: injected kinds (1 amp, 2 phase, 4 noise). D = eC_before - eC_reference (joint gain damage, signed)."""
-    if not (_finite(before) and _finite(reference)):
-        return dict(expectation="expectation_unavailable", expectation_reason="missing or nonfinite before/reference eC", D=None)
-    D = float(before - reference)
-    out = dict(D=D, near_zero=abs(D) < NEAR_ZERO_D)
+def check_tolerance(name, value):
+    """Tolerances must be finite and nonnegative."""
+    if not (_finite(value) and value >= 0):
+        raise ValueError(f"{name} must be a finite nonnegative number, got {value!r}")
+    return float(value)
+
+
+def exceeds(x, tol):
+    """x is beyond the tolerance (strict), with a value within ROUNDOFF of the tolerance counted as AT it."""
+    return x > tol + ROUNDOFF
+
+
+def initial_group(mask, before, reference, tol=TOL_REFERENCE):
+    """Parent group and subgroup from injection metadata (mask: 1 amp, 2 phase, 4 noise; None = unknown), the
+    archived eC before and the matched reference eC. D = before - reference is the signed joint gain damage."""
+    D = float(before - reference) if _finite(before) and _finite(reference) else None
+    out = dict(D=D, group_reason=None)
+    if mask is None or mask not in range(8):
+        return dict(out, group="unavailable", subgroup=None, group_reason="unknown injection metadata")
     if mask == 0:
-        return dict(out, expectation="no_improvement_expected", expectation_reason="control")
-    if mask & 3 == 0:
-        return dict(out, expectation="no_improvement_expected", expectation_reason="noise_only")
-    if D > 0:
-        return dict(out, expectation="improvement_expected", expectation_reason="positive_joint_gain_damage")
-    return dict(out, expectation="no_improvement_expected",
-                expectation_reason="negative_joint_gain_damage" if D < 0 else "zero_joint_gain_damage")
+        return dict(out, group="no_improvement_expected", subgroup="uncorrupted", group_reason="no injected corruption")
+    if mask == 4:
+        return dict(out, group="no_improvement_expected", subgroup="noise_only", group_reason="only noise injected")
+    if D is None:
+        return dict(out, group="unavailable", subgroup=None, group_reason="missing or nonfinite before/reference eC")
+    if D < 0:
+        if mask & 4:
+            return dict(out, group="no_improvement_expected", subgroup="cancelling",
+                        group_reason="noise + gains with negative joint gain damage")
+        return dict(out, group=EXCEPTION, subgroup=None, group_reason="unexpected negative joint gain damage (gain only)")
+    if not exceeds(D, tol):
+        return dict(out, group="no_improvement_expected", subgroup="small", group_reason=f"0 <= D <= {tol}")
+    return dict(out, group="improvement_expected", subgroup=None, group_reason=f"D > {tol}")
 
 
-def pipeline_outcome(action):
-    """v4 Pipeline from the decision evidence (pipeline_action); pending/unknown stay accounting states."""
-    return {"Applied": "applied", "Could not start": "blocked", "Left unchanged": "rejected",
-            "Error": "error"}.get(action, "unknown")
+def _stop_texts(rec, evidence):
+    notes = rec.get("pipeline_notes", [])
+    return evidence["stops"] + evidence["failures"] + [n.split("REASON:", 1)[1].strip() for n in notes if "REASON:" in n]
 
 
-def recovery_outcome(before, after, epsilon=EPSILON):
+def run_outcome(rec):
+    """Run dimension: applied, or blocked with exactly one primary reason; error/unknown stay accounting states.
+    Structured stop/interval records are read first (decision_evidence), log lines only supplement them."""
+    action = pipeline_action(rec)
+    evidence = decision_evidence(rec)
+    texts = _stop_texts(rec, evidence)
+    out = dict(stop_reasons=list(dict.fromkeys(texts)), blocked_reason=None)
+    if action == "Applied":
+        return dict(out, application="applied")
+    if action in ("Error", "Unknown"):
+        return dict(out, application=action.lower())
+    joined = "\n".join(texts + ([] if evidence["stops"] else rec.get("pipeline_notes", [])))
+    if action == "Could not start":          # prerequisite checks prevented correction trials
+        reason = ("empty_model" if any(x in joined for x in EMPTY_MODEL) else
+                  "low_initial_snr" if any(x in joined for x in ("Estimated_SNR_too_low",) + LOW_SNR) else
+                  "other" if joined.strip() else "reason_unknown")
+    else:                                    # Left unchanged: trials ran (or the solver failed), nothing retained
+        reason = ("solution_lowers_snr" if any(x in joined for x in ("S/N decrease", "SNR decrease")) else
+                  "other" if joined.strip() or rec.get("disposition") == "no_valid_solutions" else "reason_unknown")
+    return dict(out, application="blocked", blocked_reason=reason)
+
+
+def recovery_outcome(before, after, reference, tol_change=TOL_CHANGE, tol_ref=TOL_REFERENCE):
+    """Recovery from change = after - before (positive = worse), independent of the Run decision. A meaningful
+    reduction is Solved if after <= reference + tol_ref, else Improved; without a reference it is unavailable."""
     if not (_finite(before) and _finite(after)):
-        return "unavailable"
-    delta = before - after
-    return "improved" if delta > epsilon else "degraded" if delta < -epsilon else "similar"
+        return dict(recovery="unavailable", recovery_reason="missing or nonfinite eC before/after", change=None,
+                    remaining=None)
+    change = float(after - before)
+    remaining = float(after - reference) if _finite(reference) else None
+    out = dict(change=change, remaining=remaining, recovery_reason=None)
+    if exceeds(change, tol_change):
+        return dict(out, recovery="degraded")
+    if not exceeds(-change, tol_change):
+        return dict(out, recovery="similar")
+    if remaining is None:
+        return dict(out, recovery="unavailable",
+                    recovery_reason=f"eC reduced by {-change:.4f} but no matched reference (solved vs improved unknown)")
+    return dict(out, recovery="improved" if exceeds(remaining, tol_ref) else "solved")
 
 
-def measured_recovery(evaluation):
-    """Recovery from the measured evaluation eC alone (independent of the matched reference and legacy criteria)."""
-    if (evaluation or {}).get("status") != "measured":
+def pipeline_result(group, recovery):
+    """[USER] evaluation label (not the pipeline's own QA score) from the parent group and Recovery."""
+    if recovery in ("pending", "error"):
+        return recovery
+    if group not in GROUPS or recovery not in RECOVERY:
         return "unavailable"
-    return recovery_outcome((evaluation.get("before") or {}).get("eC"), (evaluation.get("after") or {}).get("eC"))
+    if group == "improvement_expected":
+        return {"solved": "success", "improved": "partial_success"}.get(recovery, "failure")
+    return "failure" if recovery == "degraded" else "success"
+
+
+def v5_labels(mask, before_archived, reference, result, finished=True, tol_change=TOL_CHANGE, tol_ref=TOL_REFERENCE):
+    """All v5 labels of one case and recipe except Image. result: the QA result record, or None (pending if the case
+    has not finished, error if it finished without a record)."""
+    out = initial_group(mask, before_archived, reference, tol_ref)
+    out.update(reference=reference if _finite(reference) else None)
+    if result is None:
+        state = "error" if finished else "pending"
+        return dict(out, application=state, blocked_reason=None, stop_reasons=[], recovery=state,
+                    recovery_reason="no result record", change=None, remaining=None, result=state,
+                    eC_before=None, eC_after=None)
+    out.update(run_outcome(result.get("recipe_record", {})))
+    ev = result.get("evaluation") or {}
+    before = (ev.get("before") or {}).get("eC") if ev.get("status") == "measured" else None
+    after = (ev.get("after") or {}).get("eC") if ev.get("status") == "measured" else None
+    if ev.get("status") == "measured":
+        out.update(recovery_outcome(before, after, reference, tol_change, tol_ref))
+    else:
+        state = "error" if out["application"] == "error" else "unavailable"
+        out.update(recovery=state, recovery_reason=str(ev.get("reason") or ev.get("status") or "no evaluation")[-300:],
+                   change=None, remaining=None)
+    return dict(out, result=pipeline_result(out["group"], out["recovery"]), eC_before=before, eC_after=after)
 
 
 def image_outcome(r_rms, r_snr, eps_rms=EPSILON_RMS, eps_snr=EPSILON_SNR):
-    """Cleaner/Similar/Worse/Mixed from benefit-oriented fractional changes (positive = better for both)."""
+    """Cleaner/Similar/Worse/Mixed from benefit-oriented fractional changes (positive = better for both); a change
+    exactly at the tolerance is similar."""
     if not (_finite(r_rms) and _finite(r_snr)):
         return "unavailable"
-    signs = [1 if r > e else -1 if r < -e else 0 for r, e in ((r_rms, eps_rms), (r_snr, eps_snr))]
+    signs = [1 if exceeds(r, e) else -1 if exceeds(-r, e) else 0 for r, e in ((r_rms, eps_rms), (r_snr, eps_snr))]
     better, worse = 1 in signs, -1 in signs
     return "mixed" if better and worse else "cleaner" if better else "worse" if worse else "similar"
 
@@ -1562,48 +1650,63 @@ def comparability_problems(b, a):
     return [f"metadata differs: {', '.join(diff)}"] if diff else []
 
 
-def image_pair(before_path, after_path, masks, eps_rms=EPSILON_RMS, eps_snr=EPSILON_SNR):
-    """Paired before/after restored-image metrics and the Image outcome, or unavailable with the reason."""
+def image_measure(before_path, after_path, masks):
+    """Raw paired before/after restored-image metrics (no labels, so they can be cached independently of the
+    tolerances), or image_reason when the pair cannot be measured or compared."""
     try:
         b, a = restored_metrics(before_path, masks), restored_metrics(after_path, masks)
     except Exception as exc:
-        return dict(image="unavailable", image_reason=str(exc)[:300])
+        return dict(image_reason=str(exc)[:300], image_metric_version=IMAGE_METRIC_VERSION)
     problems = comparability_problems(b["header"], a["header"])
     if problems:
-        return dict(image="unavailable", image_reason="before/after images not comparable: " + "; ".join(problems))
-    r_rms = (b["rms"] - a["rms"]) / b["rms"]
-    r_snr = (a["snr"] - b["snr"]) / b["snr"] if b["snr"] > 0 else None
+        return dict(image_reason="before/after images not comparable: " + "; ".join(problems),
+                    image_metric_version=IMAGE_METRIC_VERSION)
     out = dict(rms_before=b["rms"], rms_after=a["rms"], mean_before=b["mean"], mean_after=a["mean"],
                peak_before=b["peak"], peak_after=a["peak"], snr_before=b["snr"], snr_after=a["snr"],
-               r_rms=r_rms, r_snr=r_snr, off_pixels=b["off_pixels"], source_pixels=b["source_pixels"],
-               off_beams=b["off_beams"], units=b["header"]["BUNIT"], image_metric_version=IMAGE_METRIC_VERSION)
-    out.update(epsilon_rms=eps_rms, epsilon_snr=eps_snr)
+               r_rms=(b["rms"] - a["rms"]) / b["rms"], r_snr=(a["snr"] - b["snr"]) / b["snr"] if b["snr"] > 0 else None,
+               off_pixels=b["off_pixels"], source_pixels=b["source_pixels"], off_beams=b["off_beams"],
+               units=b["header"]["BUNIT"], image_metric_version=IMAGE_METRIC_VERSION, image_reason=None)
     bad = [w for w, x in (("before", b["snr"]), ("after", a["snr"])) if not (_finite(x) and x > 0)]
     if bad:
-        return dict(out, image="unavailable", image_reason=f"nonpositive or nonfinite SNR {', '.join(bad)}")
-    return dict(out, image=image_outcome(r_rms, r_snr, eps_rms, eps_snr))
+        out["image_reason"] = f"nonpositive or nonfinite SNR {', '.join(bad)}"
+    return out
 
 
-def describe(result, crit):
-    """Plain-language Description: what was tried, skipped and why. Log-derived statements say so."""
+def image_label(raw, eps_rms=EPSILON_RMS, eps_snr=EPSILON_SNR):
+    """Image outcome of raw metrics at the given tolerances (unavailable whenever raw carries a reason)."""
+    label = "unavailable" if raw.get("image_reason") else image_outcome(raw.get("r_rms"), raw.get("r_snr"), eps_rms, eps_snr)
+    return dict(raw, image=label, epsilon_rms=eps_rms, epsilon_snr=eps_snr)
+
+
+def image_pair(before_path, after_path, masks, eps_rms=EPSILON_RMS, eps_snr=EPSILON_SNR):
+    """Paired before/after restored-image metrics and the Image outcome, or unavailable with the reason."""
+    return image_label(image_measure(before_path, after_path, masks), eps_rms, eps_snr)
+
+
+BLOCKED_TEXT = dict(low_initial_snr="initial S/N checks prevented correction trials",
+                    solution_lowers_snr="trials failed the S/N checks and no correction remains",
+                    empty_model="the model/mask was empty", other="another stop reason",
+                    reason_unknown="no stop reason recorded")
+
+
+def describe(result, labels):
+    """Plain-language Description: what was tried, skipped and why. Log-derived statements say so.
+    labels: the case's v5 labels (application, blocked_reason, group, subgroup, recovery, D)."""
     rec = result.get("recipe_record", {})
     notes = rec.get("pipeline_notes", [])
-    action, text = crit["action"], _evidence(rec)
+    action, application = pipeline_action(rec), labels.get("application")
     reason = str(rec.get("reason") or "")
     parts = []
     evidence = decision_evidence(rec)
-    if action == "Applied":
+    if application == "applied":
         final = [n.split(":", 1)[1].strip() for n in notes if n.startswith("Final solint")]
         parts.append("Applied gain correction" + (f", final solint {final[-1]} (log)." if final else "."))
-    elif action == "Left unchanged":
-        parts.append("Tried self-calibration, no correction retained." if result.get("experiment") == "B"
-                     else "No correction applied.")
-    elif action == "Could not start":
-        why = ("the model was empty (log)" if any(s in text for s in EMPTY_MODEL) else
-               "estimated S/N too low for the first interval (log)" if any(s in text for s in LOW_SNR) else
-               reason or "a prerequisite failed")
-        parts.append(f"Could not start: {why}.")
-    elif action == "Error":
+    elif application == "blocked":
+        tried = "Tried self-calibration, no correction retained" if action == "Left unchanged" else "Could not start"
+        if result.get("experiment") == "A" and action == "Left unchanged":
+            tried = "No correction applied"
+        parts.append(f"Blocked ({tried}): {BLOCKED_TEXT[labels['blocked_reason']]}.")
+    elif application == "error":
         parts.append("Error: " + (reason.strip().splitlines() or ["unknown"])[-1][:200])
     else:
         parts.append(f"Outcome unknown ({rec.get('disposition')}). {reason[:200]}".strip())
@@ -1617,7 +1720,7 @@ def describe(result, crit):
         parts.append("Interval decisions: " + "; ".join(evidence["failures"]) + ".")
     warnings = [n for n in notes if "QA execution failed" in n or "Template generation failed" in n]
     if warnings:
-        parts.append("Pipeline warning (impact not established): " + warnings[0])
+        parts.append("Pipeline QA-scoring warning (does not mean execution failed): " + warnings[0])
     tried = [n.split(":", 1)[1].strip() for n in notes if n.startswith("Starting with solint")]
     if tried and action != "Could not start":
         parts.append(f"First interval entered: {tried[0]} (log, not proof of a retained correction).")
@@ -1633,27 +1736,19 @@ def describe(result, crit):
         parts.append("Flags were added although flagging was off.")
     if rec.get("center_mask_fallback"):
         parts.append("The requested central mask did not (only) reach tclean.")
-    cat = crit.get("category")
-    within = crit.get("boundary") is not None and crit["before"] <= crit["boundary"]
-    if cat == "preserved":
-        parts.append("Input left unchanged; archived metrics reused." if
-                     result.get("evaluation", {}).get("evaluation_reused") else
-                     "Already within tolerance; eC changed by less than epsilon.")
-    if cat == "improved" and within:
-        parts.append("Already within tolerance before processing, measurably better after.")
-    if cat == "improved" and not crit["gain"]:
-        parts.append("Improved image error (thermal noise is not removed).")
-    if cat == "improved" and action != "Applied":
-        parts.append("Improvement without an applied gain correction (e.g. flagging), not a gain solution.")
-    if crit.get("nonpositive_damage"):
-        parts.append("Matched reference eC is not below eC before (zero/negative joint damage).")
-    if crit.get("reason"):
-        parts.append(f"Not classified: {crit['reason']}")
+    if result.get("evaluation", {}).get("evaluation_reused"):
+        parts.append("Input left unchanged; archived metrics reused.")
+    if labels.get("recovery") in ("solved", "improved") and application != "applied":
+        parts.append("eC reduced without a retained gain correction (e.g. flagging), not a gain solution.")
+    if labels.get("subgroup") == "noise_only" and labels.get("recovery") in ("solved", "improved"):
+        parts.append("eC reduced although no gain errors were injected (thermal noise is not removed).")
+    if labels.get("D") is not None and labels["D"] < 0:
+        parts.append("Matched reference eC is above eC before (negative joint gain damage).")
     return " ".join(parts)
 
 
 def report(output, eps_rms=EPSILON_RMS, eps_snr=EPSILON_SNR):
-    """Report of one run: the comparison report (aggregate row per flagging mode, then every case)."""
+    """Report of one run: the comparison report (Tables 0-3 per configuration, then every case)."""
     from scripts.vla_pipeline_qa_compare import build
     build([output], output.resolve(), "report.html", eps_rms, eps_snr)
 
@@ -1666,9 +1761,9 @@ def main():
     st.add_argument("--execute", action="store_true")
     st.add_argument("--report", action="store_true")
     ap.add_argument("--epsilon-rms", type=float, default=EPSILON_RMS,
-                    help="--report: relative RMS change tolerance of the v4 Image outcome (PROVISIONAL default)")
+                    help="--report: relative RMS change tolerance of the Image dimension (default 0.05 = 5%%)")
     ap.add_argument("--epsilon-snr", type=float, default=EPSILON_SNR,
-                    help="--report: relative SNR change tolerance of the v4 Image outcome (PROVISIONAL default)")
+                    help="--report: relative SNR change tolerance of the Image dimension (default 0.05 = 5%%)")
     st.add_argument("--unit", metavar="CASE", help=argparse.SUPPRESS)
     st.add_argument("--casa-regen", metavar="CASE", help=argparse.SUPPRESS)
     st.add_argument("--casa-recipe", nargs=2, metavar=("CASE", "RECIPE"), help=argparse.SUPPRESS)

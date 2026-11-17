@@ -3,6 +3,8 @@
 Source: vault `Notes/Week 10 RadioastroML Update 2026-11-04.md`, Jeff Feedback, Idea 2.
 Status: DRAFT specifications, updated 2026-11-09. Recipe comparisons and evaluation conventions below supersede conflicting wording in the earlier draft. Unresolved choices are listed at the end. No implementation or run is authorized by this document alone.
 
+**Current specification (2026-11-16):** the v5 section at the end supersedes v3/v4 grouping, headline labels, tolerances and report layouts. Earlier implementation notes describe historical behavior, not the new requested behavior. This update is documentation only. The initial groups use the confirmed noise-only / joint-gain cancellation rules below. Audit negative damage before interpreting group counts.
+
 ## Scientific question and scope
 
 Assess how well specified gain-calibration and automated target-self-calibration recipes repair the residual corruptions in matched Dataset v2: constant antenna amplitude errors, constant antenna phase errors, additional Gaussian thermal noise, and their mixtures.
@@ -696,3 +698,157 @@ Detailed rows show expectation + reason/D, Pipeline, Recovery, Image, eC before/
 - Elapsed: `--execute` now records each call at its start; the report ends a call that never recorded its finish at its last completed case. Runs executed earlier recorded only finished calls, so their elapsed time can miss killed (preempted/time-limit) calls.
 - `ml/pipeline_qa_models.py` (frozen multitask models on QA cases) tabulates expectation group × each v4 dimension against the presence classifier; the v3 table is kept collapsed.
 
+
+## Requested v5 evaluation setup and implementation (2026-11-16)
+
+[USER] Documentation specification, implementation pending. Separate pipeline evaluation from frozen-model evaluation. Keep all cases, including noise, cancellation and weak corruption. Do not retrain, change dataset membership, rerun calibration, regenerate simulations or reimage to implement this change. Compute new report labels from retained results and image outputs. The supplied reference report is the read-only synced `reports/runs/runs/vla-pipeline-qa-v2-val-256-center-on-20261112-0054/report.html`.
+
+### Definitions and configuration
+
+- Configuration: **B, phase+amplitude self-calibration, 256-pixel internal imaging, center mask, flagging on**, matched-v2 validation cases. Run: `vla-pipeline-qa-v2-val-256-center-on-20261112-0054`. This is target self-calibration on simulated residual corruptions, not the full calibrator-transfer VLA pipeline.
+- `before`, `after`: measured eC before and after the recipe. eC is relative L2 error of the recovered CLEAN model convolved to the evaluation beam against known truth.
+- `reference`: archived eC with both amplitude and phase injections removed, preserving source, noise realization, noise multiplier and evaluation settings. Validate the match.
+- `D = before - reference`: signed joint gain damage. Do not add individual corruption damages to obtain D.
+- `change = after - before`: positive means worse recovery. `remaining = after - reference`.
+- Use unrounded numbers. Recovery change tolerance = **0.05 absolute eC**. Reference tolerance = **0.05 absolute eC**. Image RMS/SNR tolerances = **5% relative**. These replace 0.005 and 1%. They are chosen practical tolerances, not statistical significance claims.
+- Boundary convention: exactly 0.05 change is Similar, exactly 5% image change is Similar, exactly 0.05 above reference is within tolerance. Use strict inequalities for meaningful change. This resolves the informal “0.05+” wording without overlapping classes.
+
+### Initial groups, exclusive and fixed across recipes
+
+Assign each case once using original injection metadata, before and reference, never after or a model prediction. Confirmed precedence (supersedes earlier proposals):
+
+1. **Uncorrupted:** no injected corruption, using the dataset control convention.
+2. **Noise only:** only noise injected, at any amount. No eC cutoff.
+3. **Cancelling Corruptions:** noise and at least one gain corruption are injected, and **joint gain damage D < 0**. Removing all injected amplitude/phase errors together while keeping noise makes recovery worse. This includes amp+noise, phase+noise and amp+phase+noise. Negative individual damage alone is insufficient. Any negative D qualifies, even if its magnitude is below 0.05.
+4. **Small:** remaining gain-containing cases with **0 <= D <= 0.05**.
+5. **Improvement expected:** remaining gain-containing cases with **D > 0.05**.
+
+Groups 1–4 have parent No improvement expected. Save both parent and subgroup with their evidence. Gain-only cases with D < 0 are **unexpected negative joint gain damage**, a visible exception accounting bucket pending investigation, not noise cancellation or Small. Missing/invalid required measurements are unavailable. No cases may disappear. Recognize Uncorrupted/Noise only from verified injection metadata even if their metrics are missing, with metric availability recorded separately. Unknown metadata cannot establish a group.
+
+### Required dataset sanity script: negative damage audit
+
+[USER] Write a read-only script, e.g. `scripts/dataset_v2_negative_damage_audit.py`, to check the number and mixture membership of negative ground-truth damage cases before relying on the grouping assumptions. This is an implementation instruction, not a request to run new science experiments.
+
+- Inputs: explicit matched-v2 dataset run paths (train/validation/test as available), archived cases, source plans, damage records and counterpart eC values. Report each split separately and combined without changing split membership or tuning on test outcomes. Deduplicate by dataset identity + case ID, not by report row or per-kind label. Do not silently restrict to representative cases.
+- Distinguish **individual damage** `d_k = eC(case) - eC(case with only k removed)` from **joint gain damage** `D = eC(case) - eC(case with all gains removed, same noise)`. Recompute differences from existing matched metrics where available and check stored labels against them. Verify source, seed, noise level and other retained parameters for each counterpart. Do not add individual damages to estimate D.
+- Table rows: control, amp, phase, noise, amp+phase, amp+noise, phase+noise, amp+phase+noise, including zero-count rows. Columns: total unique cases, evaluable counts for each damage, unique cases with any negative active-kind damage, negative d_amp count, negative d_phase count, negative d_noise count, negative D count, and cases qualifying for the new Cancelling group. Per-kind columns can overlap, but the unique-case total must not double count a case with several negative labels. Ignore absent-kind labels as damage events, while checking that they follow the dataset's conventions.
+- Explicitly list **amp-only, phase-only and noise-only cases with negative own-kind damage**, as requested. Also list gain-only amp+phase cases with negative joint D, and noise-only/control cases with nonzero D (their no-gain counterpart should be themselves). Report individual negative amp/phase damages with nonnegative D separately: these are not Cancelling under the new rule.
+- A negative noise damage in a gain+noise mixture means removing noise worsens recovery. It does not by itself mean that removing gains worsens recovery. Count it, but do not use it as the Cancelling criterion.
+- Export exact IDs, split, source, injection mixture/parameters, negative label types, original and counterpart eC, counterpart IDs, signed differences and matching/validation status. Give magnitude summaries (minimum and median negatives) and a few largest examples per unexpected category, plus full CSV/JSON so cases can be inspected.
+- Count all strict negatives using unrounded values. Show tiny negatives separately using an explicit exported diagnostic tolerance (proposed default 1e-6 eC, not a validated numerical-error bound). Never silently erase or relabel them, and do not use the 0.05 scientific tolerance to hide negative cases. Missing/nonfinite counterparts or sparse unavailable labels count as unavailable, not zero damage.
+- End with a short verdict: counts of expected noise+gain joint negatives, unexpected single-kind negatives, unexpected gain-only joint negatives, and missing/invalid measurements. Reconcile all dataset cases with the five groups plus exception/unavailable buckets. If unexpected cases exist, identify them and say the grouping assumption needs investigation. Do not automatically exclude them or alter labels.
+- This establishes **where negative cases occur and whether the grouping covers the data**, not their physical cause. A mixture count alone cannot prove noise cancellation, an imaging artefact or a numerical bug. Inspect existing images/metadata for unexpected examples before explaining causes, and distinguish measured findings from hypotheses.
+- No CASA, pipeline execution, regeneration, reimaging, MS scans or model training. Tests use small saved-metric fixtures covering overlapping negative labels, negative individual but positive joint damage, negative joint gain-only cases, tiny negatives, sparse labels, invalid counterparts, deduplication and count reconciliation.
+
+### Run / application dimension
+
+- **Applied:** any final gain correction is retained/applied. A later failed trial does not override this. Example: `Final solint: inf_EB` retained after `inf` failed is Applied.
+- **Blocked — Low Initial SNR:** initial SNR checks prevented correction trials.
+- **Blocked — Solution Lowers SNR:** trials failed SNR checks and no correction remains. Includes first-trial rejection and a provisional first correction revoked after later failure.
+- Preserve **Blocked — Empty Model/Mask**, **Blocked — Other** and **Blocked — Reason unknown** when those are the actual evidence. Do not mislabel an empty mask as low SNR or every rejection as SNR decrease. These are necessary accounting for cases outside the two requested named reasons.
+- Keep execution Error, Pending and Unknown separate from Blocked. QA scoring/rendering warnings alone do not mean execution failed. Flag-only changes must remain visible in Description.
+- Read structured application/interval/rollback evidence before logs. Never infer success or a trial solely from “Starting with solint.” Store all stop reasons, but give each case exactly one primary blocked reason for disjoint summary counts.
+
+### Recovery dimension
+
+Evaluate independently of the application decision:
+
+- **Degraded:** `change > 0.05`.
+- **Similar:** `abs(change) <= 0.05`.
+- **Improved:** `change < -0.05` AND `remaining > 0.05`.
+- **Solved:** `change < -0.05` AND `remaining <= 0.05`.
+
+These replace preserved/unchanged/rejected as recovery labels. No requirement to start outside tolerance or to have an Applied action is added. “Within reference tolerance” here means at most reference + 0.05, not absolute distance to reference. An after value better than reference is also acceptable. If eC is available but reference is missing, Similar/Degraded can still be determined. A meaningful reduction then has unknown Improved-versus-Solved status, retain the reduction but mark Recovery unavailable. Do not turn missing measurements into Similar.
+
+### Image dimension
+
+Keep the verified common-evaluation restored-image measurements and fixed source/background masks. RMS is background standard deviation in Jy/beam, SNR is `(source_peak - background_mean) / RMS`. Use the same regions and comparable units, beams and image geometry before/after. Do not use a model-only image or PNG. Retain flux-error diagnostics separately.
+
+- RMS better: reduction > 5%. RMS worse: increase > 5%. Otherwise RMS similar.
+- SNR better: increase > 5%. SNR worse: reduction > 5%. Otherwise SNR similar.
+- **Similar:** both similar.
+- **Worse:** both worse, or one worse and the other similar.
+- **Mixed:** one better and one worse.
+- **Cleaner:** both better, or one better and the other similar.
+
+Require finite positive before/after RMS and SNR. Missing or incomparable products mean Image unavailable. Validate configurable tolerances as finite and nonnegative. Cache raw metrics separately from labels or include thresholds/version in cache identity. Changing from 1% to 5% must not reuse old categories.
+
+### Pipeline Result dimension
+
+This is an evaluation label, not the pipeline's own internal QA score:
+
+| Initial parent group | Recovery | Pipeline Result |
+| :-- | :-- | :-- |
+| Improvement expected | Solved | Success |
+| Improvement expected | Improved | Partial success |
+| Improvement expected | Similar or Degraded | Failure |
+| No improvement expected | Solved, Improved or Similar | Success |
+| No improvement expected | Degraded | Failure |
+
+Partial success is not applicable to No improvement expected. Applied alone earns no success. Blocked alone earns no failure. Missing required group/recovery information means Pipeline Result unavailable. Unfinished/failed evaluations remain visible accounting states, never fabricated scientific outcomes.
+
+### Pipeline report (no model predictions)
+
+Use the existing compact count bars, accessible labels, direct counts and consistent colors. No separate column per category.
+
+- **Table 0:** short glossary, one phrase per dimension/category, plus numeric thresholds and reference definition.
+- **Table 1:** one ungrouped row for the selected run/configuration. Columns: **Config** (configuration, planned/finished/available coverage and runtime), **Pipeline Result**, **Recovery**, **Image**, **Run** (Applied and disjoint Blocked reasons, plus accounting states).
+- **Table 2:** same columns, two rows for Improvement expected and No improvement expected.
+- **Table 3:** same columns, four rows for the No improvement expected subgroups, in Uncorrupted / Noise only / Cancelling Corruptions / Small order. Show zero rows rather than omitting a subgroup. Missing-group accounting must reconcile with the ungrouped total.
+- If comparing multiple configurations, repeat these blocks per configuration. Never pool runs merely because their display names match.
+- Runtime: median/range recipe minutes, cumulative recipe-hours, actual known elapsed time separately. Do not duplicate whole-case runtime or represent a resumed fragment as total elapsed time.
+- Cases below: filtering controls and detailed rows with group/subgroup, all four dimensions, eC before/after/reference/D/change/remaining, RMS/SNR before/after and relative changes, runtime, source/case, image links, Description and evidence.
+- Suggested stable palette: Success/Solved teal, Partial success/Improved blue, Failure/Degraded/Worse vermilion, Similar gray, Cleaner blue, Mixed purple. Applied blue, Blocked amber. Always include labels, not color alone.
+
+**Filtering contract:** every bar in columns 2–5 of all three tables selects exactly its own rows. Use explicit `(run identity, recipe/configuration, parent group?, subgroup?, outcome dimension, outcome category, blocked reason?)`. Table 1 has no group restriction, Table 2 selects the parent, Table 3 selects the subgroup. A reason bar selects only that blocked reason. Summary-bar clicks replace stale filters, while explicit controls allow further intersections. Keep reset, visible/total count, active-filter text and keyboard activation. Use stable `(absolute run identity, case ID, recipe)` row IDs. Do not conflate Pipeline Result with Run or Recovery. Match bar count to visible row IDs, including zero and missing states.
+
+### Model result report (final eC regression only)
+
+Use frozen models and features of the **after-pipeline** evaluation. The target is measured total `after` eC, and the prediction is the model's total-eC output. Do not substitute a sum of per-kind damage outputs, the original before eC, original injected class, or remaining gain damage. “There is something solvable” remains a research objective, but no new classification score is requested here. Exact initial error type is secondary context, not post-pipeline ground truth.
+
+Create a separate report with these sections for each model (and separately for each run/configuration):
+
+- **Section 1, by Pipeline Result:** Table 1 rows = Success, Partial success, Failure, without groups. Table 2 = parent group in column 1, Pipeline Result within that group in column 2. Table 3 = No improvement expected subgroup in column 1, Pipeline Result within that subgroup in column 2. Show Partial success as not applicable or omit it within No improvement expected, not a measured failure.
+- **Section 2, by Recovery:** repeat Tables 1–3, replacing the nested outcome with Solved, Improved, Similar, Degraded.
+- Score columns in every table: **after eC R²**, **after eC RMSE**. Also show total cases and valid prediction/target pairs as coverage, not another performance score. No presence-classification or original-error accuracy columns in this revision.
+- RMSE = sqrt(mean((prediction - after)^2)). R² = 1 - sum((prediction - after)^2) / sum((after - mean(after))^2), calculated within each displayed subset. Preserve negative R². R² is unavailable for fewer than two valid pairs or zero target variance. RMSE requires at least one pair. Do not average subgroup R²/RMSE values to obtain pooled metrics, compute from pooled pairs.
+- Require finite matched prediction/target pairs. Missing after features/predictions/measurements have explicit coverage/reasons. Reused after features require verified unchanged-data evidence. Scores must never silently include before features as after data.
+- Keep existing train/validation/test identities and model provenance. No fitting, threshold selection using test outcomes, or dataset exclusions are part of this reporting change.
+
+### Caveats and decisions
+
+- **Problem 1, noise and cancellation:** keep them. Assess whether the pipeline avoids materially worsening recovery and whether the model predicts the remaining total recovery error. Amp/phase interactions are intended gain-correction targets, but negative joint damage and noise/gain interactions prevent a guarantee that removing gains improves eC. Physical corruption presence and actionable recovery damage are different targets.
+- **Problem 2, small cases:** retain them and analyze separately. Desired behavior is preservation or a small improvement. Similar is not a failure in No improvement expected. Still expose significant degradation and whether the model recognizes poor final recovery. Do not remove weak cases from training/validation/test by this change.
+- **Problem 3, changed error types:** the pipeline may remove, leave or introduce errors. Keep final eC regression primary, and residual solvability as a separate future target requiring defensible labels. Original injected error is only secondary context after processing. Do not score it as post-pipeline truth. Pipeline accepted/rejected is not an independent scientific success label.
+- The matched reference is a benchmark, not a guaranteed attainable minimum. A model can predict poor final recovery even when no gain correction can remove its cause. Cleaner RMS/SNR does not guarantee lower eC or correct flux.
+
+### Code changes and verification required
+
+- `scripts/vla_pipeline_qa.py`: versioned pure group/subgroup, application/reason, recovery, image and Pipeline Result classifiers. Centralize constants and boundary conventions. Keep measured facts independent of labels.
+- `scripts/vla_pipeline_qa_compare.py`: replace legacy headline tables with Tables 0–3, retain old labels only as historical metadata. Shared single-run report uses the same logic. Compute metrics before writing per-case evidence. Export all raw metrics, thresholds, group reasons, outcome reasons and version.
+- `ml/pipeline_qa_models.py`: consume the same classifications, rebuild the six requested regression tables using after predictions only. Inference on existing retained features is allowed. Do not retrain or call CASA.
+- Reuse existing FITS/retained numerical outputs and caches to backfill metrics. Missing data stays unavailable. Keep the CHPC mirror read-only and rebuild/sync from the source. No `--execute`, simulation, regeneration or imaging fallback.
+- Tests: exclusive/exhaustive known groups with confirmed precedence and exact threshold edges, plus unexpected gain-only negative-D accounting. Negative/zero/positive D, large noise with D=0, small and large cancellation. All Recovery boundaries and all nine Image combinations. Applied with a later rejected interval, complete rejection, provisional rollback, initial low SNR, empty mask, unknown/error states. All Pipeline Result mappings. Invalid tolerance rejection and stale-cache prevention.
+- Report tests: every bar's displayed count equals its exact selected case IDs across all tables, dimensions, blocked reasons and repeated config names. Group/subgroup totals reconcile. Test keyboard/reset and filter replacement in the browser. Model tests: known R²/RMSE, negative R², empty/singleton/constant targets, nonfinite predictions, pooled metrics, after-feature identity and no reliance on injected labels. Guard report/inference tests against invoking calibration or imaging.
+
+### v5 implementation notes (2026-11-16)
+
+Implemented as specified above; no run, rerun or retraining was started. Code:
+
+- `scripts/vla_pipeline_qa.py`: `V5_VERSION`, `TOL_CHANGE = TOL_REFERENCE = 0.05`, `TOL_IMAGE = 0.05` (`EPSILON_RMS/SNR`), `check_tolerance`; pure `initial_group` (precedence Uncorrupted → Noise only → Cancelling → Small → Improvement expected; gain-only D < 0 → `exception`; unknown metadata or missing eC → `unavailable`), `run_outcome` (Applied / Blocked with one primary reason: low_initial_snr, solution_lowers_snr, empty_model, other, reason_unknown; error/unknown separate; all stop reasons stored), `recovery_outcome`, `pipeline_result`, `v5_labels` (all but Image), `image_measure` (raw, cacheable) + `image_label`. v4 classifiers removed; legacy v3 `my_criteria` kept only for exported history. The Small/Improvement split uses `TOL_REFERENCE` (same 0.05).
+- `scripts/vla_pipeline_qa_compare.py` (also `--report`): Table 0 glossary, then per run and recipe Tables 1–3 (Config/Group/Subgroup | Pipeline Result | Recovery | Image | Run), Cases table with filters run/config/group/subgroup/result/recovery/image/run outcome/blocked reason. Bars: scientific categories always shown (zero included), Partial success omitted outside Improvement expected, the two named blocked reasons always and the other reasons/accounting states only when present. `summarize` raises if group/subgroup totals or any dimension's bars do not reconcile with the case count. Image cache: raw metrics keyed by product identity and metric version only (`raw-v1`); labels recomputed at the requested tolerances, so the first rebuild recomputes the image metrics once from the retained FITS (old 1%-labelled cache entries are not used). Evidence JSON: `v5` block (all raw metrics, reasons), `thresholds`, `v5_version`, `legacy_v3`.
+- `ml/pipeline_qa_models.py`: rewritten for final-eC regression only (Sections 1–2, Tables 1–3, per run configuration and model; columns cases, pairs (reused), R², RMSE from pooled pairs; accounting rows with missing-pair reasons). Reused after features = archived features only when the evaluation is `evaluation_reused` and its stored after eC equals before eC. Presence/before/legacy tables removed. Image metrics are not needed and not computed.
+- `scripts/dataset_v2_negative_damage_audit.py`: read-only audit (report.html, audit.json, cases.csv). Recomputes d_k from case eC and checks stored labels (|Δ| ≤ 1e-9), validates every counterpart (source, slot, noise seed, reference, removed/kept parameters, antenna), joint D via the same `matched_reference`, groups via `initial_group`.
+- Review fixes (2026-11-16): tolerance comparisons use `exceeds(x, tol) = x > tol + ROUNDOFF` (ROUNDOFF = 1e-9 eC or relative) so values at a tolerance up to float roundoff (0.20 − 0.15 = 0.05000000000000002) count as AT it; sign tests (D < 0) stay exact. Missing feature names/after features/model columns are explicit missing-pair reasons that stay in the totals. Run identity is the absolute run path (filters, row ids, model-report subsets); file names in images/ and descriptions/ get a path hash only when two loaded runs share a folder name.
+- Tests: 47 (`tests/test_vla_pipeline_qa.py`, `tests/test_dataset_v2_negative_damage_audit.py`, `ml/tests/test_pipeline_qa_models.py`), plus a jsdom check of a synthetic 3-run report (697 bars by click/Enter, 0 mismatches, stale filters replaced, intersection and reset).
+- Local preview from the synced v4 evidence of the val run (approximate, not a report): groups Improvement expected 1003, Small 400, Noise only 252, Cancelling 107, Uncorrupted 21, Exception 1; Run Applied 1237, Blocked low initial SNR 415, solution lowers SNR 127, other 4 (RMS increase only), error 1, unknown 1.
+
+Rebuild on CHPC (report/inference only, no CASA):
+
+```
+bin/run ml scripts/dataset_v2_negative_damage_audit.py --output runs/dataset-v2-negative-damage-audit-20261116 \
+    runs/dataset-v2-matched-train runs/dataset-v2-matched-val [runs/<test dataset run>]
+bin/run ml scripts/vla_pipeline_qa.py --report --output runs/vla-pipeline-qa-v2-val-256-center-on-20261112-0054
+bin/run ml ml/pipeline_qa_models.py --model ml/runs/matched-v2-full-all22-dirty \
+    --output ml/runs/pipeline-qa-models-val-256-center runs/vla-pipeline-qa-v2-val-256-center-on-20261112-0054
+```

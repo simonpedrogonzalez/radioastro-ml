@@ -196,38 +196,7 @@ class HelperTests(unittest.TestCase):
         self.assertTrue(q.CALONLY_FIX.startswith('if applymode == "calflag" or '))
 
 
-class V4OutcomeTests(unittest.TestCase):
-    def test_expectation_groups(self):
-        e = q.expectation
-        self.assertEqual(e(0, .1, .1)["expectation_reason"], "control")
-        self.assertEqual(e(4, .2, .1)["expectation_reason"], "noise_only")          # noise only: never expected
-        self.assertEqual(e(5, .09, .1)["expectation_reason"], "negative_joint_gain_damage")
-        self.assertEqual(e(3, .1, .1)["expectation_reason"], "zero_joint_gain_damage")
-        x = e(6, .1003, .1)
-        self.assertEqual((x["expectation"], x["near_zero"]), ("improvement_expected", True))   # any D > 0, flagged
-        self.assertEqual(e(1, .3, .1)["expectation"], "improvement_expected")
-        self.assertEqual(e(1, None, .1)["expectation"], "expectation_unavailable")
-        self.assertEqual(e(1, .3, float("nan"))["expectation"], "expectation_unavailable")
-
-    def test_pipeline_and_recovery(self):
-        self.assertEqual([q.pipeline_outcome(a) for a in ("Applied", "Could not start", "Left unchanged", "Error", "Unknown")],
-                         ["applied", "blocked", "rejected", "error", "unknown"])
-        eps = q.EPSILON
-        self.assertEqual(q.recovery_outcome(.1, .1 - eps * 1.01), "improved")
-        self.assertEqual(q.recovery_outcome(.1, .1 - eps * .99), "similar")
-        self.assertEqual(q.recovery_outcome(.1, .1 + eps * 1.01), "degraded")
-        self.assertEqual(q.recovery_outcome(.1, None), "unavailable")
-
-    def test_image_table(self):
-        up, same, down = .05, 0., -.05              # benefit-oriented: positive r = better
-        table = {(up, up): "cleaner", (up, same): "cleaner", (same, up): "cleaner", (same, same): "similar",
-                 (down, down): "worse", (down, same): "worse", (same, down): "worse", (up, down): "mixed",
-                 (down, up): "mixed"}
-        for (r_rms, r_snr), want in table.items():
-            self.assertEqual(q.image_outcome(r_rms, r_snr), want, (r_rms, r_snr))
-        self.assertEqual(q.image_outcome(q.EPSILON_RMS, 0), "similar")          # equality is similar
-        self.assertEqual(q.image_outcome(None, 0), "unavailable")
-
+class ImageMetricTests(unittest.TestCase):
     def test_restored_metrics_and_pair(self):
         import tempfile
         from pathlib import Path
@@ -259,28 +228,6 @@ class V4OutcomeTests(unittest.TestCase):
             self.assertEqual(bad["image"], "unavailable"); self.assertIn("BMAJ", bad["image_reason"])
             self.assertEqual(q.image_pair(b, Path(tmp) / "missing.fits", masks)["image"], "unavailable")
 
-
-class ElapsedTests(unittest.TestCase):
-    def test_killed_call_counts_until_last_case(self):
-        from scripts.vla_pipeline_qa_compare import elapsed_hours
-        calls = [dict(started=0.), dict(started=10000., finished=10000. + 3600.)]     # first call killed
-        units = [1800., 3600., 10100.]                                                 # cases it completed
-        self.assertAlmostEqual(elapsed_hours(calls, units), 2.)
-        self.assertAlmostEqual(elapsed_hours([dict(started=0.)], []), 0.)
-        self.assertIsNone(elapsed_hours([], []))
-
-
-class V4ReviewFixTests(unittest.TestCase):
-    """Regression tests for the 2026-11-12 v4 review findings."""
-
-    def test_recovery_ignores_missing_reference(self):
-        ev = dict(status="measured", before=dict(eC=.3), after=dict(eC=.1))
-        self.assertEqual(q.measured_recovery(ev), "improved")
-        crit = q.my_criteria(dict(recipe_record=dict(disposition="applied"), evaluation=ev), True,
-                             dict(status="unavailable", reason="no matched counterpart"))
-        self.assertEqual(crit["category"], "unavailable")        # legacy needs the reference, Recovery does not
-        self.assertEqual(q.measured_recovery(dict(status="failed")), "unavailable")
-
     def _fits(self, path, noise, peak, header, drop=()):
         from astropy.io import fits
         data = np.random.default_rng(2).normal(0, noise, (32, 32)); data[16, 16] = peak
@@ -311,35 +258,245 @@ class V4ReviewFixTests(unittest.TestCase):
             loose = q.image_pair(t / "b.fits", t / "a.fits", masks, eps_rms=1e9, eps_snr=1e9)   # configurable
             self.assertEqual((loose["image"], loose["epsilon_rms"]), ("similar", 1e9))
 
-    def _rows(self):
-        cases = lambda run: [dict(case=f"{run}{i}", id=f"{run}|c{i}|B", label="s:r00:m3:slot0", corruption="amp+phase",
-                                  mask=3, action="Applied", expectation="improvement_expected", expectation_reason="x",
-                                  D=.1, pipeline="applied", recovery="improved", image="cleaner", category="improved",
-                                  description="d", seconds=60.) for i in range(1)]
-        return [dict(run=run, config="B · 256 px · center · flags on", key=run, recipe="B:phase_amp:flagging_on",
-                     cases=cases(run), calls=[], superseded=False) for run in ("run1", "run2")]
 
-    def test_bar_filters_keep_run_identity(self):
+class V5GroupTests(unittest.TestCase):
+    """[USER] 2026-11-16 initial groups: confirmed precedence and exact threshold edges."""
+
+    def bucket(self, mask, before, reference, tol=q.TOL_REFERENCE):
+        g = q.initial_group(mask, before, reference, tol)
+        return g["subgroup"] or g["group"]
+
+    def test_precedence_and_edges(self):
+        b = self.bucket
+        self.assertEqual(b(0, None, None), "uncorrupted")                  # metadata alone, metrics missing
+        self.assertEqual(b(4, .9, .9), "noise_only")                       # any amount of noise, D = 0
+        self.assertEqual(b(4, None, None), "noise_only")
+        self.assertEqual(b(5, .2, .2001), "cancelling")                    # any negative D, even tiny
+        self.assertEqual(b(7, .2, .6), "cancelling")                       # large cancellation
+        self.assertEqual(b(6, .2, .3), "cancelling")
+        self.assertEqual(b(3, .2, .3), "exception")                        # gain only, D < 0: not Small/Cancelling
+        self.assertEqual(b(1, .2, .3), "exception")
+        self.assertEqual(b(3, .2, .2), "small")                            # D = 0
+        self.assertEqual(b(5, .75, .5, tol=.25), "small")                  # D = tol exactly (exact binary numbers)
+        self.assertEqual(b(5, .75, .5, tol=.125), "improvement_expected")  # D > tol
+        self.assertEqual(b(2, .3, .1), "improvement_expected")
+        self.assertEqual(b(3, None, .1), "unavailable")
+        self.assertEqual(b(3, .3, float("nan")), "unavailable")
+        self.assertEqual(b(None, .3, .1), "unavailable")                   # unknown metadata cannot establish a group
+
+    def test_exclusive_and_exhaustive(self):
+        known = {"improvement_expected", "uncorrupted", "noise_only", "cancelling", "small", "exception", "unavailable"}
+        for mask in range(8):
+            for D in (-.5, -1e-9, 0., 1e-9, .05, .0500001, .5):
+                g = q.initial_group(mask, .5 + D, .5)
+                self.assertIn(g["subgroup"] or g["group"], known)
+                self.assertEqual(g["subgroup"] is not None, g["group"] == "no_improvement_expected")
+
+
+class V5RecoveryTests(unittest.TestCase):
+    def test_boundaries(self):
+        r = lambda before, after, ref, t=.25: q.recovery_outcome(before, after, ref, t, t)["recovery"]
+        self.assertEqual(r(.5, .75, 0.), "similar")            # change = +tol exactly
+        self.assertEqual(r(.75, .5, .5), "similar")            # change = -tol exactly
+        self.assertEqual(r(.5, .875, 0.), "degraded")
+        self.assertEqual(r(1., .5, .25), "solved")              # remaining = tol exactly
+        self.assertEqual(r(1., .5, .125), "improved")          # remaining > tol
+        self.assertEqual(r(1., .125, .5), "solved")            # better than the reference
+        self.assertEqual(r(.5, .875, None), "degraded")        # no reference: degraded/similar still known
+        self.assertEqual(r(.5, .5, None), "similar")
+        x = q.recovery_outcome(1., .5, None, .25, .25)
+        self.assertEqual(x["recovery"], "unavailable"); self.assertEqual(x["change"], -.5)   # reduction kept
+        self.assertEqual(r(None, .5, .1), "unavailable")
+        d = q.recovery_outcome(.3, .2, .1)
+        self.assertAlmostEqual(d["change"], -.1); self.assertAlmostEqual(d["remaining"], .1)
+
+    def test_roundoff_at_default_boundaries(self):
+        # 0.20 - 0.15 = 0.05000000000000002 in floating point: AT the 0.05 tolerance, not beyond it
+        self.assertEqual(q.recovery_outcome(.15, .20, .15)["recovery"], "similar")
+        self.assertEqual(q.recovery_outcome(.20, .15, .10)["recovery"], "similar")
+        self.assertEqual(q.recovery_outcome(.30, .15, .10)["recovery"], "solved")      # remaining .05 (roundoff)
+        self.assertEqual(q.recovery_outcome(.15, .2001, .15)["recovery"], "degraded")
+        self.assertEqual(q.initial_group(3, .20, .15)["subgroup"], "small")
+        self.assertEqual(q.initial_group(3, .2001, .15)["group"], "improvement_expected")
+        self.assertEqual(q.initial_group(5, .15, .15 + 1e-15)["subgroup"], "cancelling")   # sign test stays exact
+        self.assertEqual(q.image_outcome(1 - .95, 0), "similar")                         # 0.050000000000000044
+
+    def test_pipeline_result_mappings(self):
+        p = q.pipeline_result
+        imp, no = "improvement_expected", "no_improvement_expected"
+        self.assertEqual([p(imp, k) for k in ("solved", "improved", "similar", "degraded")],
+                         ["success", "partial_success", "failure", "failure"])
+        self.assertEqual([p(no, k) for k in ("solved", "improved", "similar", "degraded")],
+                         ["success", "success", "success", "failure"])
+        self.assertEqual(p("exception", "solved"), "unavailable")
+        self.assertEqual(p("unavailable", "similar"), "unavailable")
+        self.assertEqual(p(imp, "unavailable"), "unavailable")
+        self.assertEqual((p(imp, "pending"), p(no, "error")), ("pending", "error"))
+
+    def test_labels_accounting(self):
+        self.assertEqual(q.v5_labels(3, .3, .1, None, finished=False)["result"], "pending")
+        self.assertEqual(q.v5_labels(3, .3, .1, None, finished=True)["application"], "error")
+        res = dict(recipe_record=dict(disposition="applied"),
+                   evaluation=dict(status="measured", before=dict(eC=.3), after=dict(eC=.12)))
+        x = q.v5_labels(3, .3, .1, res)
+        self.assertEqual((x["group"], x["application"], x["recovery"], x["result"]),
+                         ("improvement_expected", "applied", "solved", "success"))
+        res = dict(recipe_record=dict(disposition="runtime_failure"), evaluation=dict(status="failed"))
+        x = q.v5_labels(3, .3, .1, res)
+        self.assertEqual((x["application"], x["recovery"], x["result"]), ("error", "error", "error"))
+
+
+class V5ImageTests(unittest.TestCase):
+    def test_nine_combinations_and_edges(self):
+        up, same, down = .06, 0., -.06              # benefit-oriented: positive r = better, tolerance 5%
+        table = {(up, up): "cleaner", (up, same): "cleaner", (same, up): "cleaner", (same, same): "similar",
+                 (down, down): "worse", (down, same): "worse", (same, down): "worse", (up, down): "mixed",
+                 (down, up): "mixed"}
+        for (r_rms, r_snr), want in table.items():
+            self.assertEqual(q.image_outcome(r_rms, r_snr), want, (r_rms, r_snr))
+        self.assertEqual(q.EPSILON_RMS, .05)
+        self.assertEqual(q.image_outcome(.05, -.05), "similar")              # exactly at the tolerance
+        self.assertEqual(q.image_outcome(.03, 0, .01, .01), "cleaner")       # 1% would call 3% cleaner
+        self.assertEqual(q.image_outcome(.03, 0), "similar")
+        self.assertEqual(q.image_outcome(None, 0), "unavailable")
+        self.assertEqual(q.image_label(dict(r_rms=.5, r_snr=.5, image_reason="x"))["image"], "unavailable")
+
+    def test_invalid_tolerances(self):
+        for bad in (-.01, float("nan"), float("inf"), None, "0.05"):
+            with self.assertRaises(ValueError):
+                q.check_tolerance("eps", bad)
+        self.assertEqual(q.check_tolerance("eps", 0), 0.)
+
+
+class V5RunTests(unittest.TestCase):
+    def lib(self, **kw):
+        return dict(selfcal_result=dict(targets=[dict(sc_lib=kw)]))
+
+    def test_run_outcomes(self):
+        r = q.run_outcome
+        # Applied, a later interval failed: still Applied
+        rec = dict(disposition="applied", **self.lib(final_solint="inf_EB", Stop_Reason="S/N decrease",
+                                                     inf=dict(Pass=False, Fail_Reason="S/N decrease")))
+        self.assertEqual(r(rec)["application"], "applied")
+        self.assertIn("S/N decrease", r(rec)["stop_reasons"])
+        # complete rejection of the first trial
+        rec = dict(disposition="not_applied", **self.lib(Stop_Reason=" S/N decrease; All sub-fields failed",
+                                                         final_solint="None",
+                                                         ms={"inf_EB": dict(Pass=False, Fail_Reason="S/N decrease")}))
+        self.assertEqual((r(rec)["application"], r(rec)["blocked_reason"]), ("blocked", "solution_lowers_snr"))
+        # provisional first correction revoked after a later failure
+        rec = dict(disposition="not_applied", **self.lib(Stop_Reason="S/N decrease", final_solint="None",
+                   inf_EB_SNR_decrease=True,
+                   ms={"inf_EB": dict(Pass=False, Fail_Reason="S/N decrease with no successful solints later")}))
+        self.assertEqual(r(rec)["blocked_reason"], "solution_lowers_snr")
+        # initial low S/N: no trial
+        rec = dict(disposition="not_applied", **self.lib(Stop_Reason="Estimated_SNR_too_low_for_solint inf_EB",
+                                                         final_solint="None"))
+        self.assertEqual(r(rec)["blocked_reason"], "low_initial_snr")
+        # empty mask (log only) is not low S/N
+        rec = dict(disposition="not_applied", pipeline_notes=["No regions found by automasking"])
+        self.assertEqual(r(rec)["blocked_reason"], "empty_model")
+        # RMS increase only: another reason, not an S/N decrease
+        rec = dict(disposition="not_applied", **self.lib(Stop_Reason="RMS increase beyond 5%", final_solint="None",
+                   ms={"inf_EB": dict(Pass=False, Fail_Reason="RMS increase beyond 5%")}))
+        self.assertEqual(r(rec)["blocked_reason"], "other")
+        self.assertEqual(r(dict(disposition="no_valid_solutions"))["blocked_reason"], "other")
+        self.assertEqual(r(dict(disposition="not_applied"))["application"], "unknown")
+        self.assertEqual(r(dict(disposition="runtime_failure"))["application"], "error")
+        # QA scoring warning alone is not an execution failure
+        rec = dict(disposition="applied", pipeline_notes=["QA execution failed with an exception: 'list' ..."])
+        self.assertEqual(r(rec)["application"], "applied")
+
+
+class ElapsedTests(unittest.TestCase):
+    def test_killed_call_counts_until_last_case(self):
+        from scripts.vla_pipeline_qa_compare import elapsed_hours
+        calls = [dict(started=0.), dict(started=10000., finished=10000. + 3600.)]     # first call killed
+        units = [1800., 3600., 10100.]                                                 # cases it completed
+        self.assertAlmostEqual(elapsed_hours(calls, units), 2.)
+        self.assertAlmostEqual(elapsed_hours([dict(started=0.)], []), 0.)
+        self.assertIsNone(elapsed_hours([], []))
+
+
+def case_item(run, i, group, subgroup, result, recovery, image, application, reason=None):
+    return dict(case=f"c{i}", id=f"{run}|c{i}|B", label="s:r00:m3:slot0", corruption="amp+phase", mask=3, d=None,
+                eC_archived=.3, group=group, subgroup=subgroup, group_reason="x", D=.1, reference=.1,
+                application=application, blocked_reason=reason, recovery=recovery, recovery_reason=None,
+                result=result, image=image, change=-.1, remaining=.1, description="d", seconds=60., action="Applied",
+                legacy=dict(category="improved"))
+
+
+class V5ReportTests(unittest.TestCase):
+    CONFIG = "B · 256 px · center · flags on"
+
+    def _rows(self):
+        specs = [("improvement_expected", None, "success", "solved", "cleaner", "applied", None),
+                 ("improvement_expected", None, "partial_success", "improved", "mixed", "applied", None),
+                 ("improvement_expected", None, "failure", "similar", "similar", "blocked", "low_initial_snr"),
+                 ("no_improvement_expected", "noise_only", "success", "similar", "cleaner", "blocked", "solution_lowers_snr"),
+                 ("no_improvement_expected", "cancelling", "failure", "degraded", "worse", "applied", None),
+                 ("no_improvement_expected", "uncorrupted", "success", "similar", "similar", "blocked", "other"),
+                 ("no_improvement_expected", "small", "unavailable", "unavailable", "unavailable", "unknown", None),
+                 ("exception", None, "unavailable", "improved", "cleaner", "applied", None),
+                 ("improvement_expected", None, "pending", "pending", "pending", "pending", None)]
+        # two different runs with the SAME folder name and configuration: identity is the absolute path
+        return [dict(run="qa-run", run_id=f"/data/{where}/qa-run", tag="qa-run", config=self.CONFIG, key=where,
+                     recipe="B:phase_amp:flagging_on",
+                     cases=[case_item(f"/data/{where}/qa-run", i, *s) for i, s in enumerate(specs)], calls=[],
+                     superseded=False)
+                for where in ("a", "b")]
+
+    def test_every_bar_selects_exactly_its_cases(self):
         import html, json, re, tempfile
         from pathlib import Path
+        from unittest.mock import patch
         from scripts import vla_pipeline_qa_compare as cmp
         rows = self._rows()
-        with tempfile.TemporaryDirectory() as tmp:
-            cmp.write_report(Path(tmp), [cmp.summarize(r) for r in rows], rows, [Path("run1"), Path("run2")], "r.html",
-                             cmp.summarize_v4(rows))
+        with tempfile.TemporaryDirectory() as tmp, patch("subprocess.run", side_effect=AssertionError("no execution")):
+            summaries = [cmp.summarize(r) for r in rows]
+            cmp.write_report(Path(tmp), summaries, rows, [Path("run1"), Path("run2")], "r.html")
             text = (Path(tmp) / "r.html").read_text()
-        trs = [dict(re.findall(r"data-([a-z]+)='([^']*)'", tr)) for tr in re.findall(r"<tr data-run=[^>]*>", text)]
-        trs = [{k: html.unescape(v) for k, v in t.items()} for t in trs]
-        self.assertEqual(len(trs), 2)
-        bars = re.findall(r"class=bar [^>]*data-filter='([^']*)'><span class=lab>[^<]*</span><span[^>]*></span><span>(\d+)",
-                          text)
-        self.assertTrue(bars)
+        trs = [{k: html.unescape(v) for k, v in re.findall(r"data-([a-z]+)='([^']*)'", tr)}
+               for tr in re.findall(r"<tr data-run=[^>]*>", text)]
+        self.assertEqual(len(trs), 18)
+        bars = re.findall(r"class=bar [^>]*data-filter='([^']*)'><span class=lab>[^<]*</span><span[^>]*></span>"
+                          r"<span>(\d+)", text)
+        self.assertGreater(len(bars), 50)
+        keys = set()
         for flt, shown in bars:                                   # exact-match semantics of the page script
             flt = json.loads(html.unescape(flt))
-            self.assertIn("run", flt)
-            hit = sum(all(t.get(k) == v for k, v in flt.items() if v != "other") for t in trs)
-            self.assertEqual(hit, int(shown), flt)
-        self.assertIn('data-filter=\'{&quot;expectation&quot;: &quot;improvement_expected&quot;}\'', text)
+            self.assertIn("run", flt); self.assertIn("config", flt)
+            keys |= set(flt)
+            hit = [t["id"] for t in trs if all(t.get(k) == v for k, v in flt.items())]
+            self.assertEqual(len(hit), int(shown), flt)
+            self.assertTrue(flt["run"].startswith("/data/"))
+        self.assertTrue({"group", "subgroup", "result", "recovery", "image", "application", "reason"} <= keys)
+        for s in summaries:                                        # group/subgroup totals reconcile
+            self.assertEqual(sum(t["planned"] for t in s["table2"].values()), s["table1"]["planned"])
+            self.assertEqual(sum(t["planned"] for t in s["table3"].values()),
+                             s["table2"]["no_improvement_expected"]["planned"])
+            self.assertEqual(s["table3"]["small"]["planned"], 1)
+            self.assertIn("exception", s["table2"])
+
+    def test_tolerance_change_never_reuses_labels(self):
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+        from scripts import vla_pipeline_qa_compare as cmp
+        raw = dict(r_rms=.03, r_snr=0., image_reason=None, image_metric_version=q.IMAGE_METRIC_VERSION)
+        with tempfile.TemporaryDirectory() as tmp:
+            t = Path(tmp)
+            for name in ("b.fits", "a.fits"):
+                (t / name).write_text("x")
+            np.savez(t / "m.npz", annulus=np.ones((2, 2), bool), source=np.ones((2, 2), bool))
+            rows = [dict(cases=[dict(application="applied", clean_before=str(t / "b.fits"), clean_after=str(t / "a.fits"),
+                                     masks=str(t / "m.npz"))])]
+            with patch.object(cmp, "image_measure", return_value=dict(raw)) as measure:
+                cmp.add_image_metrics(rows, t / "cache", .01, .01)
+                self.assertEqual(rows[0]["cases"][0]["image"], "cleaner")
+                cmp.add_image_metrics(rows, t / "cache", .05, .05)
+                self.assertEqual(rows[0]["cases"][0]["image"], "similar")
+                self.assertEqual(measure.call_count, 1)            # raw metrics cached, label recomputed
 
     def test_evidence_written_after_image_metrics(self):
         import json, tempfile
@@ -355,7 +512,11 @@ class V4ReviewFixTests(unittest.TestCase):
                 patch.object(cmp, "add_image_metrics", side_effect=measure):
             cmp.build([Path("run1")], Path(tmp), "r.html")
             ev = json.loads(next((Path(tmp) / "descriptions").glob("*.json")).read_text())
-        self.assertEqual((ev["v4"]["image"], ev["v4"]["rms_after"], ev["v4"]["snr_after"]), ("cleaner", 1., 20.))
+        self.assertEqual((ev["v5"]["image"], ev["v5"]["rms_after"], ev["v5"]["snr_after"]), ("cleaner", 1., 20.))
+        self.assertEqual(ev["thresholds"]["tol_change"], .05)
+        self.assertEqual(ev["legacy_v3"]["category"], "improved")
+        with self.assertRaises(ValueError):
+            cmp.build([Path("run1")], Path("unused"), "r.html", eps_rms=-1.)
 
 
 if __name__ == "__main__":
