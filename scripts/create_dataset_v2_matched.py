@@ -27,7 +27,7 @@ from pathlib import Path
 import numpy as np
 
 from scripts import create_dataset_v1 as g
-from scripts.create_dataset_v2 import file_sha, indexed_sources, ms_bytes
+from scripts.create_dataset_v2 import EXTRA_KEYS, file_sha, indexed_sources, ms_bytes, thermal_root, thermal_source
 from scripts.dataset_v2_matched import DEFAULT, assign_shards, join_rows, plan_source, unit_file
 from scripts.injection_bounds_report import digest
 from scripts.preprocessing.schema import atomic_write_json
@@ -40,7 +40,7 @@ SECONDS_PER_IMAGE = (6., .085)   # 6 s + 0.085 s per MB of the original MS (v2 p
 
 def configuration(path):
     overrides = json.loads(Path(path).read_text()) if path else {}
-    unknown = set(overrides) - (set(DEFAULT) | {"split", "source_ids"})
+    unknown = set(overrides) - (set(DEFAULT) | EXTRA_KEYS)
     if unknown:
         raise ValueError(f"Unknown matched v2 configuration fields: {sorted(unknown)}")
     config = dict(DEFAULT, **overrides)
@@ -286,11 +286,11 @@ def execute_unit(output, unit_id, scratch_root):
     scratch = scratch_root.resolve() / output.name / unit_file(unit_id)
     previous_cwd = Path.cwd()
     try:
-        manifest = json.loads((g.THERMAL_DIR / "report.json").read_text())
-        source = g._thermal_source(g.THERMAL_DIR, manifest, sid)
+        config = plan_data["configuration"]
+        source = thermal_source(config, sid)
         if file_sha(source.simulation_metadata) != prepared["thermal_metadata_sha256"]:
             raise ValueError(f"Parent simulation changed: {sid}")
-        flux_spec = original_flux_spec(source)
+        flux_spec = original_flux_spec(source, thermal_root(config))
         if flux_spec != prepared["flux_spec"]:
             raise ValueError(f"Original flux provenance changed: {sid}")
         sky = flux_spec["sky"]

@@ -102,9 +102,27 @@ def require_free_disk(path, need, label, wait_seconds=0):
         time.sleep(60)
 
 
+# Optional override keys that are not part of DEFAULT; absent keys never enter the config hash.
+EXTRA_KEYS = {"split", "source_ids", "thermal_dir"}
+
+
+def thermal_root(config):
+    """Thermal comparison directory supplying the sources: config["thermal_dir"] or the legacy v1 one."""
+    if "thermal_dir" not in config:
+        return g.THERMAL_DIR
+    p = Path(config["thermal_dir"]).expanduser()
+    return p if p.is_absolute() else g.ROOT / p
+
+
+def thermal_source(config, sid, manifest=None):
+    root = thermal_root(config)
+    manifest = manifest or json.loads((root / "report.json").read_text())
+    return g._thermal_source(root, manifest, sid)
+
+
 def configuration(path):
     overrides = json.loads(path.read_text()) if path else {}
-    unknown = set(overrides) - (set(DEFAULT) | {"split", "source_ids"})
+    unknown = set(overrides) - (set(DEFAULT) | EXTRA_KEYS)
     if unknown:
         raise ValueError(f"Unknown v2 configuration fields: {sorted(unknown)}")
     config = dict(DEFAULT, **overrides)
@@ -116,14 +134,23 @@ def configuration(path):
 
 
 def indexed_sources(config, smoke=False):
-    """Read the Dataset 1 index and audit parent MS identity across splits."""
-    from scripts.preprocessing import partition_for_sample, source_dataset_id
+    """Read the Dataset 1 index (or, with thermal_dir, that thermal report's successful samples)
+    and audit parent MS identity across splits."""
+    from scripts.preprocessing import PARTITION_IDS, partition_for_sample, source_dataset_id
 
-    index = g.DATASET_DIR / "dataset.json"
-    members = json.loads(index.read_text())["samples"]
-    ids = sorted({source_dataset_id(Path(x).parent.name) for x in members})
-    thermal = json.loads((g.THERMAL_DIR / "report.json").read_text())
+    report = thermal_root(config) / "report.json"
+    thermal = json.loads(report.read_text())
     entries = {x["id"]: dict(x, original_ms=str(local_path(x["original_ms"]))) for x in thermal["samples"]}
+    if "thermal_dir" in config:
+        index = None
+        ids = sorted(entries)
+        unassigned = [sid for sid in ids if not any(sid in v for v in PARTITION_IDS.values())]
+        if unassigned:
+            raise ValueError(f"Thermal sources missing from scripts/preprocessing/partitions.py: {unassigned}")
+    else:
+        index = g.DATASET_DIR / "dataset.json"
+        members = json.loads(index.read_text())["samples"]
+        ids = sorted({source_dataset_id(Path(x).parent.name) for x in members})
     if set(ids) - set(entries):
         raise ValueError("Indexed parent is missing thermal provenance")
     parents = {}
@@ -142,11 +169,17 @@ def indexed_sources(config, smoke=False):
         selected = ["0449+113"] if "0449+113" in selected else selected[:1]
     if not selected:
         raise ValueError("No indexed sources selected")
+    counts = {split: sum(partition_for_sample(s) == split for s in ids) for split in ("train", "val", "test")}
+    if index is None:
+        audit = dict(source_selection="thermal_report_samples",
+                     thermal_report=str(report.resolve()), thermal_report_sha256=file_sha(report),
+                     all_parent_count=len(ids), split_counts=counts,
+                     prior_test_exposure="Extension sources from this thermal report; not part of Dataset 1")
+        return selected, entries, audit
     audit = dict(index=str(index.resolve()), index_sha256=file_sha(index),
-                 thermal_report=str((g.THERMAL_DIR / "report.json").resolve()),
-                 thermal_report_sha256=file_sha(g.THERMAL_DIR / "report.json"),
-                 all_parent_count=len(ids), split_counts={split: sum(partition_for_sample(s) == split for s in ids)
-                                                         for split in ("train", "val", "test")},
+                 thermal_report=str(report.resolve()),
+                 thermal_report_sha256=file_sha(report),
+                 all_parent_count=len(ids), split_counts=counts,
                  prior_test_exposure="Dataset 1 test was used in a superseded earlier experiment; not pristine unseen test")
     return selected, entries, audit
 
@@ -169,9 +202,9 @@ def _pilot_contract(pilot):
     return plan
 
 
-def original_flux_spec(source):
-    """Freeze the pilot-v2 flux decision for this source."""
-    qa_path = g.THERMAL_DIR / source.source_id / "original" / "default_imaging" / "qa.json"
+def original_flux_spec(source, thermal_dir=None):
+    """Freeze the pilot-v2 flux decision for this source (thermal_dir: its thermal run, default legacy)."""
+    qa_path = Path(thermal_dir or g.THERMAL_DIR) / source.source_id / "original" / "default_imaging" / "qa.json"
     qa = json.loads(qa_path.read_text())
     flux = float(qa["tclean_summary"]["final_model_flux_jy"])
     peak = float(qa["metrics"]["clean_peak_jy_per_beam"])
@@ -245,11 +278,10 @@ def prepare_source(output, config, sid, thermal_entry, size, pilot, import_from=
             raise ValueError(f"Prepared source changed: {sid}")
         return
     require_free_disk(output, 3 * size + 2_000_000_000, f"preparing {sid}")
-    manifest = json.loads((g.THERMAL_DIR / "report.json").read_text())
-    source = g._thermal_source(g.THERMAL_DIR, manifest, sid)
+    source = thermal_source(config, sid)
     if tuple(source.imsize) != (256, 256):
         raise ValueError(f"{sid}: combined8 requires native 256×256 images")
-    flux_spec = original_flux_spec(source)
+    flux_spec = original_flux_spec(source, thermal_root(config))
     sky = flux_spec["sky"]
     _, _, sigma = g._noise_request(source)
     folder = output / "sources" / sid / "recovery"
@@ -444,7 +476,7 @@ def execute(output, *, resume=False, workers=1, worker=0, import_from=None):
     with os.fdopen(fd, "w") as f:
         f.write(str(os.getpid()))
     try:
-        source_manifest = json.loads((g.THERMAL_DIR / "report.json").read_text())
+        source_manifest = json.loads((thermal_root(config) / "report.json").read_text())
         sizes = {p["id"]: ms_bytes(p["parent_original_ms"]) for p in plan_data["prepared_sources"]}
         scratch_sizes = {p["id"]: ms_bytes(p["parent_ms"]) for p in plan_data["prepared_sources"]}
         mine = set(worker_sources([p["id"] for p in plan_data["prepared_sources"]], sizes, workers, worker))
@@ -456,12 +488,12 @@ def execute(output, *, resume=False, workers=1, worker=0, import_from=None):
                 import_cases(output, import_from, plan_data, plan_hash, prepared)
             require_free_disk(output, 3 * scratch_sizes[sid] + 2_000_000_000, f"executing {sid}",
                               wait_seconds=8 * 3600)
-            source = g._thermal_source(g.THERMAL_DIR, source_manifest, sid)
+            source = thermal_source(config, sid, source_manifest)
             if file_sha(source.simulation_metadata) != prepared["thermal_metadata_sha256"]:
                 raise ValueError(f"Parent simulation changed: {sid}")
             if tree_sha(prepared["parent_original_ms"]) != prepared["parent_original_ms_sha256"]:
                 raise ValueError(f"Parent measurement set changed: {sid}")
-            flux_spec = original_flux_spec(source)
+            flux_spec = original_flux_spec(source, thermal_root(config))
             if flux_spec != prepared["flux_spec"]:
                 raise ValueError(f"Original flux provenance changed: {sid}")
             sky = flux_spec["sky"]

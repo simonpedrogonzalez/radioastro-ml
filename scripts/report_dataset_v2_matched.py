@@ -17,7 +17,7 @@ import matplotlib.ticker
 import numpy as np
 
 from scripts import create_dataset_v1 as g
-from scripts.create_dataset_v2 import indexed_sources, original_flux_spec
+from scripts.create_dataset_v2 import indexed_sources, original_flux_spec, thermal_root, thermal_source
 from scripts.create_dataset_v2_matched import configuration
 from scripts.dataset_v2 import TYPES
 from scripts.dataset_v2_matched import BRANCHES, sample_recipes
@@ -55,8 +55,9 @@ def preview(config, output, smoke=False):
     assets = output / "sampling_preview_assets"
     assets.mkdir(parents=True, exist_ok=True)
     ids, _, audit = indexed_sources(config, smoke)
-    manifest = json.loads((g.THERMAL_DIR / "report.json").read_text())
-    snr = {sid: original_flux_spec(g._thermal_source(g.THERMAL_DIR, manifest, sid))["nominal_source_snr"] for sid in ids}
+    manifest = json.loads((thermal_root(config) / "report.json").read_text())
+    snr = {sid: original_flux_spec(thermal_source(config, sid, manifest), thermal_root(config))["nominal_source_snr"]
+           for sid in ids}
     # Antenna eligibility needs CASA preparation; parameters do not depend on it.
     recipes = [dict(r, antenna=None) for sid in ids for r in sample_recipes(sid, snr[sid], [0], config)]
     R = int(config["recipes_per_source"])

@@ -13,7 +13,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-from scripts.create_dataset_v2 import file_sha, configuration, indexed_sources, original_flux_spec
+from scripts.create_dataset_v2 import file_sha, configuration, indexed_sources, original_flux_spec, thermal_root, thermal_source
 from scripts import create_dataset_v1 as g
 from scripts.dataset_v2 import TYPES, join_rows, sample_vectors
 from scripts.preprocessing.schema import atomic_write_json
@@ -241,9 +241,9 @@ def preview(config, output, *, smoke=False):
     output = output.resolve()
     output.mkdir(parents=True, exist_ok=True)
     ids, _, audit = indexed_sources(config, smoke)
-    manifest = json.loads((g.THERMAL_DIR / "report.json").read_text())
+    manifest = json.loads((thermal_root(config) / "report.json").read_text())
     sources = [dict(id=sid, **{k: v for k, v in original_flux_spec(
-        g._thermal_source(g.THERMAL_DIR, manifest, sid)).items() if k != "sky"}) for sid in ids]
+        thermal_source(config, sid, manifest), thermal_root(config)).items() if k != "sky"}) for sid in ids]
     vectors = [v for src in sources for v in sample_vectors(src["id"], src["nominal_source_snr"], config, "train")]
     groups = defaultdict(list)
     for v in vectors:
