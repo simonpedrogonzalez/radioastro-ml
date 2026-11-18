@@ -27,7 +27,7 @@ from pathlib import Path
 import numpy as np
 
 from scripts import create_dataset_v1 as g
-from scripts.create_dataset_v2 import EXTRA_KEYS, file_sha, indexed_sources, ms_bytes, thermal_root, thermal_source
+from scripts.create_dataset_v2 import EXTRA_KEYS, check_policies, file_sha, indexed_sources, ms_bytes, thermal_source
 from scripts.dataset_v2_matched import DEFAULT, assign_shards, join_rows, plan_source, unit_file
 from scripts.injection_bounds_report import digest
 from scripts.preprocessing.schema import atomic_write_json
@@ -46,6 +46,7 @@ def configuration(path):
     config = dict(DEFAULT, **overrides)
     for key in ("ranges", "weak_ranges"):
         config[key] = dict(DEFAULT[key], **overrides.get(key, {}))
+    check_policies(config)
     config.setdefault("split", "train")
     if config["split"] not in ("train", "val", "test"):
         raise ValueError("Expected canonical train/val/test split")
@@ -290,7 +291,7 @@ def execute_unit(output, unit_id, scratch_root):
         source = thermal_source(config, sid)
         if file_sha(source.simulation_metadata) != prepared["thermal_metadata_sha256"]:
             raise ValueError(f"Parent simulation changed: {sid}")
-        flux_spec = original_flux_spec(source, thermal_root(config))
+        flux_spec = original_flux_spec(source, config)
         if flux_spec != prepared["flux_spec"]:
             raise ValueError(f"Original flux provenance changed: {sid}")
         sky = flux_spec["sky"]
@@ -305,7 +306,7 @@ def execute_unit(output, unit_id, scratch_root):
         os.chdir(scratch)   # CASA temporary lattices land in this unit's scratch
         # Each unit rebuilds the same noiseless V and nominal-noise realization; the
         # recorded hashes let verification prove they are identical across units.
-        v = prepare_v(source, scratch, sky, v2=True)
+        v = prepare_v(source, scratch, sky, v2=True, simulation_flags=config.get("simulation_flags"))
         initialize_weights(v, sigma)
         regular = scratch / "regular.ms"
         shutil.copytree(v, regular)

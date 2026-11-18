@@ -103,7 +103,36 @@ def require_free_disk(path, need, label, wait_seconds=0):
 
 
 # Optional override keys that are not part of DEFAULT; absent keys never enter the config hash.
-EXTRA_KEYS = {"split", "source_ids", "thermal_dir"}
+EXTRA_KEYS = {"split", "source_ids", "thermal_dir", "simulation_flags"}
+LEGACY_FLUX_POLICY = "original_clean_model_sum_v2_adjusted"
+EXTENSION_FLUX_POLICY = "nrao_then_clean"
+
+
+def check_policies(config):
+    """Opt-in extension policies need an extension thermal_dir; DEFAULT keeps the legacy flux."""
+    flux_policy = config.get("flux_policy", LEGACY_FLUX_POLICY)
+    if flux_policy not in (LEGACY_FLUX_POLICY, EXTENSION_FLUX_POLICY):
+        raise ValueError(f"Unknown flux_policy {flux_policy!r}")
+    if flux_policy == EXTENSION_FLUX_POLICY and "thermal_dir" not in config:
+        raise ValueError("flux_policy nrao_then_clean requires thermal_dir")
+    if config.get("simulation_flags", "unflag") != "unflag":
+        raise ValueError(f"Unknown simulation_flags {config['simulation_flags']!r}")
+    if "simulation_flags" in config and flux_policy != EXTENSION_FLUX_POLICY:
+        raise ValueError("simulation_flags requires flux_policy nrao_then_clean")
+
+
+def thermal_policy(config):
+    """The policy fields a thermal report/entry must record for this config ({} = legacy)."""
+    if config.get("flux_policy") != EXTENSION_FLUX_POLICY:
+        return {}
+    return {k: config[k] for k in ("flux_policy", "simulation_flags") if k in config}
+
+
+def require_thermal_policy(config, record, what):
+    recorded = {k: record[k] for k in ("flux_policy", "simulation_flags") if k in record}
+    if recorded != thermal_policy(config):
+        raise ValueError(f"{what} records flux/flag policy {recorded or 'legacy'}, "
+                         f"config requires {thermal_policy(config) or 'legacy'}")
 
 
 def thermal_root(config):
@@ -127,6 +156,7 @@ def configuration(path):
         raise ValueError(f"Unknown v2 configuration fields: {sorted(unknown)}")
     config = dict(DEFAULT, **overrides)
     config["ranges"] = dict(DEFAULT["ranges"], **overrides.get("ranges", {}))
+    check_policies(config)
     config.setdefault("split", "train")
     if config["split"] not in ("train", "val", "test"):
         raise ValueError("Expected canonical train/val/test split")
@@ -142,6 +172,9 @@ def indexed_sources(config, smoke=False):
     thermal = json.loads(report.read_text())
     entries = {x["id"]: dict(x, original_ms=str(local_path(x["original_ms"]))) for x in thermal["samples"]}
     if "thermal_dir" in config:
+        require_thermal_policy(config, thermal.get("configuration") or {}, str(report))
+        for item in thermal["samples"]:
+            require_thermal_policy(config, item, f"thermal sample {item['id']}")
         index = None
         ids = sorted(entries)
         unassigned = [sid for sid in ids if not any(sid in v for v in PARTITION_IDS.values())]
@@ -202,9 +235,38 @@ def _pilot_contract(pilot):
     return plan
 
 
-def original_flux_spec(source, thermal_dir=None):
-    """Freeze the pilot-v2 flux decision for this source (thermal_dir: its thermal run, default legacy)."""
-    qa_path = Path(thermal_dir or g.THERMAL_DIR) / source.source_id / "original" / "default_imaging" / "qa.json"
+def decided_flux_spec(source, config):
+    """Extension flux: the decision recorded by the thermal run (NRAO pipeline or original CLEAN)."""
+    root = thermal_root(config)
+    manifest = json.loads((root / "report.json").read_text())
+    entry = next(x for x in manifest["samples"] if x["id"] == source.source_id)
+    require_thermal_policy(config, entry, f"thermal sample {source.source_id}")
+    decision = entry["flux_decision"]
+    flux = float(decision["flux_jy"])
+    rms = float(source.predicted_image_rms_jy_per_beam)
+    if not all(math.isfinite(v) and v > 0 for v in (flux, rms)):
+        raise ValueError(f"Invalid decided flux/nominal RMS: {source.source_id}")
+    sky = g._simulation_payload(source)["components"]
+    if len(sky) != 1 or sky[0]["shape"] != "point" or sky[0]["flux"][0] != flux:
+        raise ValueError(f"Thermal simulation does not hold the decided point-source flux: {source.source_id}")
+    spec = dict(sky=sky, flux_jy=flux, nominal_source_snr=flux / rms, flux_policy=config["flux_policy"],
+                flux_method=decision["method"], flux_frequency_hz=decision["frequency_hz"],
+                flux_decision_sha256=digest(decision), simulation_flags=entry.get("simulation_flags"))
+    if decision["method"] == "original_clean":   # original QA only on the CLEAN-fallback route
+        qa_path = Path(decision["provenance"]["qa_json"])
+        qa_path = qa_path if qa_path.is_absolute() else root / qa_path
+        if file_sha(qa_path) != decision["provenance"]["qa_sha256"]:
+            raise ValueError(f"Original CLEAN QA changed since the flux decision: {source.source_id}")
+        spec.update(original_qa=str(qa_path.resolve()), original_qa_sha256=decision["provenance"]["qa_sha256"])
+    return spec
+
+
+def original_flux_spec(source, config=None):
+    """Freeze the flux decision for this source (config: its v2 configuration; None = legacy)."""
+    config = config or {}
+    if config.get("flux_policy") == EXTENSION_FLUX_POLICY:
+        return decided_flux_spec(source, config)
+    qa_path = thermal_root(config) / source.source_id / "original" / "default_imaging" / "qa.json"
     qa = json.loads(qa_path.read_text())
     flux = float(qa["tclean_summary"]["final_model_flux_jy"])
     peak = float(qa["metrics"]["clean_peak_jy_per_beam"])
@@ -281,13 +343,13 @@ def prepare_source(output, config, sid, thermal_entry, size, pilot, import_from=
     source = thermal_source(config, sid)
     if tuple(source.imsize) != (256, 256):
         raise ValueError(f"{sid}: combined8 requires native 256×256 images")
-    flux_spec = original_flux_spec(source, thermal_root(config))
+    flux_spec = original_flux_spec(source, config)
     sky = flux_spec["sky"]
     _, _, sigma = g._noise_request(source)
     folder = output / "sources" / sid / "recovery"
     folder.mkdir(parents=True, exist_ok=True)
     from scripts.injection_bounds_pilot import prepare_v
-    v = prepare_v(source, folder, sky, v2=True)
+    v = prepare_v(source, folder, sky, v2=True, simulation_flags=config.get("simulation_flags"))
     initialize_weights(v, sigma)
     norms = {}
     for ant, name in g._unflagged_antenna_choices(v):
@@ -303,7 +365,8 @@ def prepare_source(output, config, sid, thermal_entry, size, pilot, import_from=
     spec = dict(schema=1, source=sid, configuration_hash=digest(config),
                 pilot_plan_sha256=file_sha(pilot / "plan.json"),
                 thermal_metadata_sha256=file_sha(source.simulation_metadata),
-                sky=sky, flux_spec=flux_spec, sigma0_jy=sigma)
+                sky=sky, flux_spec=flux_spec, sigma0_jy=sigma,
+                **({"simulation_flags": config["simulation_flags"]} if "simulation_flags" in config else {}))
     settings_hash = digest(spec)
     atomic_write_json(folder / "settings.json", spec)
     _, image_cell = recovery_products(output, folder, source, sky, sigma, settings_hash, v,
@@ -327,7 +390,8 @@ def prepare_source(output, config, sid, thermal_entry, size, pilot, import_from=
                 thermal_metadata_sha256=file_sha(source.simulation_metadata),
                 parent_ms=str(source.simulation_ms), parent_original_ms=thermal_entry["original_ms"],
                 parent_original_ms_sha256=tree_sha(thermal_entry["original_ms"]),
-                grid_shape=list(source.imsize))
+                grid_shape=list(source.imsize),
+                **({"simulation_flags": config["simulation_flags"]} if "simulation_flags" in config else {}))
     atomic_write_json(target, data)
     print("PREPARED", sid, len(norms), flush=True)
 
@@ -358,7 +422,9 @@ def plan(output, config, *, smoke=False):
             preview_vectors[vector["source"]].append(vector)
         for item, source_plan in zip(prepared, plans, strict=True):
             prior = preview_sources.get(item["id"])
-            if prior is None or prior["original_qa_sha256"] != item["flux_spec"]["original_qa_sha256"] or prior["nominal_source_snr"] != item["nominal_source_snr"]:
+            if (prior is None or prior.get("original_qa_sha256") != item["flux_spec"].get("original_qa_sha256")
+                    or prior.get("flux_decision_sha256") != item["flux_spec"].get("flux_decision_sha256")
+                    or prior["nominal_source_snr"] != item["nominal_source_snr"]):
                 raise ValueError(f"Sampling preview source metadata changed: {item['id']}")
             planned = json.loads(json.dumps([{k: v for k, v in vector.items() if k != "antenna"}
                                              for vector in source_plan["vectors"]]))
@@ -493,7 +559,7 @@ def execute(output, *, resume=False, workers=1, worker=0, import_from=None):
                 raise ValueError(f"Parent simulation changed: {sid}")
             if tree_sha(prepared["parent_original_ms"]) != prepared["parent_original_ms_sha256"]:
                 raise ValueError(f"Parent measurement set changed: {sid}")
-            flux_spec = original_flux_spec(source, thermal_root(config))
+            flux_spec = original_flux_spec(source, config)
             if flux_spec != prepared["flux_spec"]:
                 raise ValueError(f"Original flux provenance changed: {sid}")
             sky = flux_spec["sky"]
@@ -502,7 +568,7 @@ def execute(output, *, resume=False, workers=1, worker=0, import_from=None):
                 raise ValueError(f"Nominal noise changed: {sid}")
             folder = output / "sources" / sid / "recovery"
             from scripts.injection_bounds_pilot import prepare_v
-            v = prepare_v(source, folder, sky, v2=True)
+            v = prepare_v(source, folder, sky, v2=True, simulation_flags=config.get("simulation_flags"))
             initialize_weights(v, sigma)
             _, image_cell = recovery_products(output, folder, source, sky, sigma,
                                               prepared["settings_hash"], v)

@@ -56,7 +56,7 @@ def preview(config, output, smoke=False):
     assets.mkdir(parents=True, exist_ok=True)
     ids, _, audit = indexed_sources(config, smoke)
     manifest = json.loads((thermal_root(config) / "report.json").read_text())
-    snr = {sid: original_flux_spec(thermal_source(config, sid, manifest), thermal_root(config))["nominal_source_snr"]
+    snr = {sid: original_flux_spec(thermal_source(config, sid, manifest), config)["nominal_source_snr"]
            for sid in ids}
     # Antenna eligibility needs CASA preparation; parameters do not depend on it.
     recipes = [dict(r, antenna=None) for sid in ids for r in sample_recipes(sid, snr[sid], [0], config)]

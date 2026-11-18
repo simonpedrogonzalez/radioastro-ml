@@ -234,7 +234,8 @@ print("</div>")
 
 population_qa = [
     (
-        load_json(Path(sample["original_result_dir"]) / "qa.json"),
+        # Extension samples using the NRAO flux route have no original-image QA.
+        load_json(Path(sample["original_result_dir"]) / "qa.json") if sample.get("original_result_dir") else {},
         load_json(Path(sample["simulation_result_dir"]) / "qa.json"),
     )
     for sample in samples
@@ -291,11 +292,13 @@ for metric, title, x_label, log_x in histogram_specs:
 print("</div></section>")
 
 for sample in samples:
-    original_qa = load_json(Path(sample["original_result_dir"]) / "qa.json")
+    original_dir = sample.get("original_result_dir")
+    original_qa = load_json(Path(original_dir) / "qa.json") if original_dir else {}
     simulation_qa = load_json(Path(sample["simulation_result_dir"]) / "qa.json")
     simulation = load_json(sample["simulation_metadata"])
-    parameters = original_qa.get("effective_imaging_parameters", {})
-    resolved = original_qa.get("resolved_config", {}) or {}
+    imaging_qa = original_qa or simulation_qa
+    parameters = imaging_qa.get("effective_imaging_parameters", {})
+    resolved = imaging_qa.get("resolved_config", {}) or {}
     resolved_grid = resolved.get("grid", {}) or {}
     image_grid = resolved_grid.get("image_grid", {}) or {}
     geometry = parameters.get("measured_geometry", {}) or {}
@@ -343,9 +346,19 @@ for sample in samples:
             values.append(line("warnings=" + html.escape("; ".join(map(str, qa["warnings"])))))
         return values
 
+    decision = sample.get("flux_decision") or {}
+    if decision:
+        source_lines = [
+            line(f"flux decision={show(decision.get('method'))} ({show(sample.get('flux_policy'))}), "
+                 f"{show(decision.get('flux_jy'), 'Jy')} at {show(decision.get('frequency_hz'), 'Hz')}"),
+            line(f"simulation flags={show(sample.get('simulation_flags', 'inherited'))}, "
+                 f"S/N vs predicted RMS={show(sample.get('source_snr'))}"),
+        ]
+    else:
+        source_lines = [line(f"target S/N from original dynamic range={show(sample.get('target_dynamic_range', sample.get('source_snr')))}")]
     simulation_lines = [
         line("source=phase-centre point (constant spectrum, unpolarized)"),
-        line(f"target S/N from original dynamic range={show(sample.get('target_dynamic_range', sample.get('source_snr')))}"),
+        *source_lines,
         line(f"achieved simulation robust DR={show(finite_metric(simulation_qa, 'dynamic_range_scaled_mad'))}"),
         line(f"source flux={show(flux, 'Jy')}"),
         line(f"predicted thermal image RMS={show(sample.get('predicted_image_rms_jy_per_beam'), 'Jy/beam')}"),
@@ -360,9 +373,12 @@ for sample in samples:
     print('<div class="comparison-row info-row original-info">')
     print(f'<div><div class="sample-id">{sample_id}</div><div class="ms-path">{html.escape(str(sample.get("original_ms", "—")))}</div></div>')
     print("<div>" + "".join(parameter_lines) + "</div>")
-    print("<div>" + "".join(metric_lines(original_qa)) + "</div>")
+    print("<div>" + ("".join(metric_lines(original_qa)) if original_qa else
+                     line("original CLEAN QA reused from an earlier run" if decision.get("method") == "original_clean"
+                          else "original not imaged: flux from the NRAO pipeline")) + "</div>")
     print("</div>")
-    print(image_row(str(sample["original_result_dir"]), sample_id))
+    if original_dir:
+        print(image_row(str(original_dir), sample_id))
     print('<div class="comparison-row info-row simulation-info">')
     print(f'<div><div class="sample-id">{sample_id} simulation</div>' + "".join(simulation_lines) + "</div>")
     print("<div></div>")

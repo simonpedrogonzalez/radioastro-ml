@@ -48,9 +48,12 @@ def _reload_local_packages_if_loaded() -> None:
 _reload_local_packages_if_loaded()
 
 from scripts.imaging import BeamRegion, DefaultImagingConfig, image_ms
-from scripts.imaging.metadata import DEFAULT_EXTRACTED_MS_ROOT
+from scripts.imaging.metadata import DEFAULT_EXTRACTED_MS_ROOT, resolve_ms_band
+from scripts.nrao_flux import FluxUnavailable, nrao_flux_decision
 from scripts.reporting import QuartoReporter
 from scripts.simulation import (
+    get_reference_frequency,
+    phase_center_point_source,
     natural_image_rms_from_simplenoise,
     phase_center_point_source_from_snr,
     simulate_ms,
@@ -86,6 +89,12 @@ SOURCE_SNR_BASIS = (
     "original_global_clean_peak_over_three_beams_to_border_minus_one_beam_"
     "residual_scaled_mad"
 )
+# Opt-in extension policies (absent = the legacy matched-dynamic-range simulation above).
+FLUX_POLICIES = ("nrao_then_clean",)
+SIMULATION_FLAG_POLICIES = ("unflag",)
+EXTENSION_SNR_BASIS = "decided_flux_over_predicted_natural_rms_of_simulation_samples"
+_REUSED_QA_SETTINGS = ("datacolumn", "specmode", "stokes", "gridder", "deconvolver", "nterms",
+                       "weighting", "robust", "gain", "mask_nbeams", "uvrange", "savemodel")
 _SEED_MAX = 2_147_483_646
 _MATCHED_IMAGING_KEYS = (
     "imsize",
@@ -234,6 +243,9 @@ def metric_region_policy() -> dict[str, Any]:
 
 
 def _verify_completed_entry(entry: dict[str, Any], experiment_dir: Path) -> None:
+    if "flux_decision" in entry:
+        _verify_extension_entry(entry, experiment_dir)
+        return
     paths = [
         Path(entry["original_ms"]),
         experiment_dir / entry["simulation_ms"],
@@ -265,6 +277,143 @@ def _verify_completed_entry(entry: dict[str, Any], experiment_dir: Path) -> None
         )
 
 
+def _verify_extension_entry(entry: dict[str, Any], experiment_dir: Path) -> None:
+    """Extension entries: original-image QA is required only on the CLEAN-fallback route."""
+    result_keys = ["simulation_result_dir"] + (["original_result_dir"] if "original_result_dir" in entry else [])
+    paths = [
+        Path(entry["original_ms"]),
+        experiment_dir / entry["simulation_ms"],
+        experiment_dir / entry["simulation_component_list"],
+        experiment_dir / entry["simulation_metadata"],
+    ]
+    for key in result_keys:
+        paths.extend(
+            experiment_dir / entry[key] / filename
+            for filename in ("qa.json", "qa.txt", "dirty.png", "clean.png", "residual.png")
+        )
+    decision = entry["flux_decision"]
+    if decision.get("method") == "original_clean":
+        paths.append(_resolve_in(experiment_dir, decision["provenance"]["qa_json"]))
+    elif decision.get("method") != "nrao_pipeline":
+        raise RuntimeError(f"Completed sample {entry.get('id')} has unknown flux method {decision.get('method')!r}")
+    _assert_paths_exist(paths)
+    flux = decision.get("flux_jy")
+    if not isinstance(flux, (int, float)) or not math.isfinite(flux) or flux <= 0:
+        raise RuntimeError(f"Completed sample {entry.get('id')} has an invalid decided flux {flux!r}")
+    simulation = json.loads((experiment_dir / entry["simulation_metadata"]).read_text(encoding="utf-8"))
+    if [c["flux"][0] for c in simulation.get("components", [])] != [flux]:
+        raise RuntimeError(f"Completed sample {entry.get('id')} simulated a different flux than decided")
+    if ("simulation_flags" in simulation) != (entry.get("simulation_flags") == "unflag"):
+        raise RuntimeError(f"Completed sample {entry.get('id')} simulation flag policy differs from its entry")
+    qa = json.loads((experiment_dir / entry["simulation_result_dir"] / "qa.json").read_text(encoding="utf-8"))
+    if int(qa.get("schema_version", 1)) not in {2, 3}:
+        raise RuntimeError(f"Completed sample {entry.get('id')} does not use a supported QA schema")
+    if (qa.get("metrics", {}) or {}).get("region") != entry.get("metric_region"):
+        raise RuntimeError(f"Completed sample {entry.get('id')} has inconsistent metric regions")
+
+
+def _resolve_in(experiment_dir: Path, value: str) -> Path:
+    path = Path(value)
+    return path if path.is_absolute() else experiment_dir / path
+
+
+def _relative_or_absolute(path: Path, experiment_dir: Path) -> str:
+    try:
+        return str(path.resolve().relative_to(experiment_dir.resolve()))
+    except ValueError:
+        return str(path.resolve())
+
+
+def _frequency_hz(ms_path: Path) -> float:
+    """Frequency of the simulated constant-spectrum component (SPW 0 REF_FREQUENCY)."""
+    text = get_reference_frequency(ms_path, spw_id=0)
+    value = float(text.split()[-1].removesuffix("Hz"))
+    if not math.isfinite(value) or value <= 0:
+        raise RuntimeError(f"Invalid simulation frequency {text!r}")
+    return value
+
+
+def _clean_flux(qa: dict[str, Any]) -> float:
+    flux = float((qa.get("tclean_summary") or {}).get("final_model_flux_jy", float("nan")))
+    if not math.isfinite(flux) or flux <= 0:
+        raise FluxUnavailable(f"original CLEAN model flux is {flux!r}")
+    return flux
+
+
+def reusable_original_qa(sample_id: str, ms_path: Path, reuse_dirs: Sequence[Path]) -> tuple[Path | None, list[str]]:
+    """First earlier original-image QA for this exact input and imaging settings (read-only)."""
+    from dataclasses import asdict
+
+    expected = json.loads(json.dumps(asdict(DefaultImagingConfig), default=str))
+    reasons = []
+    for root in reuse_dirs:
+        path = Path(root) / sample_id / "original" / "default_imaging" / "qa.json"
+        if not path.is_file():
+            continue
+        try:
+            qa = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            reasons.append(f"{path}: unreadable ({exc})")
+            continue
+        params = qa.get("effective_imaging_parameters") or {}
+        problems = []
+        if qa.get("engine") != "direct" or int(qa.get("schema_version", 1)) not in {2, 3}:
+            problems.append("engine/schema")
+        if qa.get("visibility_id") != sample_id or Path(str(qa.get("ms_path"))).resolve() != ms_path.resolve():
+            problems.append("different input MS")
+        if params.get("imsize") != list(IMAGING_IMSIZE):
+            problems.append("imsize")
+        problems += [key for key in _REUSED_QA_SETTINGS if params.get(key) != expected.get(key)]
+        if params.get("requested_clean") != expected.get("clean"):
+            problems.append("clean settings")
+        if problems:
+            reasons.append(f"{path}: not reusable ({', '.join(problems)})")
+            continue
+        return path, reasons
+    return None, reasons
+
+
+def decide_flux(
+    ms_path: Path, experiment_dir: Path, frequency_hz: float, reuse_dirs: Sequence[Path]
+) -> tuple[dict[str, Any], Any]:
+    """NRAO pipeline flux first; else original-observation CLEAN flux (reused QA or new imaging)."""
+    sample_id = ms_path.stem
+    try:
+        return nrao_flux_decision(ms_path, frequency_hz), None
+    except FluxUnavailable as exc:
+        nrao_reason = str(exc)
+    original = None
+    qa_path, reuse_notes = reusable_original_qa(sample_id, ms_path, reuse_dirs)
+    reused = qa_path is not None
+    try:
+        if not reused:
+            original = image_ms(
+                ms_path,
+                DefaultImagingConfig,
+                experiment_dir / sample_id / "original" / "default_imaging",
+                imsize=IMAGING_IMSIZE,
+                metric_region_resolver=metric_region_for_resolved_grid,
+                keep_intermediate_products=True,
+                fits_invalid_policy=FITS_INVALID_POLICY,
+            )
+            qa_path = Path(original.qa_json)
+        qa = json.loads(qa_path.read_text(encoding="utf-8"))
+        flux = _clean_flux(qa)
+    except Exception as exc:  # imaging of fully flagged/unusable originals fails here
+        notes = "; ".join(reuse_notes)
+        raise FluxUnavailable(
+            f"no NRAO flux ({nrao_reason}); no original CLEAN flux ({type(exc).__name__}: {exc})"
+            + (f"; reuse: {notes}" if notes else "")
+        ) from exc
+    return dict(
+        method="original_clean", flux_jy=flux, frequency_hz=float(frequency_hz),
+        nrao_unavailable=nrao_reason,
+        provenance=dict(qa_json=_relative_or_absolute(qa_path, experiment_dir),
+                        qa_sha256=hashlib.sha256(qa_path.read_bytes()).hexdigest(),
+                        reused=reused, flux_field="tclean_summary.final_model_flux_jy"),
+    ), original
+
+
 def _remove_interrupted_sample_output(sample_dir: Path, experiment_dir: Path) -> None:
     """Remove a narrowly scoped, uncommitted per-sample work tree before retrying."""
     if sample_dir.is_symlink():
@@ -292,7 +441,14 @@ def _remove_interrupted_sample_output(sample_dir: Path, experiment_dir: Path) ->
     shutil.rmtree(sample_dir)
 
 
-def process_sample(ms_path: Path, experiment_dir: Path) -> dict[str, Any]:
+def process_sample(
+    ms_path: Path,
+    experiment_dir: Path,
+    policy: dict[str, str] | None = None,
+    reuse_dirs: Sequence[Path] = (),
+) -> dict[str, Any]:
+    if policy:
+        return process_extension_sample(ms_path, experiment_dir, policy, reuse_dirs)
     sample_id = ms_path.stem
     sample_dir = experiment_dir / sample_id
     stage = "original_imaging"
@@ -410,7 +566,106 @@ def process_sample(ms_path: Path, experiment_dir: Path) -> dict[str, Any]:
         raise SampleProcessingError(stage, exc) from exc
 
 
-def _new_manifest(total_samples: int) -> dict[str, Any]:
+def process_extension_sample(
+    ms_path: Path, experiment_dir: Path, policy: dict[str, str], reuse_dirs: Sequence[Path] = ()
+) -> dict[str, Any]:
+    """Thermal simulation at a decided physical flux (no original dynamic range needed)."""
+    sample_id = ms_path.stem
+    sample_dir = experiment_dir / sample_id
+    stage = "flux_decision"
+    try:
+        frequency_hz = _frequency_hz(ms_path)
+        decision, original = decide_flux(ms_path, experiment_dir, frequency_hz, reuse_dirs)
+
+        stage = "noise_calculation"
+        band = str(resolve_ms_band(ms_path, None).selected_band)
+        simplenoise_jy = theoretical_vla_simplenoise(
+            ms_path, sefd_jy=VLA_OSS_2026A_SEFD_JY[band], eta_c=ETA_C
+        )
+        component = phase_center_point_source(ms_path, decision["flux_jy"])
+
+        stage = "simulation"
+        simulation = simulate_ms(
+            ms_path,
+            [component],
+            sample_dir / "simulation" / f"{sample_id}_decided_flux.ms",
+            noise_model="vla-thermal",
+            noise_parameters={"band": band, "sampler": SAMPLER},
+            seed=stable_sample_seed(sample_id),
+            simulation_flags=policy.get("simulation_flags"),
+        )
+        if simulation.simplenoise_jy is None or not math.isclose(
+            simulation.simplenoise_jy, simplenoise_jy, rel_tol=1e-12, abs_tol=0.0
+        ):
+            raise RuntimeError(
+                f"Simulation simplenoise {simulation.simplenoise_jy!r} != {simplenoise_jy!r}"
+            )
+        # RMS from the simulation copy's own sample mask (all samples after unflagging).
+        predicted_rms = natural_image_rms_from_simplenoise(simulation.ms_path, simplenoise_jy)
+
+        stage = "simulation_imaging"
+        simulated = image_ms(
+            simulation.ms_path,
+            DefaultImagingConfig,
+            sample_dir / "simulation" / "default_imaging",
+            imsize=IMAGING_IMSIZE,
+            metric_region_resolver=metric_region_for_resolved_grid,
+            keep_intermediate_products=True,
+            fits_invalid_policy=FITS_INVALID_POLICY,
+        )
+        if original is not None:
+            _assert_matched_imaging_settings(original, simulated)
+        required = [simulation.ms_path, simulation.metadata_json, simulation.component_list]
+        for result in (original, simulated):
+            if result is None:
+                continue
+            required.extend([
+                result.dirty_image, result.clean_image, result.residual_image,
+                result.dirty_png, result.clean_png, result.residual_png,
+                result.qa_text, result.qa_json,
+            ])
+        _assert_paths_exist([path for path in required if path is not None])
+        region = simulated.qa.metrics.region
+        entry = {
+            "id": sample_id,
+            "original_ms": str(ms_path.resolve()),
+            **({"original_result_dir": str(original.output_dir.relative_to(experiment_dir))}
+               if original is not None else {}),
+            "simulation_ms": str(simulation.ms_path.relative_to(experiment_dir)),
+            "simulation_component_list": str(simulation.component_list.relative_to(experiment_dir)),
+            "simulation_metadata": str(simulation.metadata_json.relative_to(experiment_dir)),
+            "simulation_result_dir": str(simulated.output_dir.relative_to(experiment_dir)),
+            "source_snr": decision["flux_jy"] / predicted_rms,
+            "source_snr_basis": EXTENSION_SNR_BASIS,
+            "metric_region": {
+                "min_radius_beams": region.min_radius_beams,
+                "max_radius_beams": region.max_radius_beams,
+            },
+            "predicted_image_rms_jy_per_beam": predicted_rms,
+            **policy,
+            "flux_decision": decision,
+        }
+        _verify_completed_entry(entry, experiment_dir)
+        return entry
+    except Exception as exc:
+        raise SampleProcessingError(stage, exc) from exc
+
+
+def extension_policy(flux_policy: str | None, simulation_flags: str | None) -> dict[str, str]:
+    """Validated opt-in policy ({} = legacy behaviour)."""
+    if flux_policy is None and simulation_flags is None:
+        return {}
+    if flux_policy not in FLUX_POLICIES:
+        raise ValueError(f"flux_policy must be one of {FLUX_POLICIES} (required with simulation_flags)")
+    if simulation_flags is not None and simulation_flags not in SIMULATION_FLAG_POLICIES:
+        raise ValueError(f"simulation_flags must be one of {SIMULATION_FLAG_POLICIES}")
+    policy = {"flux_policy": flux_policy}
+    if simulation_flags is not None:
+        policy["simulation_flags"] = simulation_flags
+    return policy
+
+
+def _new_manifest(total_samples: int, policy: dict[str, str] | None = None) -> dict[str, Any]:
     return {
         "title": TITLE,
         "description": DESCRIPTION,
@@ -426,6 +681,8 @@ def _new_manifest(total_samples: int) -> dict[str, Any]:
             "eta_c": ETA_C,
             "base_seed": BASE_SEED,
             "sefd_table": "VLA OSS 2026A fiducial values",
+            **(policy or {}),
+            **({"source_snr_basis": EXTENSION_SNR_BASIS} if policy else {}),
         },
         "samples": [],
         "failures": [],
@@ -454,9 +711,17 @@ def main(
     experiment_dir: str | Path | None = None,
     *,
     sample_ids: Sequence[str] | None = None,
+    flux_policy: str | None = None,
+    simulation_flags: str | None = None,
+    reuse_qa_from: Sequence[str | Path] = (),
+    extracted_root: str | Path | None = None,
 ) -> Path:
+    policy = extension_policy(flux_policy, simulation_flags)
+    if reuse_qa_from and not policy:
+        raise ValueError("reuse_qa_from applies only with flux_policy")
+    reuse_dirs = [Path(d).expanduser().resolve() for d in reuse_qa_from]
     selected_ids = SAMPLE_IDS if sample_ids is None else list(sample_ids)
-    samples = find_samples(sample_ids=selected_ids)
+    samples = find_samples(extracted_root or DEFAULT_EXTRACTED_MS_ROOT, sample_ids=selected_ids)
     if not samples:
         raise RuntimeError("No canonical extracted Measurement Sets were selected")
 
@@ -496,11 +761,18 @@ def main(
                 "Existing experiment uses a different or legacy image size; "
                 "choose a new experiment directory instead of mixing results"
             )
+        configuration = manifest.get("configuration", {}) or {}
+        actual_policy = {k: configuration[k] for k in ("flux_policy", "simulation_flags") if k in configuration}
+        if actual_policy != policy:
+            raise RuntimeError(
+                f"Existing experiment uses flux/flag policy {actual_policy or 'legacy'}, not "
+                f"{policy or 'legacy'}; choose a new experiment directory instead of mixing results"
+            )
         manifest["total_samples"] = len(samples)
         manifest.setdefault("samples", [])
         manifest.setdefault("failures", [])
     else:
-        manifest = _new_manifest(len(samples))
+        manifest = _new_manifest(len(samples), policy)
 
     completed = {entry["id"]: entry for entry in manifest["samples"]}
     for entry in completed.values():
@@ -543,7 +815,7 @@ def main(
             print(f"[{index}/{len(samples)}] Processing {sample_id}")
             completed_this_sample = False
             try:
-                entry = process_sample(ms_path, output)
+                entry = process_sample(ms_path, output, policy, reuse_dirs)
             except SampleProcessingError as exc:
                 print(
                     f"[{index}/{len(samples)}] Failed during {exc.stage}: "

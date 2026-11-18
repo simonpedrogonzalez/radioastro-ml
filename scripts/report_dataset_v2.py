@@ -243,7 +243,7 @@ def preview(config, output, *, smoke=False):
     ids, _, audit = indexed_sources(config, smoke)
     manifest = json.loads((thermal_root(config) / "report.json").read_text())
     sources = [dict(id=sid, **{k: v for k, v in original_flux_spec(
-        thermal_source(config, sid, manifest), thermal_root(config)).items() if k != "sky"}) for sid in ids]
+        thermal_source(config, sid, manifest), config).items() if k != "sky"}) for sid in ids]
     vectors = [v for src in sources for v in sample_vectors(src["id"], src["nominal_source_snr"], config, "train")]
     groups = defaultdict(list)
     for v in vectors:

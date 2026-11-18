@@ -1457,7 +1457,9 @@ def my_criteria(result, gain, reference):
 # (never from the outcome or a model), then independent Run, Recovery and Image dimensions and the Pipeline Result
 # evaluation label derived from group + Recovery. Legacy My Criteria (v3) is kept only as historical metadata.
 
-V5_VERSION = "v5 (2026-11-16, initial groups/subgroups; Run, Recovery, Image, Pipeline Result)"
+V5_VERSION = ("v5.1 (2026-11-18, initial groups/subgroups; Run, Recovery with Solved priority for Improvement expected, "
+              "Image, Pipeline Result; recovery progress)")
+SMALL_D = 0.01         # D below this amplifies progress >= 100x per eC unit: flagged in point details, never dropped
 TOL_CHANGE = 0.05      # [USER] absolute eC: a recovery change counts only if |after - before| > this (strict)
 TOL_REFERENCE = 0.05   # [USER] absolute eC: Solved if after <= reference + this; Small if 0 <= D <= this
 TOL_IMAGE = 0.05       # [USER] relative RMS/SNR change counts only if > this (strict). Replaces the provisional 1%
@@ -1538,15 +1540,20 @@ def run_outcome(rec):
     return dict(out, application="blocked", blocked_reason=reason)
 
 
-def recovery_outcome(before, after, reference, tol_change=TOL_CHANGE, tol_ref=TOL_REFERENCE):
-    """Recovery from change = after - before (positive = worse), independent of the Run decision. A meaningful
-    reduction is Solved if after <= reference + tol_ref, else Improved; without a reference it is unavailable."""
+def recovery_outcome(before, after, reference, tol_change=TOL_CHANGE, tol_ref=TOL_REFERENCE, group=None):
+    """Recovery from change = after - before (positive = worse), independent of the Run decision.
+    [USER] 2026-11-18 precedence: (1) Improvement expected AND remaining <= tol_ref -> Solved, whatever the size of
+    the reduction (these cases start with D > tol_ref, so reaching the tolerance is the required repair);
+    (2) Degraded; (3) Similar; (4) Improved; (5) Solved (meaningful reduction into tolerance, other groups).
+    A meaningful reduction without a reference is Improved-versus-Solved unavailable."""
     if not (_finite(before) and _finite(after)):
         return dict(recovery="unavailable", recovery_reason="missing or nonfinite eC before/after", change=None,
                     remaining=None)
     change = float(after - before)
     remaining = float(after - reference) if _finite(reference) else None
     out = dict(change=change, remaining=remaining, recovery_reason=None)
+    if group == "improvement_expected" and remaining is not None and not exceeds(remaining, tol_ref):
+        return dict(out, recovery="solved")
     if exceeds(change, tol_change):
         return dict(out, recovery="degraded")
     if not exceeds(-change, tol_change):
@@ -1555,6 +1562,19 @@ def recovery_outcome(before, after, reference, tol_change=TOL_CHANGE, tol_ref=TO
         return dict(out, recovery="unavailable",
                     recovery_reason=f"eC reduced by {-change:.4f} but no matched reference (solved vs improved unknown)")
     return dict(out, recovery="improved" if exceeds(remaining, tol_ref) else "solved")
+
+
+def recovery_progress(before, after, reference, tol_ref=TOL_REFERENCE):
+    """Progress toward the matched reference: 100 (before - after) / (before - reference) = 100 (1 - remaining / D),
+    defined only for D > 0 (0% unchanged, 100% after = reference, negative worse, >100% better than the reference;
+    never clamped). required_pct: the progress at which remaining = tol_ref (the Solved cutoff, varies with D)."""
+    if not (_finite(before) and _finite(after) and _finite(reference)):
+        return dict(progress_status="missing", progress_pct=None, progress_required_pct=None)
+    D = float(before - reference)
+    if not D > 0:
+        return dict(progress_status="not_applicable", progress_pct=None, progress_required_pct=None)
+    return dict(progress_status="applicable", progress_pct=100 * (before - after) / D,
+                progress_required_pct=100 * (1 - tol_ref / D), progress_small_D=D < SMALL_D)
 
 
 def pipeline_result(group, recovery):
@@ -1577,18 +1597,19 @@ def v5_labels(mask, before_archived, reference, result, finished=True, tol_chang
         state = "error" if finished else "pending"
         return dict(out, application=state, blocked_reason=None, stop_reasons=[], recovery=state,
                     recovery_reason="no result record", change=None, remaining=None, result=state,
-                    eC_before=None, eC_after=None)
+                    eC_before=None, eC_after=None, **recovery_progress(None, None, None))
     out.update(run_outcome(result.get("recipe_record", {})))
     ev = result.get("evaluation") or {}
     before = (ev.get("before") or {}).get("eC") if ev.get("status") == "measured" else None
     after = (ev.get("after") or {}).get("eC") if ev.get("status") == "measured" else None
     if ev.get("status") == "measured":
-        out.update(recovery_outcome(before, after, reference, tol_change, tol_ref))
+        out.update(recovery_outcome(before, after, reference, tol_change, tol_ref, out["group"]))
     else:
         state = "error" if out["application"] == "error" else "unavailable"
         out.update(recovery=state, recovery_reason=str(ev.get("reason") or ev.get("status") or "no evaluation")[-300:],
                    change=None, remaining=None)
-    return dict(out, result=pipeline_result(out["group"], out["recovery"]), eC_before=before, eC_after=after)
+    return dict(out, result=pipeline_result(out["group"], out["recovery"]), eC_before=before, eC_after=after,
+                **recovery_progress(before, after, reference, tol_ref))
 
 
 def image_outcome(r_rms, r_snr, eps_rms=EPSILON_RMS, eps_snr=EPSILON_SNR):

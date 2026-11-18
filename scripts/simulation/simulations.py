@@ -147,6 +147,67 @@ def _repository_commit() -> str | None:
         return None
 
 
+SIMULATION_FLAG_POLICIES = ("unflag",)
+
+
+def clear_flags_and_validate(ms_path: str | Path, *, chunk_rows: int = 4096) -> dict[str, object]:
+    """Clear FLAG/FLAG_ROW of a simulation copy, then require usable sampling geometry.
+
+    Every cross-correlation row must have finite, non-zero UVW; at least three antennas must
+    occur. Returns counts of previously flagged samples/rows for the simulation metadata.
+    """
+    rows_per_chunk = _positive_count(chunk_rows, name="chunk_rows")
+    try:
+        import numpy as np
+        from casatools import table
+    except ImportError as exc:  # pragma: no cover - CASA supplies these modules
+        raise RuntimeError("CASA casatools and NumPy are required to clear MS flags") from exc
+
+    path = resolve_path(ms_path).path
+    tb = table()
+    tb.open(str(path), nomodify=False)
+    flagged_samples = flagged_rows = total_samples = 0
+    antennas: set[int] = set()
+    try:
+        columns = set(tb.colnames())
+        if "FLAG" not in columns:
+            raise RuntimeError(f"Measurement Set has no FLAG column: {path}")
+        total_rows = int(tb.nrows())
+        if total_rows == 0:
+            raise ValueError(f"Measurement Set has no rows: {path}")
+        for start in range(0, total_rows, rows_per_chunk):
+            count = min(rows_per_chunk, total_rows - start)
+            flags = np.asarray(tb.getcol("FLAG", startrow=start, nrow=count), dtype=bool)
+            flagged_samples += int(flags.sum())
+            total_samples += int(flags.size)
+            tb.putcol("FLAG", np.zeros_like(flags), startrow=start, nrow=count)
+            if "FLAG_ROW" in columns:
+                row_flags = np.asarray(tb.getcol("FLAG_ROW", startrow=start, nrow=count), dtype=bool)
+                flagged_rows += int(row_flags.sum())
+                tb.putcol("FLAG_ROW", np.zeros_like(row_flags), startrow=start, nrow=count)
+            uvw = np.asarray(tb.getcol("UVW", startrow=start, nrow=count), dtype=float)
+            a1 = np.asarray(tb.getcol("ANTENNA1", startrow=start, nrow=count), dtype=int)
+            a2 = np.asarray(tb.getcol("ANTENNA2", startrow=start, nrow=count), dtype=int)
+            cross = a1 != a2
+            if not np.all(np.isfinite(uvw[:, cross])):
+                raise ValueError(f"Unflagged sampling has non-finite UVW: {path}")
+            if np.any(np.sqrt((uvw[:, cross] ** 2).sum(axis=0)) == 0):
+                raise ValueError(f"Unflagged sampling has zero-length cross-correlation baselines: {path}")
+            antennas.update(a1[cross].tolist())
+            antennas.update(a2[cross].tolist())
+    finally:
+        tb.close()
+    if len(antennas) < 3:
+        raise ValueError(f"Unflagged sampling has fewer than three antennas: {path}")
+    return {
+        "policy": "unflag",
+        "cleared_flagged_samples": flagged_samples,
+        "cleared_flagged_rows": flagged_rows,
+        "total_samples": total_samples,
+        "antennas": len(antennas),
+    }
+
+
 def _initialize_weights(ms_path: Path, sigma_jy: float | None) -> str:
     try:
         from casatasks import initweights
@@ -209,8 +270,15 @@ def simulate_ms(
     noise_model: str | None = None,
     noise_parameters: Mapping[str, object] | None = None,
     seed: int = 185349251,
+    simulation_flags: str | None = None,
 ) -> SimulationResult:
-    """Predict components and optional selected noise into a new copied MS."""
+    """Predict components and optional selected noise into a new copied MS.
+
+    simulation_flags="unflag" clears the copy's inherited FLAG/FLAG_ROW before prediction
+    (the input MS is never modified); None keeps the input flags.
+    """
+    if simulation_flags is not None and simulation_flags not in SIMULATION_FLAG_POLICIES:
+        raise ValueError(f"Unsupported simulation_flags {simulation_flags!r}")
     source = resolve_path(ms).path
     component_records = _normalize_components(components)
     if noise_model is None:
@@ -241,6 +309,9 @@ def simulate_ms(
     try:
         shutil.copytree(source, destination)
         created.append(destination)
+        flag_summary = None
+        if simulation_flags == "unflag":
+            flag_summary = clear_flags_and_validate(destination)
         if component_records:
             _write_component_list(component_records, component_path)
             created.append(component_path)
@@ -277,6 +348,8 @@ def simulate_ms(
             else str(noise_metadata["weight_initialization"])
         )
         operations = ["copy"]
+        if flag_summary is not None:
+            operations.append("unflag")
         if component_records:
             operations.extend(("predict",))
         else:
@@ -326,6 +399,7 @@ def simulate_ms(
             ],
             "status": "success",
             "warnings": [],
+            **({"simulation_flags": flag_summary} if flag_summary is not None else {}),
             "created_paths": [
                 str(path)
                 for path in (
@@ -357,4 +431,5 @@ def simulate_ms(
     )
 
 
-__all__ = ["SimulationResult", "add_thermal_noise_inplace", "simulate_ms"]
+__all__ = ["SIMULATION_FLAG_POLICIES", "SimulationResult", "add_thermal_noise_inplace",
+           "clear_flags_and_validate", "simulate_ms"]

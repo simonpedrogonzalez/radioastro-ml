@@ -51,8 +51,11 @@ def select_sources(*, v2=False):
         ranked_training_sources=ranked,median_rank_rule='sorted ascending (flux / nominal expected image RMS, source ID), index n//2')
 
 
-def prepare_v(source, folder, sky, *, v2=False):
-    if not v2:return g._prepare_V_ms(source,folder)
+def prepare_v(source, folder, sky, *, v2=False, simulation_flags=None):
+    """Noiseless V from the original MS; simulation_flags='unflag' clears its inherited flags."""
+    if not v2:
+        if simulation_flags is not None:raise ValueError('simulation_flags needs the v2 path')
+        return g._prepare_V_ms(source,folder)
     from scripts.simulation import simulate_ms
     payload=g._simulation_payload(source)
     work=folder/'work'/source.source_id
@@ -64,13 +67,15 @@ def prepare_v(source, folder, sky, *, v2=False):
         from scripts.imaging.metadata import resolve_path
         if stored.get('components')!=sky or stored.get('input_ms')!=str(resolve_path(payload['input_ms']).path):
             raise ValueError('Noiseless source simulation changed')
+        if ('simulation_flags' in stored)!=(simulation_flags=='unflag'):
+            raise ValueError('Noiseless source simulation used a different flag policy')
         return v
     if work.exists():
         if work.is_symlink() or work.resolve().parent!=(folder/'work').resolve():
             raise RuntimeError('Unsafe scratch work directory')
         shutil.rmtree(work)
     work.mkdir(parents=True,exist_ok=True)
-    return simulate_ms(payload['input_ms'],sky,v,noise_model=None).ms_path
+    return simulate_ms(payload['input_ms'],sky,v,noise_model=None,simulation_flags=simulation_flags).ms_path
 
 
 def source_metadata(root, selected, *, v2=False):

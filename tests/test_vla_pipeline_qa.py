@@ -321,6 +321,41 @@ class V5RecoveryTests(unittest.TestCase):
         self.assertEqual(q.initial_group(5, .15, .15 + 1e-15)["subgroup"], "cancelling")   # sign test stays exact
         self.assertEqual(q.image_outcome(1 - .95, 0), "similar")                         # 0.050000000000000044
 
+    def test_solved_priority_for_improvement_expected(self):
+        imp = "improvement_expected"
+        r = lambda before, after, ref, group=imp: q.recovery_outcome(before, after, ref, group=group)["recovery"]
+        # doc regression example: D = 0.0666266442, final excess 0.0171296447, reduction 0.0494969994 < 0.05
+        ref = .1
+        self.assertEqual(r(ref + .0666266442, ref + .0171296447, ref), "solved")
+        self.assertEqual(q.pipeline_result(imp, r(ref + .0666266442, ref + .0171296447, ref)), "success")
+        # D = 0.242335299, remaining 0.192734096 after a 0.049601203 reduction: still outside -> Similar, Failure
+        self.assertEqual(r(ref + .242335299, ref + .192734096, ref), "similar")
+        self.assertEqual(r(.30, .15, .10), "solved")                          # remaining exactly 0.05 (roundoff)
+        self.assertEqual(r(.17, .15 + 1e-6, .10), "similar")                  # just outside, small reduction
+        for group in ("no_improvement_expected", "exception", "unavailable", None):    # other groups unchanged
+            self.assertEqual(r(ref + .0666266442, ref + .0171296447, ref, group), "similar")
+        self.assertEqual(r(.12, .12, .10, "no_improvement_expected"), "similar")      # already within: not Solved
+        self.assertEqual(r(.30, .15, None), "unavailable")                    # no reference: no inferred crossing
+        x = q.v5_labels(3, .1666, .1, dict(recipe_record=dict(disposition="applied"), evaluation=dict(
+            status="measured", before=dict(eC=.1666), after=dict(eC=.12))))
+        self.assertEqual((x["group"], x["recovery"], x["result"]), (imp, "solved", "success"))
+
+    def test_recovery_progress(self):
+        pr = lambda b, a, ref: q.recovery_progress(b, a, ref)
+        self.assertEqual(pr(.5, .5, .25)["progress_pct"], 0.)                 # unchanged
+        self.assertEqual(pr(.5, .25, .25)["progress_pct"], 100.)              # fully recovered
+        self.assertEqual(pr(.5, .75, .25)["progress_pct"], -100.)             # degraded: negative, not clamped
+        self.assertEqual(pr(.5, .125, .25)["progress_pct"], 150.)             # below the reference: > 100
+        self.assertAlmostEqual(pr(.5, .25, .25)["progress_required_pct"], 100 * (1 - .05 / .25))
+        self.assertEqual(pr(.25, .2, .25)["progress_status"], "not_applicable")   # D = 0: no division
+        self.assertEqual(pr(.2, .1, .25)["progress_status"], "not_applicable")    # D < 0: no abs(D)
+        tiny = pr(.25 + 1e-6, .25, .25)
+        self.assertAlmostEqual(tiny["progress_pct"], 100.); self.assertTrue(tiny["progress_small_D"])
+        self.assertAlmostEqual(pr(.25 + 1e-6, .26, .25)["progress_pct"], -999900., places=0)   # extreme, kept
+        self.assertEqual(pr(None, .2, .1)["progress_status"], "missing")
+        self.assertEqual(pr(.3, .2, float("nan"))["progress_status"], "missing")
+        self.assertEqual(q.v5_labels(3, .3, .1, None, finished=False)["progress_status"], "missing")
+
     def test_pipeline_result_mappings(self):
         p = q.pipeline_result
         imp, no = "improvement_expected", "no_improvement_expected"
@@ -418,8 +453,11 @@ class ElapsedTests(unittest.TestCase):
         self.assertIsNone(elapsed_hours([], []))
 
 
-def case_item(run, i, group, subgroup, result, recovery, image, application, reason=None):
-    return dict(case=f"c{i}", id=f"{run}|c{i}|B", label="s:r00:m3:slot0", corruption="amp+phase", mask=3, d=None,
+def case_item(run, i, group, subgroup, result, recovery, image, application, reason=None, progress=None):
+    status = "applicable" if progress is not None else "not_applicable" if group != "improvement_expected" else "missing"
+    return dict(progress_status=status, progress_pct=progress, progress_required_pct=50. if progress is not None else None,
+                progress_small_D=False, eC_before=.3, eC_after=.2,
+                case=f"c{i}", id=f"{run}|c{i}|B", label="s:r00:m3:slot0", corruption="amp+phase", mask=3, d=None,
                 eC_archived=.3, group=group, subgroup=subgroup, group_reason="x", D=.1, reference=.1,
                 application=application, blocked_reason=reason, recovery=recovery, recovery_reason=None,
                 result=result, image=image, change=-.1, remaining=.1, description="d", seconds=60., action="Applied",
@@ -430,13 +468,14 @@ class V5ReportTests(unittest.TestCase):
     CONFIG = "B · 256 px · center · flags on"
 
     def _rows(self):
-        specs = [("improvement_expected", None, "success", "solved", "cleaner", "applied", None),
-                 ("improvement_expected", None, "partial_success", "improved", "mixed", "applied", None),
-                 ("improvement_expected", None, "failure", "similar", "similar", "blocked", "low_initial_snr"),
+        specs = [("improvement_expected", None, "success", "solved", "cleaner", "applied", None, 120.),
+                 ("improvement_expected", None, "partial_success", "improved", "mixed", "applied", None, 60.),
+                 ("improvement_expected", None, "failure", "similar", "similar", "blocked", "low_initial_snr", 2.),
+                 ("improvement_expected", None, "failure", "similar", "similar", "applied", None, 2.),   # duplicate value
                  ("no_improvement_expected", "noise_only", "success", "similar", "cleaner", "blocked", "solution_lowers_snr"),
                  ("no_improvement_expected", "cancelling", "failure", "degraded", "worse", "applied", None),
                  ("no_improvement_expected", "uncorrupted", "success", "similar", "similar", "blocked", "other"),
-                 ("no_improvement_expected", "small", "unavailable", "unavailable", "unavailable", "unknown", None),
+                 ("no_improvement_expected", "small", "unavailable", "unavailable", "unavailable", "unknown", None, -40.),
                  ("exception", None, "unavailable", "improved", "cleaner", "applied", None),
                  ("improvement_expected", None, "pending", "pending", "pending", "pending", None)]
         # two different runs with the SAME folder name and configuration: identity is the absolute path
@@ -458,7 +497,7 @@ class V5ReportTests(unittest.TestCase):
             text = (Path(tmp) / "r.html").read_text()
         trs = [{k: html.unescape(v) for k, v in re.findall(r"data-([a-z]+)='([^']*)'", tr)}
                for tr in re.findall(r"<tr data-run=[^>]*>", text)]
-        self.assertEqual(len(trs), 18)
+        self.assertEqual(len(trs), 20)
         bars = re.findall(r"class=bar [^>]*data-filter='([^']*)'><span class=lab>[^<]*</span><span[^>]*></span>"
                           r"<span>(\d+)", text)
         self.assertGreater(len(bars), 50)
@@ -477,6 +516,46 @@ class V5ReportTests(unittest.TestCase):
                              s["table2"]["no_improvement_expected"]["planned"])
             self.assertEqual(s["table3"]["small"]["planned"], 1)
             self.assertIn("exception", s["table2"])
+
+    def test_progress_plots_share_cases_and_positions(self):
+        import html, json, re, tempfile
+        from pathlib import Path
+        from scripts import vla_pipeline_qa_compare as cmp
+        rows = self._rows()
+        summaries = [cmp.summarize(r) for r in rows]
+        with tempfile.TemporaryDirectory() as tmp:
+            cmp.write_report(Path(tmp), summaries, rows, [Path("run1"), Path("run2")], "r.html")
+            text = (Path(tmp) / "r.html").read_text()
+        st = summaries[0]["table1"]["progress"]
+        self.assertEqual((st["plotted"], st["total"], st["not_applicable"], st["missing"]), (5, 10, 4, 1))
+        cells = re.findall(r"<td class=progress>(.*?)</td>", text, re.S)
+        self.assertEqual(len(cells), 2 * (1 + 3 + 4))                      # every row of Tables 1-3, both runs
+        self.assertIn(cmp.NO_PROGRESS, " ".join(cells))                     # noise only / cancelling / uncorrupted
+        first = cells[0]
+        self.assertIn("plotted 5 / 10 · not applicable 4 · missing/invalid 1", first)
+        full = re.search(r"<div class=pfull>(.*?)</div>", first, re.S).group(1)
+        self.assertIn("data-n=5", full)                                      # boxplot uses the same 5 cases
+        swarms = dict(re.findall(r"<g class=swarm data-dim=(\w+)>(.*?)</g>", full, re.S))
+        pts = {d: re.findall(r"<circle cx=([\d.]+) cy=([\d.]+) r=[\d.]+ (fill='[^']*'[^/]*?) data-k=(\d+) "
+                             r"data-c=([\w]+)/>", g) for d, g in swarms.items()}
+        self.assertEqual(len(pts["result"]), 5)
+        x0 = cmp.PLOT["swarm"] + cmp.PLOT["gap"]                             # second swarm is shifted by one panel
+        self.assertEqual([(float(x) + x0, y, k) for x, y, _, k, _ in pts["result"]],
+                         [(float(x), y, k) for x, y, _, k, _ in pts["recovery"]])     # identical cases and positions
+        self.assertEqual(len({(x, y) for x, y, *_ in pts["result"]}), 5)    # duplicate values stay separate points
+        colors = {c: style for _, _, style, _, c in pts["result"]}
+        self.assertIn(cmp.COLORS["success"], colors["success"]); self.assertIn(cmp.COLORS["failure"], colors["failure"])
+        self.assertIn("stroke", colors["unavailable"])                       # accounting: hollow marker
+        rec = {c: style for _, _, style, _, c in pts["recovery"]}
+        self.assertIn(cmp.COLORS["solved"], rec["solved"]); self.assertIn(cmp.COLORS["similar"], rec["similar"])
+        cases = json.loads(html.unescape(re.search(r"const CASES=(\[.*?\]);", text).group(1)))
+        for _, _, _, k, c in pts["result"]:                                   # a point names exactly its case
+            self.assertEqual(cases[int(k)]["result"], c)
+            self.assertTrue(cases[int(k)]["id"].startswith("/data/a/qa-run|"))
+        self.assertEqual(cmp.swarm_offsets([10., 10., 10., 50.], 4), [0, 1, -1, 0])
+        b = cmp.box_stats([1., 2., 3., 4., 100.])
+        self.assertEqual((b["median"], b["q1"], b["q3"], b["whisker_high"], b["outliers"]), (3., 2., 4., 4., [100.]))
+        self.assertEqual(cmp.box_stats([7.])["median"], 7.)                  # singleton stays visible
 
     def test_tolerance_change_never_reuses_labels(self):
         import tempfile

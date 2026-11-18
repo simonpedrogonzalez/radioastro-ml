@@ -24,6 +24,7 @@ import argparse
 import hashlib
 import html as htmllib
 import json
+import math
 from collections import Counter
 from pathlib import Path
 
@@ -166,7 +167,8 @@ V5_FIELDS = ("group", "subgroup", "group_reason", "D", "reference", "reference_i
              "blocked_reason", "stop_reasons", "image", "image_reason", "epsilon_rms", "epsilon_snr", "rms_before",
              "rms_after", "mean_before", "mean_after", "peak_before", "peak_after", "snr_before", "snr_after", "r_rms",
              "r_snr", "off_pixels", "source_pixels", "off_beams", "units", "flux_before", "flux_after",
-             "image_metric_version", "evaluation_reused")
+             "image_metric_version", "evaluation_reused", "progress_status", "progress_pct", "progress_required_pct",
+             "progress_small_D")
 
 
 def add_image_metrics(rows, cache, eps_rms=EPSILON_RMS, eps_snr=EPSILON_SNR):
@@ -231,7 +233,159 @@ def stats(cases):
                 counts={key: dict(Counter(str(c.get(key)) for c in cases)) for key, _, _ in DIMENSIONS},
                 reasons=dict(Counter(c["blocked_reason"] for c in cases if c["application"] == "blocked")),
                 runtime=dict(timed=len(secs), median_min=float(np.median(secs)) / 60, min_min=min(secs) / 60,
-                             max_min=max(secs) / 60, recipe_hours=sum(secs) / 3600) if secs else dict(timed=0))
+                             max_min=max(secs) / 60, recipe_hours=sum(secs) / 3600) if secs else dict(timed=0),
+                progress=progress_stats(cases))
+
+
+# ---------------------------------------------------------------- recovery progress plots
+# [USER] 2026-11-18: per summary row a neutral boxplot and two swarms (colored by Pipeline Result, by Recovery) of
+# progress = 100 (before - after) / D for the cases of that row with D > 0. Same cases, values and positions in all
+# three; nothing clamped, sampled or aggregated.
+
+POINT_FIELDS = ("id", "label", "case", "result", "recovery", "eC_before", "eC_after", "reference", "D", "remaining",
+                "progress_pct", "progress_required_pct", "progress_small_D")
+PROGRESS_ZOOM = (-100., 200.)           # optional readability zoom; the full range is the default view
+PLOT = dict(height=260, top=16, bottom=8, axis=38, box=40, swarm=160, gap=6, radius=1.7)
+NO_PROGRESS = "Not applicable: no positive initial joint gain damage"
+
+
+def progress_stats(cases):
+    """Eligible points (progress defined: finite metrics and D > 0) sorted by (progress, id), with the denominators."""
+    points = sorted(({k: c.get(k) for k in POINT_FIELDS} for c in cases if c.get("progress_status") == "applicable"),
+                    key=lambda p: (p["progress_pct"], p["id"]))
+    na = sum(c.get("progress_status") == "not_applicable" for c in cases)
+    return dict(points=points, total=len(cases), plotted=len(points), not_applicable=na,
+                missing=len(cases) - len(points) - na)
+
+
+def box_stats(values):
+    """Tukey boxplot: quartiles with numpy's linear interpolation (Hyndman-Fan type 7), whiskers to the most extreme
+    observations within 1.5 IQR of the box, outliers beyond."""
+    v = np.sort(np.asarray(values, float))
+    q1, median, q3 = (float(x) for x in np.percentile(v, [25, 50, 75]))
+    lo, hi = q1 - 1.5 * (q3 - q1), q3 + 1.5 * (q3 - q1)
+    inside = v[(v >= lo) & (v <= hi)]
+    return dict(q1=q1, median=median, q3=q3, whisker_low=float(inside.min()), whisker_high=float(inside.max()),
+                outliers=[float(x) for x in v[(v < lo) | (v > hi)]], n=int(v.size))
+
+
+def swarm_offsets(ys, spacing):
+    """Deterministic dot-swarm: points in the given order (ascending value) take the first column 0, +1, -1, +2, ...
+    whose last point is at least `spacing` px away along the value axis. Returns column indices."""
+    last, out = {}, []
+    for y in ys:
+        k = 0
+        for j in range(len(ys) + 1):
+            k = (j + 1) // 2 * (1 if j % 2 else -1)
+            if k not in last or abs(y - last[k]) >= spacing:
+                break
+        last[k] = y
+        out.append(k)
+    return out
+
+
+def nice_ticks(lo, hi, n=5):
+    step = (hi - lo) / n
+    mag = 10 ** math.floor(math.log10(step))
+    step = next(m * mag for m in (1, 2, 5, 10) if m * mag >= step)
+    return [t * step for t in range(math.ceil(lo / step), math.floor(hi / step) + 1)]
+
+
+def progress_layout(points, lo, hi):
+    """Pixel positions shared by both swarms: (index into points, y px, x offset px) of the points inside [lo, hi].
+    Dense swarms are compressed to the panel width (spacing shrinks, no point is dropped)."""
+    h = PLOT["height"] - PLOT["top"] - PLOT["bottom"]
+    ypx = lambda v: PLOT["top"] + (hi - v) / (hi - lo) * h
+    keep = [i for i, p in enumerate(points) if lo <= p["progress_pct"] <= hi]
+    ys = [ypx(points[i]["progress_pct"]) for i in keep]
+    spacing = 2 * PLOT["radius"] + .4
+    cols = swarm_offsets(ys, spacing)
+    half = PLOT["swarm"] / 2 - PLOT["radius"] - 1
+    widest = max([abs(k) for k in cols] + [0]) * spacing
+    squeeze = min(1., half / widest) if widest else 1.
+    return [(i, y, k * spacing * squeeze) for i, y, k in zip(keep, ys, cols)], ypx, squeeze
+
+
+def point_color(dim, value):
+    color = COLORS.get(value) if value in (RESULTS if dim == "result" else RECOVERY) else None
+    return f"fill='{color}'" if color else "fill='none' stroke='#555' stroke-width='.8'"   # accounting: hollow
+
+
+def progress_svg(st, lo, hi, key_of):
+    """One SVG: shared progress axis (0% and 100% marked), boxplot, swarm by Pipeline Result, swarm by Recovery."""
+    P = PLOT
+    points = st["points"]
+    layout, ypx, squeeze = progress_layout(points, lo, hi)
+    x_box = P["axis"]
+    x_res = x_box + P["box"] + P["gap"]
+    x_rec = x_res + P["swarm"] + P["gap"]
+    width = x_rec + P["swarm"] + 2
+    out = [f"<svg class=prog width={width} height={P['height']} role=img aria-label='recovery progress: "
+           f"{st['plotted']} cases'>"]
+    for t in nice_ticks(lo, hi):
+        out.append(f"<text x={P['axis'] - 3} y={ypx(t) + 3:.1f} text-anchor=end font-size=9>{t:g}</text>"
+                   f"<line x1={P['axis']} x2={width} y1={ypx(t):.1f} y2={ypx(t):.1f} stroke='#eee'/>")
+    for t in (0, 100):
+        if lo <= t <= hi:
+            out.append(f"<line x1={P['axis']} x2={width} y1={ypx(t):.1f} y2={ypx(t):.1f} stroke='#333' "
+                       f"stroke-dasharray='3 2'/><text x={width - 2} y={ypx(t) - 2:.1f} text-anchor=end font-size=9>"
+                       f"{t}%</text>")
+    for x, title in ((x_box, "box"), (x_res, "by Pipeline Result"), (x_rec, "by Recovery")):
+        out.append(f"<text x={x + 2} y=10 font-size=9 font-weight=bold>{title}</text>")
+    b = box_stats([p["progress_pct"] for p in points])
+    clip = lambda v: min(max(v, lo), hi)
+    cx, w = x_box + P["box"] / 2, P["box"] * .55
+    y1, y3, ym = ypx(clip(b["q3"])), ypx(clip(b["q1"])), ypx(clip(b["median"]))
+    out.append(f"<g class=box data-n={b['n']}><line x1={cx} x2={cx} y1={ypx(clip(b['whisker_high'])):.1f} "
+               f"y2={ypx(clip(b['whisker_low'])):.1f} stroke='#444'/><rect x={cx - w / 2:.1f} y={y1:.1f} width={w:.1f} "
+               f"height={max(y3 - y1, .8):.1f} fill='#ddd' stroke='#444'/><line x1={cx - w / 2:.1f} x2={cx + w / 2:.1f} "
+               f"y1={ym:.1f} y2={ym:.1f} stroke='#000' stroke-width=1.6/>")
+    for v in b["outliers"]:
+        if lo <= v <= hi:
+            out.append(f"<circle cx={cx} cy={ypx(v):.1f} r=1.6 fill='none' stroke='#444' stroke-width=.7/>")
+    out.append("</g>")
+    for dim, x0 in (("result", x_res), ("recovery", x_rec)):
+        c0 = x0 + P["swarm"] / 2
+        out.append(f"<g class=swarm data-dim={dim}>" + "".join(
+            f"<circle cx={c0 + dx:.1f} cy={y:.1f} r={P['radius']} {point_color(dim, points[i][dim])} "
+            f"data-k={key_of[points[i]['id']]} data-c={esc_attr(points[i][dim])}/>" for i, y, dx in layout) + "</g>")
+    out.append("</svg>")
+    off = (sum(p["progress_pct"] < lo for p in points), sum(p["progress_pct"] > hi for p in points))
+    return "".join(out), off, squeeze
+
+
+def esc_attr(value):
+    return htmllib.escape(str(value), quote=True)
+
+
+def progress_cell(st, full, key_of):
+    """Summary cell: coverage line, the full-range SVG and the zoomed SVG (one shown at a time)."""
+    head = (f"<small>plotted {st['plotted']} / {st['total']} · not applicable {st['not_applicable']} · "
+            f"missing/invalid {st['missing']}</small>")
+    if not st["plotted"]:
+        why = (NO_PROGRESS if st["not_applicable"] and not st["missing"] else
+               f"No plotted case: {st['missing']} with missing/invalid metrics"
+               + (f"; {st['not_applicable']} not applicable (no positive initial joint gain damage)"
+                  if st["not_applicable"] else "") if st["total"] else "No cases in this row")
+        return f"<td class=progress>{head}<br><i>{htmllib.escape(why)}</i></td>"
+    parts = [f"<td class=progress>{head}"]
+    for cls, (lo, hi) in (("pfull", full), ("pzoom", PROGRESS_ZOOM)):
+        svg, (below, above), squeeze = progress_svg(st, lo, hi, key_of)
+        notes = []
+        if below or above:
+            notes.append(f"off-axis: {below} below {lo:g}%, {above} above {hi:g}% (full range: reset zoom)")
+        if squeeze < 1:
+            notes.append(f"dense swarm compressed ×{squeeze:.2f}")
+        parts.append(f"<div class={cls}>{svg}" + (f"<br><small>{'; '.join(notes)}</small>" if notes else "") + "</div>")
+    return "".join(parts) + "</td>"
+
+
+def progress_range(summaries):
+    """One common linear full-range axis over every summary row (0 and 100 always included, nothing clipped)."""
+    values = [p["progress_pct"] for s in summaries for st in [s["table1"]] for p in st["progress"]["points"]]
+    lo, hi = min(values + [0.]), max(values + [100.])
+    pad = .04 * (hi - lo)
+    return lo - pad, hi + pad
 
 
 def summarize(row):
@@ -326,10 +480,24 @@ def glossary(eps_rms, eps_snr):
         ("Pipeline Result", "Success / Partial success / Failure",
          "evaluation label, not the pipeline's QA score. Improvement expected: Solved → Success, Improved → Partial "
          "success, Similar/Degraded → Failure. No improvement expected: Degraded → Failure, otherwise Success."),
-        ("Recovery", name("solved"), f"change < −{t} and remaining ≤ {r}."),
+        ("Recovery", name("solved"), f"Improvement expected: remaining ≤ {r}, whatever the reduction (checked first). "
+                                     f"Other groups: change < −{t} and remaining ≤ {r}."),
         ("Recovery", name("improved"), f"change < −{t} and remaining > {r}."),
         ("Recovery", name("similar"), f"|change| ≤ {t}."),
         ("Recovery", name("degraded"), f"change > {t}."),
+        ("Recovery progress (%)", "100 (before − after) / D = 100 (1 − remaining / D)",
+         "progress toward the matched reference for cases with D > 0: 0% unchanged, 100% after = reference, negative = "
+         "worse, above 100% = better than the reference (never clamped). Not defined for D ≤ 0 (controls, noise only, "
+         f"Cancelling, exceptions): counted as not applicable. An Improvement expected case is Solved from "
+         f"100 (1 − {r} / D)% on, so the cutoff depends on D (shown per point). A benchmark, not proof of recovered "
+         "antenna gains. Small D (< 0.01) amplifies the percentage and is flagged."),
+        ("Recovery progress (%)", "boxplot, two swarms",
+         "same cases, values and point positions in all three; one shared linear axis (dashed lines at 0% and 100%). "
+         "Box: median, quartiles (linear interpolation), whiskers to the most extreme values within 1.5 IQR, hollow "
+         "outliers. Swarms: one point per case, colored by Pipeline Result (Success teal, Partial success blue, Failure "
+         "vermilion) and by Recovery (Solved teal, Improved blue, Similar gray, Degraded vermilion); hollow = "
+         "accounting state. Hover for details, click a point to show that case below. Zoom −100…200% is optional; the "
+         "full range is the default."),
         ("Image", "RMS, SNR",
          "restored CLEAN images on fixed regions of the reference geometry: RMS = standard deviation over the off-source "
          "annulus (Jy/beam), SNR = (peak in the true-source ellipse − annulus mean) / RMS; same units/beam/geometry required."),
@@ -351,6 +519,14 @@ def glossary(eps_rms, eps_snr):
             + "</table></div>")
 
 
+def progress_text(c):
+    """Numeric progress of the case table (and why there is none)."""
+    if c.get("progress_status") == "applicable":
+        return (f"{c['progress_pct']:.1f}%<br><small>Solved from {c['progress_required_pct']:.1f}%"
+                + ("<br>small D: amplified" if c.get("progress_small_D") else "") + "</small>")
+    return "<small>n/a (D ≤ 0)</small>" if c.get("progress_status") == "not_applicable" else "<small>–</small>"
+
+
 def write_report(output, summaries, rows, runs, filename, eps_rms=EPSILON_RMS, eps_snr=EPSILON_SNR):
     f = lambda x, d=3: "–" if x is None else f"{x:.{d}f}"
     esc = htmllib.escape
@@ -362,7 +538,11 @@ def write_report(output, summaries, rows, runs, filename, eps_rms=EPSILON_RMS, e
            ".fill{display:inline-block;height:11px}.badge{padding:1px 6px;border-radius:3px;font-size:12px;"
            "white-space:nowrap}.partial{color:#D55E00;font-weight:bold}details{font-size:12px}small{color:#555}"
            ".grp{cursor:pointer;text-decoration:underline dotted}.filters label{margin-right:.6em;white-space:nowrap}"
-           "</style>",
+           ".pzoom{display:none}body.zoomed .pzoom{display:block}body.zoomed .pfull{display:none}svg.prog circle[data-k]"
+           "{cursor:pointer}#tip{position:fixed;display:none;background:#fff;border:1px solid #888;padding:4px 6px;"
+           "font-size:12px;max-width:360px;pointer-events:none;z-index:9}.lg{display:inline-block;width:9px;height:9px;"
+           "border-radius:50%;margin:0 2px 0 6px}.lg.o{border:1px solid #555}"
+           "</style><div id=tip></div>",
            f"<h1>VLA pipeline QA report</h1><p>{len(runs)} run(s): {', '.join(esc(r.name) for r in runs)}. "
            f"Labels: {V5_VERSION}. Target self-calibration on simulated residual corruptions, not the full "
            "calibrator-transfer VLA pipeline. Legacy v3 My Criteria labels are kept only in the exported evidence.</p>",
@@ -373,11 +553,19 @@ def write_report(output, summaries, rows, runs, filename, eps_rms=EPSILON_RMS, e
     # one count scale per dimension over all tables
     scale = {key: max([1] + [n for s in summaries for st in [s["table1"]] for _, _, n, _ in entries(key, st)])
              for key, _, _ in DIMENSIONS}
-    head = "".join(f"<th>{h}</th>" for _, h, _ in DIMENSIONS)
+    full = progress_range(summaries)
+    cases_js = list({p["id"]: p for s in summaries for p in s["table1"]["progress"]["points"]}.values())
+    key_of = {p["id"]: k for k, p in enumerate(cases_js)}
+    dot = lambda k, hollow=False: f"<span class='lg{' o' if hollow else ''}' style='background:{COLORS.get(k, 'none')}'></span>"
+    legend = ("<br><small>by Pipeline Result:" + "".join(dot(k) + name(k) for k in RESULTS) + dot("", True) + "other"
+              + "<br>by Recovery:" + "".join(dot(k) + name(k) for k in RECOVERY) + dot("", True) + "other</small>")
+    head = "".join(f"<th>{h}</th>" + (f"<th>Recovery progress (%){legend}</th>" if key == "recovery" else "")
+                   for key, h, _ in DIMENSIONS)
 
     def cells(st, base, no_partial=False):
         return "".join("<td>" + "".join(bar(label, n, scale[key], color, {**base, **part})
                                         for label, part, n, color in entries(key, st, no_partial)) + "</td>"
+                       + (progress_cell(st["progress"], full, key_of) if key == "recovery" else "")
                        for key, _, _ in DIMENSIONS)
 
     def runtime(st):
@@ -394,6 +582,8 @@ def write_report(output, summaries, rows, runs, filename, eps_rms=EPSILON_RMS, e
         return (f"<b class=grp tabindex=0 role=button data-filter='{esc(json.dumps(flt))}'>{esc(text)}</b><br>"
                 f"<small>{cover(st)}<br>{runtime(st)}</small>")
 
+    out.append(f"<p><button id=zoom>Recovery progress axis: zoom to {PROGRESS_ZOOM[0]:g}…{PROGRESS_ZOOM[1]:g}%</button> "
+               f"<small>Default: full range {full[0]:.0f}…{full[1]:.0f}% shared by every summary row.</small></p>")
     for s in summaries:
         base = dict(run=s["run_id"], config=s["config"])
         old = " class=old" if s["superseded"] else ""
@@ -443,7 +633,8 @@ def write_report(output, summaries, rows, runs, filename, eps_rms=EPSILON_RMS, e
                "|pixel| over both, shown under the after image); click to enlarge. r_RMS = (RMS before − after) / before, "
                "r_SNR = (SNR after − before) / before: positive = better.</small></p>"
                "<div class=scroll><table id=cases><tr><th>Configuration</th><th>Source / case</th><th>Corruption</th>"
-               "<th>Group</th><th>Pipeline Result</th><th>Recovery</th><th>Image</th><th>Run</th>"
+               "<th>Group</th><th>Pipeline Result</th><th>Recovery</th><th>Recovery progress (%)</th><th>Image</th>"
+               "<th>Run</th>"
                "<th>eC before → after</th><th>Reference eC / D / remaining</th><th>CLEAN before</th><th>CLEAN after</th>"
                "<th>RMS before → after</th><th>SNR before → after</th><th>Flux error</th><th>Recipe runtime (min)</th>"
                "<th>Description</th></tr>")
@@ -472,6 +663,7 @@ def write_report(output, summaries, rows, runs, filename, eps_rms=EPSILON_RMS, e
                 + f"{' class=old' if c.get('superseded') else ''}><td>{esc(row['config'])}</td>"
                 f"<td>{esc(c['label'])}<br><small>{c['case']}</small></td><td>{corruption_cell(c)}</td>"
                 f"<td>{group}</td><td>{badge(c['result'])}</td><td>{badge(c['recovery'])}{rec_note}</td>"
+                f"<td class=n>{progress_text(c)}</td>"
                 f"<td>{badge(c.get('image'))}{image_note}</td><td>{run_cell}</td>"
                 f"<td class=n>{f(c.get('eC_before'))} → {f(c.get('eC_after'))}<br>change {f(c.get('change'))}</td>"
                 f"<td class=n>{f(c.get('reference'))}<br>D {f(D, 4)}<br>remaining {f(c.get('remaining'))}"
@@ -485,13 +677,30 @@ def write_report(output, summaries, rows, runs, filename, eps_rms=EPSILON_RMS, e
     out.append("</table></div><script>"
                "const sel=[...document.querySelectorAll('select[data-key]')],rows=[...document.querySelectorAll("
                "'#cases tr[data-id]')];"
+               "const CASES=" + json.dumps([{k: p[k] for k in POINT_FIELDS} for p in cases_js]).replace("</", "<\\/")
+               + ";let pinned=null;"
                "function apply(){let n=0;for(const tr of rows){const ok=sel.every(s=>!s.value||tr.dataset[s.dataset.key]"
-               "===s.value);tr.style.display=ok?'':'none';n+=ok}document.getElementById('count').textContent=n+' / '+"
-               "rows.length+' cases';document.getElementById('active').textContent=sel.filter(s=>s.value).map(s=>"
+               "===s.value)&&(!pinned||tr.dataset.id===pinned);tr.style.display=ok?'':'none';n+=ok}"
+               "document.getElementById('count').textContent=n+' / '+rows.length+' cases';"
+               "document.getElementById('active').textContent=pinned?'case='+pinned:sel.filter(s=>s.value).map(s=>"
                "s.dataset.key+'='+s.value).join(', ')}"
-               "function setFilter(f){for(const s of sel){const v=f[s.dataset.key]||'';if(v&&![...s.options].some(o=>"
-               "o.value===v))s.add(new Option(v,v));s.value=v}apply();document.getElementById('cases').scrollIntoView()}"
-               "for(const s of sel)s.onchange=apply;document.getElementById('reset').onclick=()=>setFilter({});"
+               "function setFilter(f){pinned=null;for(const s of sel){const v=f[s.dataset.key]||'';if(v&&![...s.options]"
+               ".some(o=>o.value===v))s.add(new Option(v,v));s.value=v}apply();document.getElementById('cases')"
+               ".scrollIntoView()}"
+               "function pick(k){for(const s of sel)s.value='';pinned=CASES[k].id;apply();"
+               "document.getElementById('cases').scrollIntoView()}"
+               "const fx=(x,d=4)=>x==null?'–':(+x).toFixed(d),tip=document.getElementById('tip');"
+               "function detail(p){return p.label+' ('+p.case+')\\nPipeline Result: '+p.result+' · Recovery: '+p.recovery+"
+               "'\\neC before '+fx(p.eC_before)+' → after '+fx(p.eC_after)+', reference '+fx(p.reference)+"
+               "'\\nD '+fx(p.D)+(p.progress_small_D?' (small D: progress amplified)':'')+', remaining '+fx(p.remaining)+"
+               "'\\nprogress '+fx(p.progress_pct,1)+'% (Solved from '+fx(p.progress_required_pct,1)+'%)'}"
+               "document.addEventListener('mouseover',e=>{const k=e.target.dataset&&e.target.dataset.k;if(k===undefined)"
+               "{tip.style.display='none';return}tip.innerText=detail(CASES[+k]);tip.style.display='block';"
+               "tip.style.left=(e.clientX+12)+'px';tip.style.top=(e.clientY+12)+'px'});"
+               "document.addEventListener('click',e=>{const k=e.target.dataset&&e.target.dataset.k;if(k!==undefined)pick(+k)});"
+               "const zb=document.getElementById('zoom'),zt=zb.textContent;zb.onclick=()=>{const z=document.body.classList"
+               ".toggle('zoomed');zb.textContent=z?'Recovery progress axis: reset to full range':zt};"
+               "for(const s of sel)s.onchange=()=>{pinned=null;apply()};document.getElementById('reset').onclick=()=>setFilter({});"
                "for(const b of document.querySelectorAll('[data-filter]')){const go=()=>setFilter(JSON.parse(b.dataset.filter));"
                "b.onclick=go;b.onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();go()}}}"
                "apply()</script>")
