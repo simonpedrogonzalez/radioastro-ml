@@ -234,7 +234,7 @@ def stats(cases):
                 reasons=dict(Counter(c["blocked_reason"] for c in cases if c["application"] == "blocked")),
                 runtime=dict(timed=len(secs), median_min=float(np.median(secs)) / 60, min_min=min(secs) / 60,
                              max_min=max(secs) / 60, recipe_hours=sum(secs) / 3600) if secs else dict(timed=0),
-                progress=progress_stats(cases))
+                progress=progress_stats(cases), ec=ec_stats(cases))
 
 
 # ---------------------------------------------------------------- recovery progress plots
@@ -317,6 +317,78 @@ def progress_png(st, path, ylim):
     fig.tight_layout()
     fig.savefig(path)
     plt.close(fig)
+
+
+EC_FIELDS = ("id", "result", "recovery", "eC_before", "eC_after")
+
+
+def finite(x):
+    return x is not None and math.isfinite(x)
+
+
+def ec_stats(cases):
+    """Cases with finite measured eC before and after (any group), for the before/after scatter."""
+    points = [{k: c.get(k) for k in EC_FIELDS} for c in cases if finite(c.get("eC_before")) and finite(c.get("eC_after"))]
+    return dict(points=points, total=len(cases), plotted=len(points))
+
+
+def ec_range(summaries):
+    """One common square log range over every summary row (eC spans decades; a few cases reach eC > 1)."""
+    values = [v for s in summaries for p in s["table1"]["ec"]["points"] for v in (p["eC_before"], p["eC_after"]) if v > 0]
+    return min(values + [.1]) / 1.3, max(values + [1.]) * 1.3
+
+
+def ec_png(st, path, lim, tol=TOL_CHANGE):
+    """eC before (x) vs after (y) on log axes, panels colored by Pipeline Result and by Recovery. y = x and the
+    +-tol band (absolute, so it widens toward small eC on log axes). Larger categories are drawn first."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    points = st["points"]
+    fig, axes = plt.subplots(1, 2, figsize=(7.6, 4.1), dpi=110, sharex=True, sharey=True, layout="constrained")
+    grid = np.geomspace(*lim, 400)
+    for ax, (dim, title, cats) in zip(axes, (("result", "by Pipeline Result", RESULTS),
+                                             ("recovery", "by Recovery", RECOVERY))):
+        ax.plot(grid, grid, color="#222", lw=.9, zorder=1)
+        for sign in (-1, 1):
+            band = grid + sign * tol
+            ax.plot(grid[band > 0], band[band > 0], color="#555", lw=.7, ls="--", zorder=1)
+        groups = progress_groups(points, dim, cats)[1:]
+        for k, pts in sorted(groups, key=lambda g: -len(g[1])):
+            x = [p["eC_before"] for p in pts]
+            y = [p["eC_after"] for p in pts]
+            label = f"{name(k)} ({len(pts)})"
+            if k in cats and k in COLORS:
+                ax.scatter(x, y, s=8, color=COLORS[k], alpha=.55, lw=0, zorder=2, label=label)
+            else:                                                            # accounting state: hollow
+                ax.scatter(x, y, s=10, facecolors="none", edgecolors="#444", lw=.6, zorder=2, label=label)
+        ax.set_xscale("log")
+        ax.set_yscale("log")
+        ax.set_xlim(*lim)
+        ax.set_ylim(*lim)
+        ax.set_aspect("equal")
+        handles, labels = ax.get_legend_handles_labels()
+        order = [labels.index(f"{name(k)} ({len(p)})") for k, p in groups]          # legend in category order
+        ax.set_xlabel("eC before (archived)", fontsize=8)
+        ax.set_title(title, fontsize=9)
+        ax.tick_params(labelsize=8)
+        ax.grid(color="#eee", lw=.6, zorder=0)
+        ax.legend([handles[i] for i in order], [labels[i] for i in order], fontsize=7, loc="upper left",
+                  frameon=False, markerscale=1.5, handletextpad=.2)
+        for side in ("top", "right"):
+            ax.spines[side].set_visible(False)
+    axes[0].set_ylabel("eC after recipe", fontsize=8)
+    fig.savefig(path)
+    plt.close(fig)
+
+
+def ec_cell(st, img):
+    head = f"<small>plotted {st['plotted']} / {st['total']} (finite eC before and after)</small>"
+    if not st["plotted"]:
+        return f"<td class=progress>{head}<br><i>No case with measured eC before and after</i></td>"
+    return (f"<td class=progress>{head}<br><a href='{htmllib.escape(img)}'><img class=prog "
+            f"src='{htmllib.escape(img)}' alt='eC before vs after, {st['plotted']} cases'></a></td>")
 
 
 def progress_cell(st, img):
@@ -443,6 +515,11 @@ def glossary(eps_rms, eps_snr):
          "hollow = accounting state). Same y axis in every row: linear within ±100%, logarithmic beyond, so the few "
          "extreme small-D values stay visible without crushing 0…100%. Dashed lines at 0% and 100%. Click to enlarge; "
          "per-case values are in the case table."),
+        ("eC before vs after", "plot per summary row",
+         "every case with measured eC before (archived) and after the recipe, any group; same two colorings. Solid "
+         f"line y = x (unchanged); dashed lines y = x ± {t} (inside the band: Similar; the band is absolute, so it looks "
+         "wider at small eC on the log axes). Below the band = eC reduced, above = worse. Same square log axis in "
+         "every row; larger categories drawn first."),
         ("Image", "RMS, SNR",
          "restored CLEAN images on fixed regions of the reference geometry: RMS = standard deviation over the off-source "
          "annulus (Jy/beam), SNR = (peak in the true-source ellipse − annulus mean) / RMS; same units/beam/geometry required."),
@@ -495,21 +572,26 @@ def write_report(output, summaries, rows, runs, filename, eps_rms=EPSILON_RMS, e
     # one count scale per dimension over all tables
     scale = {key: max([1] + [n for s in summaries for st in [s["table1"]] for _, _, n, _ in entries(key, st)])
              for key, _, _ in DIMENSIONS}
-    ylim = progress_range(summaries)
+    ylim, eclim = progress_range(summaries), ec_range(summaries)
     (output / "images").mkdir(parents=True, exist_ok=True)
-    head = "".join(f"<th>{h}</th>" + ("<th>Recovery progress (%)</th>" if key == "recovery" else "")
-                   for key, h, _ in DIMENSIONS)
+    head = "".join(f"<th>{h}</th>" + ("<th>Recovery progress (%)</th><th>eC before vs after</th>"
+                                      if key == "recovery" else "") for key, h, _ in DIMENSIONS)
+
+    def image(kind, st, base, draw):
+        """One image per summary row and plot kind, named by the row's exact filter."""
+        if not st["plotted"]:
+            return None
+        ident = hashlib.sha256(json.dumps(base, sort_keys=True).encode()).hexdigest()[:10]
+        img = f"images/{kind}__{safe(base.get('subgroup') or base.get('group') or 'all')}__{ident}.png"
+        draw(st, output / img)
+        return img
 
     def cells(st, base, no_partial=False):
-        img = None
-        if st["progress"]["plotted"]:       # one image per summary row, named by its exact filter
-            ident = json.dumps(base, sort_keys=True)
-            img = f"images/progress__{safe(base.get('subgroup') or base.get('group') or 'all')}__" \
-                  f"{hashlib.sha256(ident.encode()).hexdigest()[:10]}.png"
-            progress_png(st["progress"], output / img, ylim)
+        prog = image("progress", st["progress"], base, lambda s, path: progress_png(s, path, ylim))
+        ec = image("ec", st["ec"], base, lambda s, path: ec_png(s, path, eclim))
         return "".join("<td>" + "".join(bar(label, n, scale[key], color, {**base, **part})
                                         for label, part, n, color in entries(key, st, no_partial)) + "</td>"
-                       + (progress_cell(st["progress"], img) if key == "recovery" else "")
+                       + (progress_cell(st["progress"], prog) + ec_cell(st["ec"], ec) if key == "recovery" else "")
                        for key, _, _ in DIMENSIONS)
 
     def runtime(st):

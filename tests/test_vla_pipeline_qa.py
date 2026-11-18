@@ -489,6 +489,9 @@ class V5ReportTests(unittest.TestCase):
         import html, json, re, tempfile
         from pathlib import Path
         from unittest.mock import patch
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot  # noqa: F401  first import may run fc-list to build the font cache: not under the guard
         from scripts import vla_pipeline_qa_compare as cmp
         rows = self._rows()
         with tempfile.TemporaryDirectory() as tmp, patch("subprocess.run", side_effect=AssertionError("no execution")):
@@ -529,7 +532,9 @@ class V5ReportTests(unittest.TestCase):
             cells = re.findall(r"<td class=progress>(.*?)</td>", text, re.S)
             imgs = [m for c in cells for m in re.findall(r"<img class=prog src='([^']+)'", c)]
             self.assertTrue(imgs and all((Path(tmp) / i).read_bytes()[:4] == b"\x89PNG" for i in imgs))
-        self.assertEqual(len(cells), 2 * (1 + 3 + 4))                      # every row of Tables 1-3, both runs
+        self.assertEqual(len(cells), 2 * 2 * (1 + 3 + 4))                  # progress + eC cells, Tables 1-3, both runs
+        self.assertIn("plotted 10 / 10 (finite eC before and after)", cells[1])   # eC scatter: every group
+        self.assertEqual(sum("images/ec__" in i for i in imgs), 2 * (1 + 3 + 4))   # one eC image per row
         self.assertEqual(len(imgs), len(set(imgs)))                         # same-named runs do not collide
         self.assertIn(cmp.NO_PROGRESS, " ".join(cells))                     # noise only / cancelling / uncorrupted
         self.assertIn("plotted 5 / 10 · not applicable 4 · missing/invalid 1", cells[0])
@@ -541,6 +546,10 @@ class V5ReportTests(unittest.TestCase):
             self.assertEqual(sorted(p["id"] for _, pts in groups[1:] for p in pts), sorted(p["id"] for p in st["points"]))
         self.assertEqual([k for k, _ in cmp.progress_groups(st["points"], "result", q.RESULTS)],
                          ["all", "success", "partial_success", "failure", "unavailable"])
+        ec = summaries[0]["table1"]["ec"]
+        self.assertEqual(sorted(p["id"] for p in ec["points"]), sorted(summaries[0]["table1"]["ids"]))
+        self.assertEqual(cmp.ec_stats([dict(id="x", eC_before=.3, eC_after=None), dict(id="y", eC_before=float("nan"),
+                                                                                       eC_after=.2)])["plotted"], 0)
         lo, hi = cmp.progress_range(summaries)
         self.assertTrue(lo < -40 and hi > 120)                              # nothing clipped, 0 and 100 included
 
