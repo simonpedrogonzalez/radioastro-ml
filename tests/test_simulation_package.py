@@ -348,7 +348,7 @@ class NoiseSelectorTests(unittest.TestCase):
             "_inspect_homogeneous_sampling",
             return_value=sampling,
         ):
-            with self.assertRaisesRegex(ValueError, "do not all fall"):
+            with self.assertRaisesRegex(ValueError, "do not predominantly fall"):
                 noise_module._apply_noise(
                     simulator,
                     "example.ms",
@@ -375,6 +375,46 @@ class NoiseSelectorTests(unittest.TestCase):
                 seed=1,
             )
         self.assertEqual(simulator.calls[-1], ("corrupt",))
+
+    def test_edge_straddling_spws_keep_the_requested_sefd_and_noise(self):
+        # Representative 128-MHz windows, including the reported S/X lower edges.
+        # Each crosses a nominal edge by more than the previous two-channel limit.
+        for band, start in (("L", 0.988e9), ("S", 1.988e9), ("C", 3.976e9),
+                            ("X", 7.976e9), ("L", 1.900e9), ("S", 3.900e9),
+                            ("C", 7.900e9), ("X", 11.900e9)):
+            for step in (1e6, 2e6):
+                frequencies = tuple(start + i * step for i in range(int(128e6 / step)))
+                for reverse in (False, True):
+                    sampling = noise_module._HomogeneousSampling(
+                        0, step, 5.0, frequencies[::-1] if reverse else frequencies)
+                    simulator = FakeSimulator()
+                    with self.subTest(band=band, start=start, step=step, reverse=reverse), patch.object(
+                            noise_module, "_inspect_homogeneous_sampling", return_value=sampling):
+                        metadata = noise_module._apply_noise(
+                            simulator, "example.ms", noise_model="vla-thermal",
+                            noise_parameters={"band": band, "sampler": "8bit"}, seed=1)
+                    sefd = noise_module.VLA_OSS_2026A_SEFD_JY[band]
+                    self.assertEqual(metadata["resolved_parameters"]["sefd_jy"], sefd)
+                    self.assertAlmostEqual(metadata["simplenoise_jy"],
+                                           sefd / (0.93 * math.sqrt(2 * step * 5.0)))
+                    self.assertEqual(simulator.calls[-1], ("corrupt",))
+
+    def test_no_majority_band_is_rejected_before_noise_is_applied(self):
+        for frequencies in ((1.9e9, 2.1e9), (1.8e9, 1.9e9, 2.1e9), (1.8e9, 1.9e9)):
+            simulator = FakeSimulator()
+            sampling = noise_module._HomogeneousSampling(0, 2e6, 5.0, frequencies)
+            with self.subTest(frequencies=frequencies), patch.object(
+                    noise_module, "_inspect_homogeneous_sampling", return_value=sampling):
+                with self.assertRaisesRegex(ValueError, "strict majority"):
+                    noise_module._apply_noise(
+                        simulator, "example.ms", noise_model="vla-thermal",
+                        noise_parameters={"band": "S", "sampler": "8bit"}, seed=1)
+            self.assertEqual(simulator.calls, [])
+
+    def test_invalid_channel_frequencies_are_rejected(self):
+        for frequencies in ((), (float("nan"),), (2.1e9, float("inf")), (2.1e9, 0.0)):
+            with self.subTest(frequencies=frequencies), self.assertRaisesRegex(ValueError, "finite and positive"):
+                noise_module._validate_band_frequencies("S", frequencies)
 
 
 class PublicContractTests(unittest.TestCase):
