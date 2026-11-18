@@ -517,8 +517,8 @@ class V5ReportTests(unittest.TestCase):
             self.assertEqual(s["table3"]["small"]["planned"], 1)
             self.assertIn("exception", s["table2"])
 
-    def test_progress_plots_share_cases_and_positions(self):
-        import html, json, re, tempfile
+    def test_progress_plots_one_image_per_row(self):
+        import re, tempfile
         from pathlib import Path
         from scripts import vla_pipeline_qa_compare as cmp
         rows = self._rows()
@@ -526,36 +526,23 @@ class V5ReportTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             cmp.write_report(Path(tmp), summaries, rows, [Path("run1"), Path("run2")], "r.html")
             text = (Path(tmp) / "r.html").read_text()
+            cells = re.findall(r"<td class=progress>(.*?)</td>", text, re.S)
+            imgs = [m for c in cells for m in re.findall(r"<img class=prog src='([^']+)'", c)]
+            self.assertTrue(imgs and all((Path(tmp) / i).read_bytes()[:4] == b"\x89PNG" for i in imgs))
+        self.assertEqual(len(cells), 2 * (1 + 3 + 4))                      # every row of Tables 1-3, both runs
+        self.assertEqual(len(imgs), len(set(imgs)))                         # same-named runs do not collide
+        self.assertIn(cmp.NO_PROGRESS, " ".join(cells))                     # noise only / cancelling / uncorrupted
+        self.assertIn("plotted 5 / 10 · not applicable 4 · missing/invalid 1", cells[0])
         st = summaries[0]["table1"]["progress"]
         self.assertEqual((st["plotted"], st["total"], st["not_applicable"], st["missing"]), (5, 10, 4, 1))
-        cells = re.findall(r"<td class=progress>(.*?)</td>", text, re.S)
-        self.assertEqual(len(cells), 2 * (1 + 3 + 4))                      # every row of Tables 1-3, both runs
-        self.assertIn(cmp.NO_PROGRESS, " ".join(cells))                     # noise only / cancelling / uncorrupted
-        first = cells[0]
-        self.assertIn("plotted 5 / 10 · not applicable 4 · missing/invalid 1", first)
-        full = re.search(r"<div class=pfull>(.*?)</div>", first, re.S).group(1)
-        self.assertIn("data-n=5", full)                                      # boxplot uses the same 5 cases
-        swarms = dict(re.findall(r"<g class=swarm data-dim=(\w+)>(.*?)</g>", full, re.S))
-        pts = {d: re.findall(r"<circle cx=([\d.]+) cy=([\d.]+) r=[\d.]+ (fill='[^']*'[^/]*?) data-k=(\d+) "
-                             r"data-c=([\w]+)/>", g) for d, g in swarms.items()}
-        self.assertEqual(len(pts["result"]), 5)
-        x0 = cmp.PLOT["swarm"] + cmp.PLOT["gap"]                             # second swarm is shifted by one panel
-        self.assertEqual([(float(x) + x0, y, k) for x, y, _, k, _ in pts["result"]],
-                         [(float(x), y, k) for x, y, _, k, _ in pts["recovery"]])     # identical cases and positions
-        self.assertEqual(len({(x, y) for x, y, *_ in pts["result"]}), 5)    # duplicate values stay separate points
-        colors = {c: style for _, _, style, _, c in pts["result"]}
-        self.assertIn(cmp.COLORS["success"], colors["success"]); self.assertIn(cmp.COLORS["failure"], colors["failure"])
-        self.assertIn("stroke", colors["unavailable"])                       # accounting: hollow marker
-        rec = {c: style for _, _, style, _, c in pts["recovery"]}
-        self.assertIn(cmp.COLORS["solved"], rec["solved"]); self.assertIn(cmp.COLORS["similar"], rec["similar"])
-        cases = json.loads(html.unescape(re.search(r"const CASES=(\[.*?\]);", text).group(1)))
-        for _, _, _, k, c in pts["result"]:                                   # a point names exactly its case
-            self.assertEqual(cases[int(k)]["result"], c)
-            self.assertTrue(cases[int(k)]["id"].startswith("/data/a/qa-run|"))
-        self.assertEqual(cmp.swarm_offsets([10., 10., 10., 50.], 4), [0, 1, -1, 0])
-        b = cmp.box_stats([1., 2., 3., 4., 100.])
-        self.assertEqual((b["median"], b["q1"], b["q3"], b["whisker_high"], b["outliers"]), (3., 2., 4., 4., [100.]))
-        self.assertEqual(cmp.box_stats([7.])["median"], 7.)                  # singleton stays visible
+        for dim, cats in (("result", q.RESULTS), ("recovery", q.RECOVERY)):   # every case once per panel, plus All
+            groups = cmp.progress_groups(st["points"], dim, cats)
+            self.assertEqual(groups[0], ("all", st["points"]))
+            self.assertEqual(sorted(p["id"] for _, pts in groups[1:] for p in pts), sorted(p["id"] for p in st["points"]))
+        self.assertEqual([k for k, _ in cmp.progress_groups(st["points"], "result", q.RESULTS)],
+                         ["all", "success", "partial_success", "failure", "unavailable"])
+        lo, hi = cmp.progress_range(summaries)
+        self.assertTrue(lo < -40 and hi > 120)                              # nothing clipped, 0 and 100 included
 
     def test_tolerance_change_never_reuses_labels(self):
         import tempfile
