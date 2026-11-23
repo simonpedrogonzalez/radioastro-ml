@@ -132,3 +132,68 @@ text-based check could not run. Checking them requires reading each MS's `FIELD`
 
 `data/extracted/` also contains two stray non-source files, `322.html` and `tanmoy_has_seen.txt`. They
 were ignored.
+
+## Related extraction problem: a fully flagged SPW was selected (ext62, 11 sources)
+
+Found 2026-11-18 while upgrading flux sidecars to schema 2 (`flux_weblog recheck` against the retained
+pipeline logs; backups and log in `$RADIOASTRO_SCRATCH/ops/ext62-flux-recheck-20261118/`).
+
+The 11 sources that failed the 2026-11-17 thermal run with "DATA contains no unflagged samples" all came
+back from the recheck as `unavailable: no setjy call covers the selected SPW`. They are 0119+321,
+0541-056, 0958+655, 1258-223, 1409-269, 1436+636, 1445+099, 2101-295, 2134-018, 2148+069 and 2346+095.
+
+- **Cause.** The fetcher's `select_spw` (`extract_entry.py`, unchanged in `1fa1fb3`) picks the widest
+  band-matching SPW and ignores flags. Its docstring says "Flags are ignored". It usually picks SPW 0
+  (SPW 32 for 1436+636).
+- **What the pipeline did.** It had flagged that SPW entirely and did not apply a flux model to it.
+  For example, 1258-223's setjy covers SPWs 2–17, not 0.
+- **Consequence.** These extractions hold no usable visibilities and no NRAO flux. The CLEAN fallback
+  cannot work either, so `--simulation-flags unflag` would only simulate on a dead SPW's geometry.
+- **Fix (nrao-archive-fetcher, uncommitted on 2026-11-18).** `select_spw` now does the following:
+  - It considers only SPWs with rows for the field and at least 10 MHz of bandwidth.
+  - It ranks them by whether the pipeline flux model covers the SPW, then by `band_guess` match, then by
+    bandwidth.
+  - It takes the first one with any unflagged sample, reading FLAG in chunks and stopping early. If
+    every candidate is fully flagged it raises.
+  - It records every candidate it tried as `spw_selection` in `extraction_metadata.json`.
+  - Pipeline logs are now parsed once (`flux_weblog.load_flux_models`). New tests cover this, and all
+    66 fetcher tests pass.
+
+### Re-extraction (done 2026-11-18)
+
+- **Job.** Granite job 2522684, 93 s, all 11 exit 0. Scripts, entry JSONs and the fetcher diff used
+  are in `$RADIOASTRO_SCRATCH/ops/ext62-reextract-spw-20261118/`.
+- **Old extractions moved aside, not deleted:** `$RADIOASTRO_SCRATCH/data/extracted_flagged_spw_20261118/`.
+- **Manifest updated.** Each entry's `selected_spw` now holds the new SPW and `previous_selected_spw`
+  keeps the old one. Backup: `manifest.before.json` in the ops folder.
+- **Position check.** Still passes for all 59 sources.
+
+| ID | `band_guess` | Old SPW | New SPW | Centre / width | NRAO flux |
+|---|---|---|---|---|---|
+| 0119+321 | L | 0 (1.04 GHz) | 16 | 2.051 GHz (S) / 126 MHz | available |
+| 0541-056 | C | 0 (8.40 GHz) | 2 | 8.039 GHz (X) / 126 MHz | available |
+| 0958+655 | X | 0 (8.40 GHz) | 3 | **36.130 GHz (Ka)** / 128 MHz | available |
+| 1258-223 | C | 0 (4.90 GHz) | 2 | 2.151 GHz (S) / 126 MHz | ambiguous, so CLEAN fallback |
+| 1409-269 | X | 0 (8.40 GHz) | 2 | 4.039 GHz (C) / 126 MHz | available |
+| 1436+636 | X | 32 (8.40 GHz) | 0 | 4.551 GHz (C) / 126 MHz | available |
+| 1445+099 | L | 0 (1.23 GHz) | 1 | 1.357 GHz (L) / 126 MHz | available |
+| 2101-295 | X | 0 (8.05 GHz) | 16 | 1.040 GHz (L) / 63 MHz | available |
+| 2134-018 | L | 0 (1.42 GHz) | 2 | 1.528 GHz (L) / 32 MHz | available |
+| 2148+069 | L | 0 (1.25 GHz) | 1 | 1.378 GHz (L) / 126 MHz | available |
+| 2346+095 | X | 0 (8.40 GHz) | 2 | **35.505 GHz (Ka)** / 126 MHz | available |
+
+**Band changes.** In 8 of the 11 the requested band had no usable SPW, so the chosen SPW is in another
+band. Existing v2 SPWs span L–X: 63 L, 33 S, 32 C, 16 X and 1 Ku. The band is derived from frequency
+everywhere downstream. 0958+655 and 2346+095 are at about 36 GHz, outside the v2 range. The noise model
+supports Ka (fiducial SEFD 600 Jy), but these two are out of distribution. **Decision (user,
+2026-11-18): drop both from the extension.** Their extractions stay installed but are not in
+`ext62_corrected_source_ids.txt`, which now lists 57 sources. The 59-source version is kept as
+`ext62_corrected_source_ids.txt.59.bak`.
+
+Flux status for all 59 after re-extraction:
+
+| Status | Count | Route |
+|---|---|---|
+| available | 45 | NRAO flux |
+| ambiguous | 11 | CLEAN fallback |
+| unavailable | 3 | CLEAN fallback (0431+206, 1526-138, 1538+003) |
