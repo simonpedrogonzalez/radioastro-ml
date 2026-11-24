@@ -6,6 +6,11 @@
   ML:   python -m scripts.tanmoy_local_experiments audit-selfcal --output OUT
   ML:   python -m scripts.tanmoy_local_report --input OUT
 
+Experiment 1b (order validation on new archived rescue cases; separate output, runs on CHPC):
+  ML:   python -m scripts.tanmoy_local_experiments select-order --output runs/tanmoy-order-validation-20261123
+  ML:   python -m scripts.tanmoy_local_experiments plan --study order-validation --output runs/tanmoy-order-validation-20261123
+  ML:   python -m scripts.tanmoy_local_experiments run --output runs/tanmoy-order-validation-20261123 --experiment order [--smoke|--resume]
+
 Experiment 3b (separate study and output; the 27-case plan is untouched):
   ML:   python -m scripts.tanmoy_local_experiments plan --study uvgrid --output runs/tanmoy-uvgrid-20261123
   ML:   python -m scripts.tanmoy_local_experiments run --output runs/tanmoy-uvgrid-20261123 --experiment uvgrid [--smoke|--resume]
@@ -35,6 +40,15 @@ ROOT = Path(__file__).resolve().parents[1]
 PROTOCOL = "tanmoy-local-v1"
 EXPERIMENTS = ("order", "stopping", "sampling", "uvgrid")
 UVGRID_PROTOCOL = "tanmoy-uvgrid-v1"
+ORDERVAL_PROTOCOL = "tanmoy-order-validation-v1"
+# Experiment 1b candidate search (read-only matched records). Training records first; validation only as a
+# labelled exploratory fallback; test is never read.
+ORDERVAL_TRAIN_RUNS = ("runs/dataset-v2-matched-train", "runs/dataset-v2.1-matched-train-extension")
+ORDERVAL_VAL_RUNS = ("runs/dataset-v2-matched-val",)
+ORDERVAL_RESCUE = -0.05     # illustrative effect-size cutoff on d_amp, not a significance threshold
+ORDERVAL_AMP_MAX = 8.5468   # current production amplification range
+ORDERVAL_EXCLUDE = ("0449+113",)   # the original experiment-1 source
+ORDERVAL_SOURCES = 2
 UVGRID_SIZES = (256, 512, 1024)
 F32_EPS = float(np.finfo(np.float32).eps)
 
@@ -349,9 +363,186 @@ def build_uvgrid_plan():
         parent_plan="runs/tanmoy-local-20261123/plan.json (experiment 3; read only)")
 
 
+# ---------------------------------------------------------------- experiment 1b: order validation
+
+def rescue_candidates(run_dir, split_label):
+    """Every amplitude+noise row (mask 5) of one matched run with its noise-only counterpart (mask 4, same recipe,
+    slot and noise realization). d_amp = eC(amp+noise) - eC(noise only) from the two unrounded stored eC values."""
+    from scripts.dataset_v2_matched_extract import FEATURES
+    run_dir = ROOT / run_dir
+    plan = json.loads((run_dir / "plan.json").read_text())
+    rows = json.loads((run_dir / "rows.json").read_text())["rows"]
+    cases = {c["id"]: c for sp in plan["source_plans"] for c in sp["cases"]}
+    recipes = {r["id"]: r for sp in plan["source_plans"] for r in sp["recipes"]}
+    prepared = {p["id"]: p for p in plan["prepared_sources"]}
+    by_case = {r["case"]: r for r in rows}
+    inside = FEATURES.index("model.flux_inside_beam_jy")
+    out = []
+    for r in rows:
+        if r["mask"] != 5:
+            continue
+        noise = by_case.get(r["removal"][0])
+        c, recipe, p = cases[r["case"]], recipes[r["recipe"]], prepared[r["source"]]
+        flux = p["flux_spec"]["flux_jy"]
+        ratio = lambda row: None if row is None or row["X"][inside] is None else row["X"][inside] / flux
+        out.append(dict(
+            run=str(run_dir.relative_to(ROOT)), split=split_label, source=r["source"], row=r["id"], case=r["case"],
+            noise_case=r["removal"][0], recipe=r["recipe"], amp_branch=recipe["amp_branch"], antenna=c["antenna"],
+            A=c["A"], phi_deg=c["phi_deg"], a=c["a"], r=c["a"] / p["nominal_source_snr"], noise_seed=c["noise_seed"],
+            slot=c["slot"], eC_amp_noise=r["eC"], eC_noise=None if noise is None else noise["eC"],
+            d_amp=None if noise is None else r["eC"] - noise["eC"], d_amp_label=r["d"][0],
+            aperture_ratio_amp_noise=ratio(r), aperture_ratio_noise=ratio(noise), flux_jy=flux,
+            parent_original_ms=p["parent_original_ms"], noise_mask=None if noise is None else noise["mask"]))
+    return out
+
+
+def classify_candidate(c, seen):
+    """Exclusion reason, or '' when eligible (the -0.05 cutoff is illustrative, not a significance test)."""
+    if c["noise_mask"] != 4 or c["d_amp"] is None:
+        return "no matched noise-only counterpart"
+    if c["phi_deg"] != 0:
+        return "nonzero injected phase"
+    if not c["A"] > 1:
+        return "attenuation (A <= 1)"
+    if c["source"] in ORDERVAL_EXCLUDE:
+        return "original experiment-1 source"
+    if c["A"] > ORDERVAL_AMP_MAX:
+        return f"A above production range ({ORDERVAL_AMP_MAX})"
+    if not c["d_amp"] < 0:
+        return "no rescue (d_amp >= 0)"
+    if c["d_amp"] > ORDERVAL_RESCUE:
+        return f"weak rescue ({ORDERVAL_RESCUE} < d_amp < 0)"
+    an, aa = c["aperture_ratio_noise"], c["aperture_ratio_amp_noise"]
+    if an is None or aa is None:
+        return "aperture flux unavailable"
+    if not an < 1:
+        return "noise-only source not under-recovered in the aperture"
+    if not abs(aa - 1) < abs(an - 1):
+        return "amplification does not bring aperture flux closer to truth"
+    if not (ROOT / c["parent_original_ms"]).exists() and not Path(c["parent_original_ms"]).exists():
+        return "original MS unavailable"
+    key = (c["source"], c["antenna"], c["A"], c["a"], c["noise_seed"])
+    if key in seen:
+        return "duplicate of an earlier source/antenna/recipe/seed"
+    seen.add(key)
+    return ""
+
+
+def select_order_cases(output):
+    """Candidate audit and frozen selection for experiment 1b, before any imaging. Training records first; the
+    validation run is read only if fewer than ORDERVAL_SOURCES new sources qualify (labelled exploratory)."""
+    output = Path(output).resolve()
+    if (output / "selection.json").exists():
+        raise ValueError(f"Selection already frozen: {output / 'selection.json'}")
+    candidates, seen = [], set()
+    pools = [("train", ORDERVAL_TRAIN_RUNS), ("val (exploratory)", ORDERVAL_VAL_RUNS)]
+    for label, runs in pools:
+        for run in runs:
+            if (ROOT / run / "rows.json").exists():
+                for c in rescue_candidates(run, label):
+                    c["exclusion"] = classify_candidate(c, seen)
+                    candidates.append(c)
+        if len({c["source"] for c in candidates if not c["exclusion"]}) >= ORDERVAL_SOURCES:
+            break
+    eligible = sorted((c for c in candidates if not c["exclusion"]), key=lambda c: (c["d_amp"], c["source"], c["case"]))
+    chosen, used = [], set()
+    for c in eligible:
+        if c["source"] not in used:
+            chosen.append(c); used.add(c["source"])
+        if len(chosen) == ORDERVAL_SOURCES:
+            break
+    for c in candidates:
+        c["selected"] = any(c["case"] == s["case"] and c["run"] == s["run"] for s in chosen)
+        c["eligible_rank"] = next((i + 1 for i, e in enumerate(eligible) if e is c), None)
+    candidates.sort(key=lambda c: (c["exclusion"] != "", c["d_amp"] if c["d_amp"] is not None else 9, c["source"], c["case"]))
+    output.mkdir(parents=True, exist_ok=True)
+    import csv
+    with (output / "candidates.csv").open("w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=list(candidates[0]))
+        w.writeheader(); w.writerows(candidates)
+    reasons = {}
+    for c in candidates:
+        reasons[c["exclusion"] or "eligible"] = reasons.get(c["exclusion"] or "eligible", 0) + 1
+    weaker = sorted((c for c in candidates if c["exclusion"].startswith("weak rescue")), key=lambda c: c["d_amp"])[:10]
+    payload = dict(protocol=ORDERVAL_PROTOCOL, frozen=time.strftime("%FT%T"), rules=dict(
+        rescue_cutoff=ORDERVAL_RESCUE, amp_max=ORDERVAL_AMP_MAX, excluded_sources=list(ORDERVAL_EXCLUDE),
+        mixture="amplitude amplification + noise (mask 5), zero injected phase, single antenna",
+        counterpart="noise-only row (mask 4) of the same recipe, slot and noise realization",
+        aperture="model.flux_inside_beam_jy (raw model in the restoring-beam FWHM aperture) / true flux; noise-only "
+                 "must be < 1 and the amplified case closer to 1",
+        order="most negative d_amp, then source and case id; strongest eligible case on each of the first distinct sources",
+        pools=[label for label, _ in pools]), counts=reasons, n_sources_eligible=len({c["source"] for c in eligible}),
+        selected=chosen, weaker_candidates=weaker,
+        limitation=None if len(chosen) >= ORDERVAL_SOURCES else
+        f"only {len(chosen)} new source(s) qualify; no replacement or weakened cutoff applied automatically")
+    write_json(output / "selection.json", payload)
+    print("SELECT", reasons, "selected", [(c["source"], c["split"], round(c["d_amp"], 4), round(c["A"], 3)) for c in chosen])
+    return payload
+
+
+def build_order_validation_plan(output):
+    """Experiment 1b: 11 images per frozen case (noiseless V, zero-noise G V, G(V+0) reused if bit-identical, and
+    noise-only / current / alternative for the archived seed and two new deterministic seeds)."""
+    from scripts.dataset_v2 import stream_seed
+    sel = json.loads((Path(output).resolve() / "selection.json").read_text())
+    if not sel["selected"]:
+        raise ValueError("No selected cases; see selection.json")
+    sources, cases, archived = {}, [], {}
+    for s in sel["selected"]:
+        run = ROOT / s["run"]
+        config = json.loads((run / "plan.json").read_text())["configuration"]
+        arch = {k: json.loads((run / "cases" / s[f] / "case.json").read_text()) for k, f in (("current", "case"), ("noise", "noise_case"))}
+        cur = arch["current"]["case"]
+        if (cur["A"], cur["a"], cur["antenna"], cur["phi_deg"], cur["noise_seed"]) != (s["A"], s["a"], s["antenna"], 0, s["noise_seed"]):
+            raise ValueError(f"Archived case {s['case']} does not match the frozen selection")
+        if arch["noise"]["case"]["a"] != cur["a"] or arch["noise"]["case"]["noise_seed"] != cur["noise_seed"]:
+            raise ValueError(f"Archived counterpart {s['noise_case']} is not the matched noise-only case")
+        sid = s["source"]
+        ref = run / "sources" / sid / "recovery"
+        src = sources[sid] = source_spec(sid, config, ref, antenna=cur["antenna"])
+        masks = str(ref / "reference_masks.npz")
+        archived[sid] = dict(run=s["run"], split=s["split"], cases=dict(current=s["case"], noise=s["noise_case"]),
+                             eC={k: v["eC"] for k, v in arch.items()}, v_sha256=arch["current"]["v_sha256"],
+                             nominal_noise_sha256=arch["current"]["nominal_noise_sha256"],
+                             noise_seed=cur["noise_seed"], d_amp=s["d_amp"], row=s["row"])
+        seeds = [cur["noise_seed"]] + [stream_seed(config["seed"], sid, f"tanmoy-order:{i}") for i in (1, 2)]
+
+        def add(**c):
+            c.update(experiment="order", source=sid, phi_deg=0., antenna=cur["antenna"], coverage="full",
+                     grid=src["reference"]["grid"], clean=ADAPTIVE, matched_masks=masks)
+            c["key"] = digest(dict(protocol=ORDERVAL_PROTOCOL, case=c, source=digest(src)))
+            cases.append(c)
+
+        for cid, order, gain in (("ctrl-V", "noise", 1.), ("ctrl-GV", "current", cur["A"]), ("ctrl-GV0", "alternative", cur["A"])):
+            add(id=f"{sid}-{cid}", order=order, A=gain, a=0., r=0., seed=None,
+                **(dict(reuse_from=f"{sid}-ctrl-GV") if cid == "ctrl-GV0" else {}))
+        for i, seed in enumerate(seeds):
+            tag = "archived" if i == 0 else f"new{i}"
+            for order, gain in (("noise", 1.), ("current", cur["A"]), ("alternative", cur["A"])):
+                add(id=f"{sid}-{order}-{tag}", order=order, A=gain, a=cur["a"], r=cur["a"] / src["snr0"], seed=seed,
+                    seed_label=tag)
+    first = sel["selected"][0]["source"]
+    return dict(
+        schema=1, protocol=ORDERVAL_PROTOCOL, study="order-validation", sources=sources, cases=cases, archived=archived,
+        selection=dict(path="selection.json", sha256=file_sha(Path(output).resolve() / "selection.json"),
+                       limitation=sel.get("limitation")),
+        smoke=[f"{first}-ctrl-V", f"{first}-noise-archived", f"{first}-current-archived"],
+        rules=dict(
+            noise="n = a * (regular - V), regular = V + nominal thermal noise (seeded CASA simulator), exactly as the "
+                  "dataset generator; r = a / SNR0",
+            weights="WEIGHT/SIGMA from the nominal sigma0 for every case (not rescaled for the alternative order)",
+            grid="each source's matched-run reference grid, restoring beam and CLEAN mask; adaptive CLEAN = DefaultImagingConfig",
+            eC="runner eC over the valid image (as experiment 1) and eC_matched over the generator's fixed support Omega "
+               "(reference_masks.npz), which must reproduce the archived eC",
+            budget="11 images per case: G(V+0) reuses the G V image only if its stored DATA is bit-identical"),
+        software=dict(python=platform.python_version(), numpy=np.__version__, casa="recorded per case", git=git_state()),
+        parent="experiment 1 (0449+113) results live in runs/tanmoy-local-20261123 on the local machine; read-only")
+
+
 def plan_stage(output, study="local"):
     output = output.resolve()
-    payload = json.loads(json.dumps(build_uvgrid_plan() if study == "uvgrid" else build_plan(), default=str))
+    builders = {"uvgrid": build_uvgrid_plan, "order-validation": lambda: build_order_validation_plan(output), "local": build_plan}
+    payload = json.loads(json.dumps(builders[study](), default=str))
     path = output / "plan.json"
     if path.exists():
         old = json.loads(path.read_text())
@@ -564,11 +755,26 @@ def image_case(ms, directory, grid, beam, clean, imaging=None):
     for p in Path(directory).iterdir():   # keep FITS, support and QA only
         if p.name.endswith(".fits.gz") or p.name in ("support.npz", "qa.json", "qa.txt"):
             continue
-        shutil.rmtree(p) if p.is_dir() else p.unlink()
+        remove_scratch(p)
     return dict(products=products, summary=json_safe(imaging.qa.tclean_summary),
                 effective=json_safe(imaging.resolved_config.effective_imaging_parameters),
                 warnings=list(imaging.qa.warnings), final_beam=json_safe(final_beam),
                 mask_pixels=int(search.sum()))
+
+
+def remove_scratch(p):
+    """Delete a CASA by-product. On NFS a file CASA still holds open is silly-renamed to .nfs*; unlinking it raises
+    EBUSY. Such placeholders are left for NFS to remove once the handle closes."""
+    import errno
+    if p.name.startswith(".nfs"):
+        return
+    try:
+        shutil.rmtree(p) if p.is_dir() else p.unlink()
+    except OSError as e:
+        if e.errno != errno.EBUSY:
+            raise
+        if p.is_dir() and any(not x.name.startswith(".nfs") for x in p.rglob("*") if x.is_file()):
+            raise
 
 
 def load_planes(products):
@@ -591,9 +797,25 @@ def extract(output, products, src, case):
     want = case["grid"]["image_grid"]
     if list(planes["model"].shape) != list(want["imsize"])[::-1] or abs(cell - want["cell_arcsec"][1]) > 1e-6 * cell:
         raise ValueError(f"Grid was not honoured: {planes['model'].shape} cell {cell} vs {want}")
-    return measure(planes["model"], planes["residual"], h, planes["valid"], flux=src["flux_jy"], ra_rad=src["ra_rad"],
-                   dec_rad=src["dec_rad"], region=src["region"], mask_major_arcsec=case["grid"]["beam"]["major_arcsec"],
-                   crop=case.get("crop"))
+    out = measure(planes["model"], planes["residual"], h, planes["valid"], flux=src["flux_jy"], ra_rad=src["ra_rad"],
+                  dec_rad=src["dec_rad"], region=src["region"], mask_major_arcsec=case["grid"]["beam"]["major_arcsec"],
+                  crop=case.get("crop"))
+    if case.get("matched_masks"):   # experiment 1b: the dataset generator's eC on its fixed support (Omega)
+        out.update(matched_eC(planes["model"], h, case["matched_masks"]))
+    return out
+
+
+def matched_eC(model, header, masks_path):
+    """eC exactly as scripts/dataset_v2_matched_extract.extract: sqrt(sum((C - truth)^2) / sum(truth^2)) over omega,
+    with C = raw model convolved with the header's restoring beam and truth/omega from reference_masks.npz."""
+    from scripts.clean_recovery_noise_sweep import convolve_model
+    with np.load(masks_path, allow_pickle=False) as m:
+        truth, omega = np.asarray(m["truth"], np.float64), np.asarray(m["omega"], bool)
+    if truth.shape != model.shape or not omega.any():
+        raise ValueError(f"Matched masks {masks_path} do not fit the image {model.shape}")
+    C = convolve_model(np.asarray(model, np.float64), header)
+    return dict(eC_matched=float(np.sqrt(np.square((C - truth)[omega]).sum() / np.square(truth[omega]).sum())),
+                matched_support_pixels=int(omega.sum()))
 
 
 def derived_threshold(output, coverage):
@@ -627,7 +849,6 @@ def casa_run(output, experiment, smoke):
     print(f"CASA {experiment}: {len(selected)} cases, {len(pending)} pending", flush=True)
     if not pending:
         return
-    src = plan["sources"][pending[0]["source"]]
     started = time.time()
     scratch = output / "scratch" / experiment
     if scratch.exists():
@@ -639,100 +860,108 @@ def casa_run(output, experiment, smoke):
     os.chdir(scratch)   # CASA temporary lattices stay in scratch
     peak = 0
     try:
-        config = src["configuration"]
-        source = thermal_source(config, src["id"])
-        if file_sha(source.simulation_metadata) != src["thermal_metadata_sha256"]:
-            raise ValueError("Parent thermal simulation metadata changed since the plan")
-        noise_model, noise_params, sigma = g._noise_request(source)
-        if sigma != src["sigma0_jy"]:
-            raise ValueError("Nominal noise changed since the plan")
-        t0 = time.time()
-        v = prepare_v(source, scratch, src["flux_spec"]["sky"], v2=True, simulation_flags=src["simulation_flags"])
-        initialize_weights(v, sigma)
-        prep = dict(v_sha256=column_hash(v), v_invariants=invariant_hashes(v), seconds=None, regular={})
-        prep["seconds"] = round(time.time() - t0, 1)
-        regulars = {}
+        preps = {}
+        for sid in dict.fromkeys(c["source"] for c in pending):   # one source preparation at a time
+            src = plan["sources"][sid]
+            src_pending = [c for c in pending if c["source"] == sid]
+            for old in scratch.iterdir():
+                shutil.rmtree(old) if old.is_dir() else old.unlink()
+            config = src["configuration"]
+            source = thermal_source(config, src["id"])
+            if file_sha(source.simulation_metadata) != src["thermal_metadata_sha256"]:
+                raise ValueError("Parent thermal simulation metadata changed since the plan")
+            noise_model, noise_params, sigma = g._noise_request(source)
+            if sigma != src["sigma0_jy"]:
+                raise ValueError("Nominal noise changed since the plan")
+            t0 = time.time()
+            v = prepare_v(source, scratch, src["flux_spec"]["sky"], v2=True, simulation_flags=src["simulation_flags"])
+            initialize_weights(v, sigma)
+            prep = dict(v_sha256=column_hash(v), v_invariants=invariant_hashes(v), seconds=None, regular={})
+            prep["seconds"] = round(time.time() - t0, 1)
+            regulars = {}
 
-        def regular_for(seed):
-            if seed is None:
-                return None
-            if seed not in regulars:
-                for old in list(regulars):           # keep only one noise realization at a time
-                    shutil.rmtree(regulars.pop(old))
+            def regular_for(seed):
+                if seed is None:
+                    return None
+                if seed not in regulars:
+                    for old in list(regulars):           # keep only one noise realization at a time
+                        shutil.rmtree(regulars.pop(old))
+                    t1 = time.time()
+                    path = scratch / f"regular_{seed}.ms"
+                    shutil.copytree(v, path)
+                    add_thermal_noise_inplace(path, noise_model=noise_model, noise_parameters=noise_params, seed=seed)
+                    initialize_weights(path, sigma)
+                    prep["regular"][str(seed)] = dict(noise_sha256=column_hash(path, minus=v), seconds=round(time.time() - t1, 1))
+                    regulars[seed] = path
+                return regulars[seed]
+
+            checks = {}
+            for c in sorted(src_pending, key=lambda c: (str(c["seed"]), c["id"])):
+                cell = output / "cases" / c["id"]
                 t1 = time.time()
-                path = scratch / f"regular_{seed}.ms"
-                shutil.copytree(v, path)
-                add_thermal_noise_inplace(path, noise_model=noise_model, noise_parameters=noise_params, seed=seed)
-                initialize_weights(path, sigma)
-                prep["regular"][str(seed)] = dict(noise_sha256=column_hash(path, minus=v), seconds=round(time.time() - t1, 1))
-                regulars[seed] = path
-            return regulars[seed]
-
-        checks = {}
-        for c in sorted(pending, key=lambda c: (str(c["seed"]), c["id"])):
-            cell = output / "cases" / c["id"]
-            t1 = time.time()
-            record = dict(id=c["id"], key=c["key"], case=c, experiment=experiment, casa=casatools.version_string(),
-                          started=time.strftime("%FT%T"))
-            try:
-                clean = dict(c["clean"])
-                if str(clean.get("threshold") or "").startswith("derived:"):
-                    record["derived_threshold"] = derived_threshold(output, clean["threshold"].split(":", 1)[1])
-                    clean["threshold"] = f"{record['derived_threshold']['value_jy']:.12g}Jy"
-                record["clean_resolved"] = clean
-                regular = regular_for(c["seed"])
-                if experiment == "order" and regular is not None and c["seed"] not in checks:
-                    gained = next(x for x in plan["cases"] if x["experiment"] == "order" and x["seed"] == c["seed"]
-                                  and x["order"] == "alternative")
-                    checks[c["seed"]] = order_check(v, regular, gained)
-                    write_json(output / "checks" / f"order_{c['seed']}.json", checks[c["seed"]])
-                record["order_check"] = checks.get(c["seed"])
-                ms = scratch / "case.ms"
-                if ms.exists():
-                    shutil.rmtree(ms)
-                shutil.copytree(v, ms)
-                record["data"] = write_case_data(v, regular, ms, c)
-                initialize_weights(ms, sigma)
-                inv = record["invariants"] = invariant_hashes(ms)
-                if inv != prep["v_invariants"]:
-                    raise ValueError("Weights/flags/UVW differ from V before the coverage cut")
-                if c["coverage"] == "cut50":
-                    record["cut"] = apply_cut(ms, CUT_FRACTION)
-                peak = max(peak, tree_bytes(scratch))
-                if c["id"] == "order-ctrl-GV0":
-                    other = case_record(output, "order-ctrl-GV")
-                    if other and other.get("status") == "complete" and other["data"]["data_sha256"] == record["data"]["data_sha256"]:
-                        record.update(status="reused", reused_from="order-ctrl-GV", products=other["products"],
-                                      metrics=other["metrics"], clean=other["clean"], seconds=round(time.time() - t1, 1),
-                                      note="G(V+0) DATA bit-identical to G V; image reused")
+                record = dict(id=c["id"], key=c["key"], case=c, experiment=experiment, casa=casatools.version_string(),
+                              started=time.strftime("%FT%T"))
+                try:
+                    clean = dict(c["clean"])
+                    if str(clean.get("threshold") or "").startswith("derived:"):
+                        record["derived_threshold"] = derived_threshold(output, clean["threshold"].split(":", 1)[1])
+                        clean["threshold"] = f"{record['derived_threshold']['value_jy']:.12g}Jy"
+                    record["clean_resolved"] = clean
+                    regular = regular_for(c["seed"])
+                    if experiment == "order" and regular is not None and c["seed"] not in checks:
+                        gained = next(x for x in plan["cases"] if x["experiment"] == "order" and x["seed"] == c["seed"]
+                                      and x["order"] == "alternative" and x["source"] == c["source"])
+                        checks[c["seed"]] = order_check(v, regular, gained)
+                        write_json(output / "checks" / f"order_{c['seed']}.json", checks[c["seed"]])
+                    record["order_check"] = checks.get(c["seed"])
+                    ms = scratch / "case.ms"
+                    if ms.exists():
                         shutil.rmtree(ms)
-                        write_json(cell / "record.json", record)
-                        run_log["cases"].append(dict(id=c["id"], status="reused", seconds=record["seconds"]))
-                        print("REUSED", c["id"], flush=True)
-                        continue
-                directory = cell / f"img_{c['key'][:12]}"   # fresh CASA prefix for every distinct setting
-                if directory.exists():
-                    directory.rename(cell / f"incomplete_{directory.name}_{time.time_ns()}")
-                img = image_case(ms, directory, c["grid"], src["reference"]["beam"], clean, c.get("imaging"))
-                peak = max(peak, tree_bytes(scratch))
-                products = {k: str(Path(p).relative_to(output)) for k, p in img["products"].items()}
-                record.update(products=products, imaging=dict(effective=img["effective"], warnings=img["warnings"],
-                                                              final_beam=img["final_beam"], mask_pixels=img["mask_pixels"]),
-                              clean=clean_diagnostics(img["summary"], clean),
-                              metrics=extract(output, products, src, c),
-                              product_sha256={k: file_sha(output / p) for k, p in products.items()})
-                record.update(status="complete", seconds=round(time.time() - t1, 1))
-                write_json(cell / "record.json", record)
-                (cell / "failure.json").unlink(missing_ok=True)
-                shutil.rmtree(ms)
-                run_log["cases"].append(dict(id=c["id"], status="complete", seconds=record["seconds"]))
-                print(f"COMPLETE {c['id']} eC={record['metrics']['eC']:.4f} iters={record['clean']['iterdone']} "
-                      f"{record['seconds']:.0f}s", flush=True)
-            except Exception:
-                write_json(cell / "failure.json", dict(record, status="failed", traceback=traceback.format_exc()[-12000:]))
-                run_log["cases"].append(dict(id=c["id"], status="failed", seconds=round(time.time() - t1, 1)))
-                print(traceback.format_exc(), flush=True)
-        run_log.update(source_preparation=prep)
+                    shutil.copytree(v, ms)
+                    record["data"] = write_case_data(v, regular, ms, c)
+                    initialize_weights(ms, sigma)
+                    inv = record["invariants"] = invariant_hashes(ms)
+                    if inv != prep["v_invariants"]:
+                        raise ValueError("Weights/flags/UVW differ from V before the coverage cut")
+                    if c["coverage"] == "cut50":
+                        record["cut"] = apply_cut(ms, CUT_FRACTION)
+                    peak = max(peak, tree_bytes(scratch))
+                    reuse = c.get("reuse_from") or ("order-ctrl-GV" if c["id"] == "order-ctrl-GV0" else None)
+                    if reuse:
+                        other = case_record(output, reuse)
+                        if other and other.get("status") == "complete" and other["data"]["data_sha256"] == record["data"]["data_sha256"]:
+                            record.update(status="reused", reused_from=reuse, products=other["products"],
+                                          metrics=other["metrics"], clean=other["clean"], seconds=round(time.time() - t1, 1),
+                                          note="G(V+0) DATA bit-identical to G V; image reused")
+                            shutil.rmtree(ms)
+                            write_json(cell / "record.json", record)
+                            run_log["cases"].append(dict(id=c["id"], status="reused", seconds=record["seconds"]))
+                            print("REUSED", c["id"], flush=True)
+                            continue
+                    directory = cell / f"img_{c['key'][:12]}"   # fresh CASA prefix for every distinct setting
+                    if directory.exists():
+                        directory.rename(cell / f"incomplete_{directory.name}_{time.time_ns()}")
+                    img = image_case(ms, directory, c["grid"], src["reference"]["beam"], clean, c.get("imaging"))
+                    peak = max(peak, tree_bytes(scratch))
+                    products = {k: str(Path(p).relative_to(output)) for k, p in img["products"].items()}
+                    record.update(products=products, imaging=dict(effective=img["effective"], warnings=img["warnings"],
+                                                                  final_beam=img["final_beam"], mask_pixels=img["mask_pixels"]),
+                                  clean=clean_diagnostics(img["summary"], clean),
+                                  metrics=extract(output, products, src, c),
+                                  product_sha256={k: file_sha(output / p) for k, p in products.items()})
+                    record.update(status="complete", seconds=round(time.time() - t1, 1))
+                    write_json(cell / "record.json", record)
+                    (cell / "failure.json").unlink(missing_ok=True)
+                    shutil.rmtree(ms)
+                    run_log["cases"].append(dict(id=c["id"], status="complete", seconds=record["seconds"]))
+                    print(f"COMPLETE {c['id']} eC={record['metrics']['eC']:.4f} iters={record['clean']['iterdone']} "
+                          f"{record['seconds']:.0f}s", flush=True)
+                except Exception:
+                    write_json(cell / "failure.json", dict(record, status="failed", traceback=traceback.format_exc()[-12000:]))
+                    run_log["cases"].append(dict(id=c["id"], status="failed", seconds=round(time.time() - t1, 1)))
+                    print(traceback.format_exc(), flush=True)
+            preps[sid] = prep
+        run_log.update(source_preparation=prep if len(preps) == 1 else None, source_preparations=preps)
     finally:
         os.chdir(cwd)
         run_log.update(seconds=round(time.time() - started, 1), peak_scratch_bytes=int(peak), finished=time.strftime("%FT%T"))
@@ -880,7 +1109,7 @@ def audit_selfcal(output, source=None):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
-    for name in ("plan", "run", "casa-run", "audit-selfcal"):
+    for name in ("plan", "run", "casa-run", "audit-selfcal", "select-order"):
         p = sub.add_parser(name)
         p.add_argument("--output", type=Path, required=True)
         if name in ("run", "casa-run"):
@@ -889,7 +1118,7 @@ def main():
         if name == "run":
             p.add_argument("--resume", action="store_true")
         if name == "plan":
-            p.add_argument("--study", choices=("local", "uvgrid"), default="local")
+            p.add_argument("--study", choices=("local", "uvgrid", "order-validation"), default="local")
         if name == "audit-selfcal":
             p.add_argument("--source", type=Path)
     a = ap.parse_args()
@@ -899,6 +1128,8 @@ def main():
         run_stage(a.output, a.experiment, a.smoke, a.resume)
     elif a.cmd == "casa-run":
         casa_run(a.output, a.experiment, a.smoke)
+    elif a.cmd == "select-order":
+        select_order_cases(a.output)
     else:
         audit_selfcal(a.output, a.source)
 

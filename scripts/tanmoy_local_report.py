@@ -1,4 +1,5 @@
-"""Report for the Tanmoy local experiments: report.html, four experiment pages and measurements.csv.
+"""Report for the Tanmoy local experiments: report.html, four experiment pages and measurements.csv
+(or, for the uvgrid / order-validation studies, one report.html of that study).
 
   ML:   python -m scripts.tanmoy_local_report --input runs/tanmoy-local-20261123
 
@@ -222,6 +223,7 @@ def csv_rows(run):
             noise_rms_affected_jy=(data.get("noise", {}).get("affected") or {}).get("effective_noise_rms_component_jy"),
             noise_rms_unaffected_jy=(data.get("noise", {}).get("unaffected") or {}).get("effective_noise_rms_component_jy"),
             usable_fraction_removed=(r.get("cut") or {}).get("usable_fraction_removed"),
+            eC_matched_support=m.get("eC_matched"),
             reused_from=r.get("reused_from")))
         if c["experiment"] == "uvgrid":
             g = m.get("grid", {})
@@ -915,11 +917,187 @@ def uvgrid_report(run):
     print("[uvgrid]", lead)
 
 
+# ---------------------------------------------------------------- experiment 1b
+
+def orderval_verdict(dc, da):
+    """Per-case label from paired seeds: d = d_amp per order; Δorder = d_alt − d_cur = eC(alt) − eC(cur)."""
+    have = [i for i in range(len(dc)) if dc[i] is not None and da[i] is not None]
+    if not have:
+        return "not enough completed cases"
+    delta = [da[i] - dc[i] for i in have]
+    if all(x > 0 for x in delta) and all(da[i] >= 0 for i in have):
+        return "rescue disappears under the alternative order"
+    if all(x > 0 for x in delta):
+        return "rescue persists but weakens under the alternative order"
+    if all(da[i] < 0 for i in have):
+        return "rescue persists"
+    return "seed-dependent"
+
+
+def orderval_report(run):
+    seeds = [("archived", "archived seed"), ("new1", "new seed 1"), ("new2", "new seed 2")]
+    xs = ["noise", "current", "alternative"]
+    sel = json.loads((run.root / "selection.json").read_text())
+    body, summary = [], []
+    sids = list(run.plan["sources"])
+    per = {}
+    for sid in sids:
+        get = lambda o, s, k="eC": run.m(f"{sid}-{o}-{s}", k)
+        d = {o: [None if get(o, s) is None or get("noise", s) is None else get(o, s) - get("noise", s) for s, _ in seeds]
+             for o in ("current", "alternative")}
+        per[sid] = d
+        summary.append((sid, orderval_verdict(d["current"], d["alternative"]), d))
+    lead = " ".join(f"{sid}: {v}." for sid, v, _ in summary)
+    body.append(f"<p class=lead>{esc(lead)} <b>Three noise realizations per case; {len(sids)} new sources, each selected "
+                "for a strong archived rescue.</b></p>")
+    body.append("<h2>1. Question</h2><p>Experiment 1 found the amplification “rescue” of noisy 0449+113 under the current "
+                "simulation order. Does the same comparison repeat on other archived rescue cases: does the rescue persist, "
+                "weaken or vanish when the gain also multiplies the noise, G·(V+n) instead of G·V+n?</p>")
+    # selection
+    rows = [[s["source"], s["split"], s["case"], s["noise_case"], s["antenna"], s["A"], s["a"], s["r"], s["noise_seed"],
+             s["eC_noise"], s["eC_amp_noise"], s["d_amp"], s["aperture_ratio_noise"], s["aperture_ratio_amp_noise"]]
+            for s in sel["selected"]]
+    body.append("<h2>2. Selected cases (frozen before imaging)</h2>" + table(
+        ["source", "records", "amp+noise case", "noise-only case", "antenna", "A", "a", "r = a/SNR₀", "noise seed",
+         "eC noise only", "eC amp+noise", "d_amp", "aperture flux ratio, noise only", "aperture flux ratio, amp+noise"], rows))
+    cnt = ", ".join(f"{k}: {v}" for k, v in sorted(sel["counts"].items(), key=lambda kv: -kv[1]))
+    body.append(f"<p class=cap>Rules: {esc(sel['rules']['mixture'])}; counterpart = {esc(sel['rules']['counterpart'])}; "
+                f"d_amp ≤ {sel['rules']['rescue_cutoff']} (illustrative cutoff, not significance); A ≤ {sel['rules']['amp_max']}; "
+                f"{esc(sel['rules']['aperture'])}; excluded source(s) {', '.join(sel['rules']['excluded_sources'])}; "
+                f"{esc(sel['rules']['order'])}. Candidate counts: {esc(cnt)}. Eligible sources: {sel['n_sources_eligible']}. "
+                f"Full audit: <a href='candidates.csv'>candidates.csv</a>."
+                + (f" <b>Limitation: {esc(sel['limitation'])}</b>" if sel.get("limitation") else "") + "</p>")
+    body.append("<h2>3. What changed and what stayed fixed</h2>" + table(["", "Setting"], [
+        ["Changed", "noise only V+n · current G·V+n · alternative G·(V+n), per seed"],
+        ["Fixed", "each case's archived flux, flags policy, antenna, exact A and a, reference grid, CLEAN mask, restoring/"
+                  "evaluation beam, adaptive CLEAN (= dataset default); visibility weights from nominal σ₀, not rescaled"],
+        ["Seeds", "archived noise realization + two deterministic new seeds fixed in the plan (not chosen for rescue)"],
+        ["eC", "runner eC over the valid image (as experiment 1); eC on the dataset's fixed support Ω reproduces the archived value"]]))
+    body.append("<h2>4. What happened</h2>")
+    fig, axes = plt.subplots(len(sids), 2, figsize=(9.5, 3.5 * len(sids)), layout="constrained", squeeze=False,
+                             gridspec_kw=dict(width_ratios=[1.3, 1]))
+    for r_i, sid in enumerate(sids):
+        ax, bx = axes[r_i]
+        get = lambda o, s: run.m(f"{sid}-{o}-{s}", "eC")
+        for k, (s, lab) in enumerate(seeds):
+            ys = [get(o, s) for o in xs]
+            pts = [(i, y) for i, y in enumerate(ys) if y is not None]
+            ax.plot([p[0] for p in pts], [p[1] for p in pts], "-", color=INK if s == "archived" else GRID,
+                    lw=2 if s == "archived" else 1.5, zorder=1)
+            for i, y in pts:
+                ax.plot(i, y, ORDER_STYLE[xs[i]][2], color=ORDER_STYLE[xs[i]][1], ms=8, mec="white", mew=1.5, zorder=2)
+            if pts:
+                ax.annotate(lab, pts[-1], xytext=(6, 0), textcoords="offset points", va="center", fontsize=8,
+                            color=INK if s == "archived" else MUTED)
+        ax.set_xticks(range(3), [ORDER_STYLE[o][0] for o in xs]); ax.set_xlim(-.3, 2.9)
+        ax.set_ylabel("eC (0 exact, 1 = empty model)"); ax.set_title(f"{sid}: error relative to the known source", fontsize=9)
+        d = per[sid]
+        for o, off in (("current", -.1), ("alternative", .1)):
+            for i in range(3):
+                if d[o][i] is not None:
+                    bx.plot(i + off, d[o][i], ORDER_STYLE[o][2], color=ORDER_STYLE[o][1], ms=8, mec="white", mew=1.5,
+                            label=ORDER_STYLE[o][0] if i == 0 else None)
+        for i in range(3):
+            if d["current"][i] is not None and d["alternative"][i] is not None:
+                bx.plot(i + .28, d["alternative"][i] - d["current"][i], "^", color=C3, ms=7, mec="white", mew=1.2,
+                        label="Δorder = eC(alt) − eC(cur)" if i == 0 else None)
+        bx.axhline(0, color=INK, lw=1)
+        bx.set_xticks(range(3), [lab for _, lab in seeds]); bx.set_ylabel("damage (eC difference)")
+        bx.set_title("d_amp per order (negative = gain helped); Δorder > 0 = alternative weaker", fontsize=8.5)
+        bx.legend(fontsize=7.5, frameon=False)
+    body.append(run.save(fig, "orderval_dots.png"))
+    body.append("<p class=cap>Here the gain either changes only the source signal or changes both signal and noise. We kept "
+                "the weights fixed. Dark line = archived seed (the one selected for its rescue); grey lines = new seeds.</p>")
+    # flux
+    fig, axes = plt.subplots(1, len(sids), figsize=(5.2 * len(sids), 3.3), layout="constrained", squeeze=False)
+    for ax, sid in zip(axes[0], sids):
+        for i, o in enumerate(xs):
+            for k, (s, lab) in enumerate(seeds):
+                ap = run.m(f"{sid}-{o}-{s}", "flux_ratio_aperture")
+                out = run.m(f"{sid}-{o}-{s}", "outside_aperture_abs_flux_ratio")
+                if ap is not None:
+                    ax.plot(i + (k - 1) * .12, ap, ORDER_STYLE[o][2], color=ORDER_STYLE[o][1], ms=8, mec="white", mew=1.5)
+                if out is not None:
+                    ax.plot(i + (k - 1) * .12, out, ORDER_STYLE[o][2], color=ORDER_STYLE[o][1], ms=6, mfc="none", mew=1.2)
+        ax.axhline(1, color=INK, lw=1); ax.text(2.4, 1, " true flux", va="center", fontsize=8, color=MUTED)
+        ax.set_xticks(range(3), [ORDER_STYLE[o][0] for o in xs]); ax.set_xlim(-.4, 2.9)
+        ax.set_ylabel("÷ true flux"); ax.set_title(f"{sid}: filled = model flux in source aperture; open = |model| outside", fontsize=8.5)
+    body.append(run.save(fig, "orderval_flux.png"))
+    body.append("<p class=cap>Three seeds per condition, left to right (archived first). Aperture = restoring-beam FWHM "
+                "ellipse. Total signed flux alone cannot separate source recovery from cancelling false components.</p>")
+    half = 4.
+    for sid in sids:
+        cols = [f"{sid}-ctrl-V", f"{sid}-noise-archived", f"{sid}-current-archived", f"{sid}-alternative-archived"]
+        if all(run.ok(c) for c in cols):
+            titles = ["noiseless V", "noise only", "current G·V+n", "alternative G·(V+n)"]
+            body.append(image_grid(run, [("model − truth", lambda p: p["C"] - p["T"], True)], cols,
+                                   [f"{t}\neC={run.m(c, 'eC'):.3f}" for t, c in zip(titles, cols)], half,
+                                   f"orderval_images_{sid}.png", suptitle=f"{sid}, archived seed"))
+    body.append(f"<p class=cap>Raw CLEAN model convolved with the evaluation beam minus truth, ÷ true flux; shared diverging "
+                f"scale within each case, ±{half:g}″ field, ellipse = restoring beam.</p>")
+    # per-case conclusions
+    rows = []
+    for sid, verdict, d in summary:
+        for i, (s, lab) in enumerate(seeds):
+            rows.append([sid, lab, d["current"][i], d["alternative"][i],
+                         None if d["current"][i] is None or d["alternative"][i] is None else d["alternative"][i] - d["current"][i],
+                         verdict if i == 0 else ""])
+    body.append("<h2>5. Per-case result</h2>" + table(["source", "seed", "d_amp current", "d_amp alternative", "Δorder", "case verdict"], rows))
+    new = [(d["current"][i], d["alternative"][i]) for _, _, d in summary for i in (1, 2)
+           if d["current"][i] is not None and d["alternative"][i] is not None]
+    if new:
+        body.append(f"<p>New seeds only ({len(new)} realizations): current-order rescue (d_amp &lt; 0) in "
+                    f"{sum(c < 0 for c, _ in new)}/{len(new)}, alternative-order rescue in {sum(a < 0 for _, a in new)}/{len(new)}, "
+                    f"alternative weaker in {sum(a > c for c, a in new)}/{len(new)}. Archived seeds were selected for a "
+                    "negative current-order damage, so they are summarized separately above.</p>")
+    body.append("<p>These cases were selected for a strong rescue; they do not estimate how common rescue is, and the "
+                "seeds of one source are not independent sources.</p>")
+    # reproduction + checks
+    rep = []
+    for sid in sids:
+        arch = run.plan["archived"][sid]
+        prep = {}
+        for p in sorted((run.root / "runs").glob("order*.json")):
+            prep = (json.loads(p.read_text()).get("source_preparations") or {}).get(sid) or prep
+        seed0 = str(arch["noise_seed"])
+        for o, k in (("noise", "noise"), ("current", "current")):
+            mine = run.m(f"{sid}-{o}-archived", "eC_matched")
+            rep.append([sid, f"{o} eC on Ω: runner vs archived", f"{fmt(mine, 12)} vs {fmt(arch['eC'][k], 12)}",
+                        fmt(None if mine is None else abs(mine - arch["eC"][k]))])
+        rep.append([sid, "noiseless V DATA hash equal", fmt(prep.get("v_sha256") == arch["v_sha256"] if prep else None), ""])
+        rep.append([sid, "archived noise realization hash equal",
+                    fmt((prep.get("regular", {}).get(seed0) or {}).get("noise_sha256") == arch["nominal_noise_sha256"] if prep else None), ""])
+    body.append("<h3>Reproduction of the archived examples</h3>" + table(["source", "check", "result", "|difference|"], rep))
+    chk = []
+    for sid in sids:
+        for s, lab in seeds:
+            oc = run.records[f"{sid}-current-{s}"].get("order_check") or {}
+            cur, alt = run.records[f"{sid}-current-{s}"].get("data", {}), run.records[f"{sid}-alternative-{s}"].get("data", {})
+            chk.append([sid, lab, fmt(oc.get("unaffected_rows_identical")), oc.get("max_difference_error_over_storage_tolerance"),
+                        fmt(cur.get("unaffected_sha256") == alt.get("unaffected_sha256") and cur.get("unaffected_sha256") is not None)])
+        gv, gv0 = run.records[f"{sid}-ctrl-GV"], run.records[f"{sid}-ctrl-GV0"]
+        chk.append([sid, "zero noise", "G·(V+0) DATA = G·V DATA", fmt(gv.get("data", {}).get("data_sha256") == gv0.get("data", {}).get("data_sha256")
+                                                                       and gv.get("data", {}).get("data_sha256") is not None), gv0.get("status")])
+    body.append("<h3>Visibility checks before imaging</h3>" + table(
+        ["source", "seed", "unaffected rows identical", "(alt−cur) − (G−1)n ÷ storage tol.", "stored unaffected DATA equal"], chk))
+    body.append("<p class=cap>The original 0449+113 result (experiment 1) was run on the local machine "
+                "(runs/tanmoy-local-20261123) and is not copied here; compare with its report.</p>")
+    body.append(tech(run, "order"))
+    (run.root / "report.html").write_text(page("Experiment 1b · Does the gain/noise order result repeat?", "".join(body), back=False))
+    check_links(run.root)
+    print("REPORT", run.root / "report.html")
+    print("[order-validation]", lead)
+    return lead
+
+
 def build(root):
     run = Run(root)
     if run.plan.get("study") == "uvgrid":
         csv_rows(run)
         return uvgrid_report(run)
+    if run.plan.get("study") == "order-validation":
+        csv_rows(run)
+        return orderval_report(run)
     rows = csv_rows(run)
     summaries = dict(order=order_page(run), stopping=stopping_page(run), sampling=sampling_page(run), selfcal=selfcal_page(run))
     names = dict(order="1 · Gain/noise application order", stopping="2 · CLEAN stopping and noise",
