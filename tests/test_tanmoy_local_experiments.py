@@ -102,3 +102,37 @@ class Bookkeeping(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OrderValidationSelection(unittest.TestCase):
+    def cand(self, **kw):
+        c = dict(noise_mask=4, d_amp=-.2, phi_deg=0., A=3., source="1234+567", aperture_ratio_noise=.6,
+                 aperture_ratio_amp_noise=.9, parent_original_ms=__file__, antenna=3, a=900., noise_seed=7)
+        c.update(kw)
+        return c
+
+    def test_eligibility_rules(self):
+        from scripts.tanmoy_local_experiments import classify_candidate
+        self.assertEqual(classify_candidate(self.cand(), set()), "")
+        cases = {"no matched noise-only counterpart": dict(noise_mask=6), "nonzero injected phase": dict(phi_deg=30.),
+                 "attenuation (A <= 1)": dict(A=.5), "original experiment-1 source": dict(source="0449+113"),
+                 "A above production range (8.5468)": dict(A=12.), "no rescue (d_amp >= 0)": dict(d_amp=.01),
+                 "weak rescue (-0.05 < d_amp < 0)": dict(d_amp=-.01),
+                 "noise-only source not under-recovered in the aperture": dict(aperture_ratio_noise=1.1),
+                 "amplification does not bring aperture flux closer to truth": dict(aperture_ratio_amp_noise=1.5),
+                 "original MS unavailable": dict(parent_original_ms="/nonexistent.ms")}
+        for reason, kw in cases.items():
+            self.assertEqual(classify_candidate(self.cand(**kw), set()), reason)
+
+    def test_duplicates_count_once(self):
+        from scripts.tanmoy_local_experiments import classify_candidate
+        seen = set()
+        self.assertEqual(classify_candidate(self.cand(), seen), "")
+        self.assertTrue(classify_candidate(self.cand(), seen).startswith("duplicate"))
+
+    def test_case_verdicts(self):
+        from scripts.tanmoy_local_report import orderval_verdict
+        self.assertEqual(orderval_verdict([-.2, -.1, -.1], [-.1, -.05, -.02]), "rescue persists but weakens under the alternative order")
+        self.assertEqual(orderval_verdict([-.2, -.1, -.1], [.01, .02, .0]), "rescue disappears under the alternative order")
+        self.assertEqual(orderval_verdict([-.2, -.1, -.1], [-.3, -.2, -.1]), "rescue persists")
+        self.assertEqual(orderval_verdict([-.2, -.1, -.1], [-.3, .2, -.1]), "seed-dependent")
