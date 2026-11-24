@@ -23,6 +23,7 @@ from scripts.preprocessing import (
     assign_label,
     create_sample_manifest,
     finalize_simulation_sample,
+    get_partition_ids,
     load_dataset_manifest,
     load_sample_manifest,
     normalize_partition,
@@ -100,13 +101,36 @@ class LabelTests(unittest.TestCase):
 
 class PartitionTests(unittest.TestCase):
     def test_hard_coded_partitions_are_complete_ordered_and_disjoint(self):
-        self.assertEqual((len(TRAIN_IDS), len(TEST_IDS), len(VAL_IDS)), (101, 22, 22))
+        self.assertEqual((len(TRAIN_IDS), len(TEST_IDS), len(VAL_IDS)), (141, 30, 31))
         self.assertEqual(len(ALL_IDS), len(set(ALL_IDS)))
         for ids in (TRAIN_IDS, TEST_IDS, VAL_IDS):
             self.assertEqual(ids, sorted(ids))
+        for dataset_id in ALL_IDS:  # no ID shadows another through the "<id>_" variant prefix
+            self.assertEqual(source_dataset_id(dataset_id), dataset_id)
         self.assertEqual(partition_for_sample("1923-210_phase_snr_10"), "train")
         self.assertEqual(partition_for_sample("1146+399_amp_snr_10"), "test")
         self.assertEqual(partition_for_sample("0022+002"), "val")
+
+    def test_ext62_assignment_is_pinned_and_old_sources_keep_their_split(self):
+        ext62 = {
+            "train": "0119+321 0431+206 0541-056 0555+398 0825+031 0832+185 0921-263 0943-083 "
+                     "0949+662 1006+349 1056+701 1112-219 1130-148 1209-322 1227+365 1258-223 "
+                     "1313+675 1400+621 1419+064 1438+621 1445+099 1459+716 1526-138 1538+003 "
+                     "1640+397 1739+476 1753+288 1822-096 2015+371 2047-026 2101-295 2110-103 "
+                     "2134-018 2139+143 2148+069 2206-185 2236+284 2254+247 2350+646 2358-103",
+            "val": "0239-025 0437-187 0750+482 1013+248 1051-316 1057-245 1156+314 2035+189 2340+266",
+            "test": "0854+201 1239+075 1409-269 1436+636 1740+521 1833-210 1956-076 2009+724",
+        }
+        ext62 = {split: set(ids.split()) for split, ids in ext62.items()}
+        self.assertEqual(sum(map(len, ext62.values())), 57)
+        for split, ids in ext62.items():
+            self.assertLessEqual(ids, set(get_partition_ids(split)))
+        old = {split: set(get_partition_ids(split)) - set().union(*ext62.values())
+               for split in ("train", "test", "val")}
+        self.assertEqual({k: len(v) for k, v in old.items()}, {"train": 101, "test": 22, "val": 22})
+        for sample, split in (("1923-210", "train"), ("1513+236", "train"), ("1146+399", "test"),
+                              ("1924-292", "test"), ("0022+002", "val"), ("2357-114", "val")):
+            self.assertIn(sample, old[split])
 
     def test_sample_variants_follow_their_source_dataset_partition(self):
         self.assertEqual(source_dataset_id("0012-399_phase_only"), "0012-399")

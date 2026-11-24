@@ -1,0 +1,17 @@
+{
+  "split": "test",
+  "source_ids": [
+    "0854+201",
+    "1239+075",
+    "1409-269",
+    "1436+636",
+    "1740+521",
+    "1833-210",
+    "1956-076",
+    "2009+724"
+  ],
+  "thermal_dir": "collect/experiments/extracted_thermal_simulation_comparison_ext62_v2_20261118",
+  "seed": 20261123,
+  "flux_policy": "nrao_then_clean",
+  "simulation_flags": "unflag"
+}
