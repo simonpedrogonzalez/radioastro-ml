@@ -200,6 +200,23 @@ def plot_diagonal(truth, pred, names, overall, assets):
     return "assets/diagonal.png"
 
 
+def _log_ec_ticks(axes, lo, hi):
+    """Readable log eC ticks: decades 10^-k below 0.1, then 0.25, 0.5, 0.75, 1, 2, ..., 5, 7, 10, 20, ...
+    (6, 8, 9 as unlabeled minor ticks, where labels would overlap)."""
+    major = [10.0 ** k for k in range(int(np.floor(np.log10(lo))), 0)] + [.25, .5, .75, 1, 2, 3, 4, 5, 7, 10, 20, 30, 50]
+    major = [t for t in major if lo <= t <= hi]
+    minor = [m * 10.0 ** k for k in range(int(np.floor(np.log10(lo))), 2) for m in range(2, 10)]
+    minor = [t for t in minor if lo <= t <= hi and not np.isclose(t, major).any()]
+
+    def label(t, _pos=None):
+        return f"$10^{{{int(round(np.log10(t)))}}}$" if t < .1 + 1e-12 else f"{t:g}"
+    for ax in axes:
+        ax.xaxis.set_major_locator(matplotlib.ticker.FixedLocator(major))
+        ax.xaxis.set_minor_locator(matplotlib.ticker.FixedLocator(minor))
+        ax.xaxis.set_minor_formatter(matplotlib.ticker.NullFormatter())
+    axes[-1].xaxis.set_major_formatter(matplotlib.ticker.FuncFormatter(label))
+
+
 def plot_aligned(truth, train, bins, names, assets):
     """eC distributions on top, then within-bin R^2, RMSE and relative RMSE, all on one shared log eC axis.
 
@@ -208,8 +225,11 @@ def plot_aligned(truth, train, bins, names, assets):
     """
     y = truth["eC"]
     pool = np.concatenate([y] + list(train.values()))
-    lo_x, hi_x = min(0., float(pool.min())), float(pool.max()) * 1.03
-    hist_bins = np.linspace(lo_x, hi_x, 151)
+    pool = pool[pool > 0]
+    lo_x = 10.0 ** np.floor(np.log10(np.quantile(pool, .02)))   # start at the decade of the 2nd percentile
+    hi_x = float(pool.max()) * 1.1
+    n_off = int((y < lo_x).sum())
+    hist_bins = np.geomspace(lo_x, hi_x, 151)
     fig, axes = plt.subplots(4, 1, figsize=(15, 15), sharex=True, gridspec_kw=dict(height_ratios=[1.4, 1, 1, 1]))
     edges = [b["lo"] for b in bins] + [bins[-1]["hi"]]
     inner = [(a["hi"] + b["lo"]) / 2 for a, b in zip(bins[:-1], bins[1:])]   # boundary between adjacent bins
@@ -231,14 +251,13 @@ def plot_aligned(truth, train, bins, names, assets):
                     lw=1.7, color=COLORS[c], label=f"train {name} (n={len(t)})")
     ax.set_ylim(0, ax.get_ylim()[1] * 2)
     for i, (a, e) in enumerate(spans):   # bin numbers (details in the table below the figure), staggered
-        ax.text((a + e) / 2, .985 - .06 * (i % 3), f"{i + 1}", ha="center", va="top", fontsize=8,
+        ax.text(np.sqrt(a * e), .985 - .06 * (i % 3), f"{i + 1}", ha="center", va="top", fontsize=8,
                 color="#24323a", transform=ax.get_xaxis_transform())
     ax.set(ylabel="fraction of rows per bin",
            title="eC distributions (train sets as trained, validation shaded); numbered bands = metric bins")
     _tidy(ax); ax.legend(frameon=False, fontsize=8, loc="upper left", bbox_to_anchor=(1.01, 1))
     x = np.array([b["median_eC"] for b in bins])
-    dodge = .004 * (hi_x - lo_x)
-    offsets = (np.arange(len(names)) - (len(names) - 1) / 2) * dodge   # small horizontal dodge
+    offsets = 10 ** ((np.arange(len(names)) - (len(names) - 1) / 2) * .004 * np.log10(hi_x / lo_x))   # small dodge
     for ax, (key, label) in zip(axes[1:], (("r2", "within-bin R²"), ("rmse", "RMSE of eC"),
                                            ("rel_rmse", "relative RMSE\n(RMSE / mean true eC)"))):
         for c, name in enumerate(names):
@@ -246,7 +265,7 @@ def plot_aligned(truth, train, bins, names, assets):
             lo = np.array([b["runs"][name][key]["lo"] for b in bins])
             hi = np.array([b["runs"][name][key]["hi"] for b in bins])
             med = float(np.nanmedian(v))
-            ax.errorbar(x + offsets[c], v, yerr=[np.maximum(v - lo, 0), np.maximum(hi - v, 0)], fmt="o-",
+            ax.errorbar(x * offsets[c], v, yerr=[np.maximum(v - lo, 0), np.maximum(hi - v, 0)], fmt="o-",
                         ms=5.5, lw=1.4, capsize=2.5, color=COLORS[c], label=f"{name} (median over bins {med:.3g})",
                         zorder=3)
             ax.axhline(med, color=COLORS[c], ls="--", lw=1.1, alpha=.9, zorder=2)
@@ -258,7 +277,8 @@ def plot_aligned(truth, train, bins, names, assets):
         _tidy(ax); ax.legend(frameon=False, fontsize=8, loc="upper left", bbox_to_anchor=(1.01, 1))
     for ax in axes:
         mark(ax)
-    axes[-1].set(xlim=(lo_x, hi_x), xlabel="true eC (points at the bin median)")
+    axes[-1].set(xscale="log", xlim=(lo_x, hi_x), xlabel=f"true eC (log scale; points at the bin median; {n_off} val rows below {lo_x:g} off-axis, still in bin 1)")
+    _log_ec_ticks(axes, lo_x, hi_x)
     fig.tight_layout()
     fig.savefig(assets / "by_eC_aligned.png", dpi=110); plt.close(fig)
     return "assets/by_eC_aligned.png"
@@ -308,7 +328,7 @@ def report(output, args, truth, pred, names, bins, overall, images):
              "Narrow bins have little spread, so R² there is low or negative even for small errors; compare runs with "
              "each other, not with the overall R². <b>RMSE</b> grows with eC by nature; <b>relative RMSE</b> (RMSE / mean "
              "true eC of the bin) removes that scale.</p>",
-             "<p class='note'>All panels share one linear eC axis, with dotted lines at eC = 0.05 and 1; dashed lines are each run's median over bins (value in the legend). Top: eC distributions of the validation rows (shaded) "
+             "<p class='note'>All panels share one log eC axis, with dotted lines at eC = 0.05 and 1; dashed lines are each run's median over bins (value in the legend). Top: eC distributions of the validation rows (shaded) "
              "and of each model's training set as it was trained (filters applied), as fractions per bin. The "
              "alternating numbered bands are the metric bins (rows, eC range and within-bin spread in the table below); "
              "each point sits at its bin's median eC.</p>",
