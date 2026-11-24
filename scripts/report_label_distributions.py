@@ -21,7 +21,10 @@ Each dataset is a matched run folder (reads <split>.npz and plan.json) or a v2.1
   #   --dataset v2-train=runs/dataset-v2-matched-train
   #   --dataset v2.1-train=runs/dataset-v2.1-train/manifest.json
   #   --dataset v2.1-nocap-train=runs/dataset-v2.1-noampcap-train/manifest.json
+  #   --dataset v2.2-train=runs/dataset-v2.2-train/manifest.json
   #   --dataset v2-val=runs/dataset-v2-matched-val --reference v2-val
+Rows are also counted per eC bin when an active corruption lies in a v2.2 tail
+(amplification A >= 13.2, |phase| >= 159 deg, noise ratio r >= 0.141).
 """
 from __future__ import annotations
 
@@ -41,6 +44,7 @@ from scripts.dataset_v21 import _resolve, load_manifest, read_part
 DEFAULT_DATASETS = (("v2-train", "runs/dataset-v2-matched-train"),
                     ("v2.1-train", "runs/dataset-v2.1-train/manifest.json"),
                     ("v2.1-nocap-train", "runs/dataset-v2.1-noampcap-train/manifest.json"),
+                    ("v2.2-train", "runs/dataset-v2.2-train/manifest.json"),
                     ("v2-val", "runs/dataset-v2-matched-val"))
 AMP_CAP = 8.5468   # v2.1 amplification cap, only used to label rows
 TYPES = ("amp", "phase", "noise")
@@ -50,6 +54,8 @@ ORIGINS = ("control", "noise only", "weak amp/phase", f"A > {AMP_CAP:g}", "stron
 MARKS = (.05, 1.)   # eC thresholds marked on every eC-scale axis
 NCORR_LABELS = ("0 (control)", "1 corruption", "2 corruptions", "3 corruptions")
 NCORR_COLORS = ("#c9c9c4", "#a9cbf2", "#4f8fdc", "#173f78")   # ordinal: one blue hue, light to dark
+TAIL = dict(amp=13.2, phase=159., noise=.141)   # v2.2 tails: A >= 13.2, |phase| >= 159 deg, r >= 0.141
+TAILS = ("any tail", "amp tail", "phase tail", "noise tail")
 # Validated categorical order (dataviz reference palette, light mode), as in report_dataset_v2_matched.
 COLORS = ("#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#6250d6")
 STYLE = ("<style>body{font:15px system-ui;max-width:1250px;margin:auto;padding:1.5rem;color:#24323a;background:#fcfcfb}"
@@ -76,6 +82,8 @@ def load_dataset(path):
         split = plan["split"]
         data, plan = read_part(path, split)
         recipes = {r["id"]: r for sp in plan["source_plans"] for r in sp["recipes"]}
+        snr = {p["id"]: p["nominal_source_snr"] for p in plan["prepared_sources"]}
+        data["noise_ratio"] = data["params"][:, 2] / np.asarray([snr[str(s)] for s in data["source_ids"]], float)
     b = data["b"].astype(bool)
     origin = np.empty(len(b), object)
     for i, rid in enumerate(map(str, data["recipe_ids"])):
@@ -90,7 +98,10 @@ def load_dataset(path):
             origin[i] = ORIGINS[3]
         else:
             origin[i] = ORIGINS[4]
-    return dict(split=split, path=str(path), eC=np.asarray(data["eC"], float), eD=np.asarray(data["eD"], float),
+    A, phi, r = data["params"][:, 0], np.abs(data["params"][:, 1]), np.asarray(data["noise_ratio"], float)
+    each = np.column_stack((b[:, 0] & (A >= TAIL["amp"]), b[:, 1] & (phi >= TAIL["phase"]), b[:, 2] & (r >= TAIL["noise"])))
+    tail = dict(zip(TAILS, (each.any(1), each[:, 0], each[:, 1], each[:, 2])))
+    return dict(split=split, path=str(path), eC=np.asarray(data["eC"], float), eD=np.asarray(data["eD"], float), tail=tail,
                 d=np.asarray(data["d"], float), p=np.asarray(data["p"], float), b=b,
                 mask=np.asarray(data["mask"], int), origin=origin,
                 sources=len(set(map(str, data["source_ids"]))),
@@ -142,6 +153,7 @@ def summarize(datasets):
                          eC_bins_by_origin={o: bin_counts(ds["eC"][ds["origin"] == o]).tolist() for o in ORIGINS},
                          eC_bins_by_ncorr={NCORR_LABELS[j]: bin_counts(ds["eC"][ds["b"].sum(1) == j]).tolist()
                                            for j in range(4)},
+                         eC_bins_by_tail={k: bin_counts(ds["eC"][v]).tolist() for k, v in ds["tail"].items()},
                          damages=active)
     return out
 
@@ -371,6 +383,16 @@ def report(datasets, summary, reference, output, images):
         parts.append(f"<h3>{html.escape(n)}</h3>")
         parts.append(table(["origin"] + labels + ["total"],
                            [[o] + s["eC_bins_by_origin"][o] + [sum(s["eC_bins_by_origin"][o])] for o in ORIGINS]))
+    parts += ["<h2>4b. Rows in the v2.2 tails</h2>",
+              f"<p class='note'>A row counts when one of its active corruptions lies in a v2.2 tail: amplification "
+              f"A &ge; {TAIL['amp']:g}, |phase| &ge; {TAIL['phase']:g}&deg;, noise ratio r &ge; {TAIL['noise']:g}. "
+              "'any tail' counts each row once; a row can be in several per-corruption tails.</p>"]
+    rows = []
+    for n, s in summary.items():
+        for k in TAILS:
+            c = s["eC_bins_by_tail"][k]
+            rows.append([f"{html.escape(n)} · {k}"] + c + [f"{sum(c)} ({100 * sum(c) / max(s['rows'], 1):.1f}%)"])
+    parts.append(table(["dataset · tail"] + labels + ["total"], rows))
     parts += ["<h2>5. Is the eC distribution set by the number of corruptions?</h2>",
               "<p class='note'>The matched design builds 7 rows from every sampled recipe: 3 with one corruption, "
               "3 with two and 1 with all three (plus one control per source). If eC mostly grows with the number of "

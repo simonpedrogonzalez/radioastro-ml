@@ -13,7 +13,8 @@ bin, with its own paired bootstrap interval, so "better at large/small eC" can b
   bin/submit ml-cpu python -m ml.compare_val_by_ec --output ml/runs/compare-xgb_mlp-v2-v21-by-eC
   # defaults: --model xgb_mlp --val runs/dataset-v2-matched-val
   #   --run v2=ml/runs/matched-v2-full-all22-dirty --run v2.1=ml/runs/matched-v2.1-all22-dirty
-  #   --run v2.1-nocap=ml/runs/matched-v2.1-noampcap-all22-dirty   (first run is the reference)
+  #   --run v2.1-nocap=ml/runs/matched-v2.1-noampcap-all22-dirty
+  #   --run v2.2=ml/runs/matched-v2.2-all22-dirty   (first run is the reference)
 """
 from __future__ import annotations
 
@@ -31,10 +32,12 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_RUNS = (("v2", "ml/runs/matched-v2-full-all22-dirty"),
                 ("v2.1", "ml/runs/matched-v2.1-all22-dirty"),
-                ("v2.1-nocap", "ml/runs/matched-v2.1-noampcap-all22-dirty"))
+                ("v2.1-nocap", "ml/runs/matched-v2.1-noampcap-all22-dirty"),
+                ("v2.2", "ml/runs/matched-v2.2-all22-dirty"))
 DEFAULT_TRAINS = (("v2", "runs/dataset-v2-matched-train"),
                   ("v2.1", "runs/dataset-v2.1-train/manifest.json"),
-                  ("v2.1-nocap", "runs/dataset-v2.1-noampcap-train/manifest.json"))
+                  ("v2.1-nocap", "runs/dataset-v2.1-noampcap-train/manifest.json"),
+                  ("v2.2", "runs/dataset-v2.2-train/manifest.json"))
 EC_COLUMN = 3   # decoded multitask output order: d_amp, d_phase, d_noise, eC, ...
 # Validated categorical order (dataviz reference palette, light mode), as in the dataset reports.
 COLORS = ("#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#6250d6")
@@ -344,7 +347,7 @@ def main():
     p.add_argument("--run", action="append", metavar="NAME=RUN", help="Multitask run; repeatable; first is the reference")
     p.add_argument("--train", action="append", metavar="NAME=PATH",
                    help="Training set of run NAME (run folder or manifest), for the distribution panel. "
-                        "Default: the v2, v2.1 and v2.1 no-cap training sets.")
+                        "Default: the v2, v2.1, v2.1 no-cap and v2.2 training sets.")
     p.add_argument("--model", default="xgb_mlp")
     p.add_argument("--bins", type=int, default=10, help="Equal-count eC bins (default 10)")
     p.add_argument("--boots", type=int, default=1000)

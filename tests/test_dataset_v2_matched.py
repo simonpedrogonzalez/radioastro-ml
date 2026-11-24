@@ -209,5 +209,37 @@ class DatasetV21(unittest.TestCase):
         self.assertNotEqual(plan_source(source(), config, "train")["noise_seeds"], plan_source(source(), DEFAULT, "train")["noise_seeds"])
 
 
+class DatasetV22(unittest.TestCase):
+    def test_tail_config_samples_only_tail_recipes(self):
+        from scripts.create_dataset_v2_matched import configuration
+        config = configuration(Path(__file__).resolve().parents[1] / "config/dataset_v22_train_tail.json")
+        recipes = sample_recipes("0000+000", 500., [3, 7], config)
+        self.assertEqual(len(recipes), 12)
+        self.assertEqual({r["group"] for r in recipes}, {"amplification:negative", "amplification:positive"})
+        for group in ("amplification:negative", "amplification:positive"):
+            self.assertEqual(sum(r["group"] == group for r in recipes), 6)
+        for r in recipes:
+            self.assertTrue(r["amp_band"] == r["phase_band"] == "strong")
+            self.assertTrue(13.2 <= r["A"] <= 20.276 and 159 <= abs(r["phi_deg"]) <= 180)
+            self.assertTrue(.141 <= r["r"] <= .19152)
+        self.assertNotEqual(plan_source(source(), config, "train")["noise_seeds"],
+                            plan_source(source(), DEFAULT, "train")["noise_seeds"])
+
+    def test_v2_sampling_and_config_hash_unchanged(self):
+        from scripts.create_dataset_v2_matched import configuration
+        from scripts.injection_bounds_report import digest
+        self.assertNotIn("amp_branches", DEFAULT)
+        self.assertEqual(digest(configuration(None)),
+                         "e4728b89a8d00cc40ae5e2a3bebda47faa2dfdcc0fcc07332b0f3de7aaabca55")   # frozen v2 train plan
+        self.assertEqual(len({r["group"] for r in sample_recipes("0000+000", 500., [3, 7], DEFAULT)}), 4)
+        self.assertEqual(sample_recipes("0000+000", 500., [3, 7], DEFAULT),
+                         sample_recipes("0000+000", 500., [3, 7], dict(DEFAULT, amp_branches=["attenuation", "amplification"])))
+
+    def test_bad_amp_branches_are_rejected(self):
+        for bad in ([], ["amplification", "amplification"], ["gain"]):
+            with self.assertRaises(ValueError):
+                sample_recipes("0000+000", 500., [3, 7], dict(DEFAULT, amp_branches=bad))
+
+
 if __name__ == "__main__":
     unittest.main()

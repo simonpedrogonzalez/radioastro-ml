@@ -28,7 +28,7 @@ import numpy as np
 
 from scripts import create_dataset_v1 as g
 from scripts.create_dataset_v2 import EXTRA_KEYS, check_policies, file_sha, indexed_sources, ms_bytes, thermal_source
-from scripts.dataset_v2_matched import DEFAULT, assign_shards, join_rows, plan_source, unit_file
+from scripts.dataset_v2_matched import DEFAULT, assign_shards, branches, join_rows, plan_source, unit_file
 from scripts.injection_bounds_report import digest
 from scripts.preprocessing.schema import atomic_write_json
 
@@ -38,15 +38,20 @@ SECONDS_PER_IMAGE = (6., .085)   # 6 s + 0.085 s per MB of the original MS (v2 p
 
 # ---------------------------------------------------------------- configuration
 
+# Matched-only optional keys, absent from DEFAULT so old configurations hash unchanged.
+MATCHED_EXTRA_KEYS = {"amp_branches"}
+
+
 def configuration(path):
     overrides = json.loads(Path(path).read_text()) if path else {}
-    unknown = set(overrides) - (set(DEFAULT) | EXTRA_KEYS)
+    unknown = set(overrides) - (set(DEFAULT) | EXTRA_KEYS | MATCHED_EXTRA_KEYS)
     if unknown:
         raise ValueError(f"Unknown matched v2 configuration fields: {sorted(unknown)}")
     config = dict(DEFAULT, **overrides)
     for key in ("ranges", "weak_ranges"):
         config[key] = dict(DEFAULT[key], **overrides.get(key, {}))
     check_policies(config)
+    branches(config)
     config.setdefault("split", "train")
     if config["split"] not in ("train", "val", "test"):
         raise ValueError("Expected canonical train/val/test split")

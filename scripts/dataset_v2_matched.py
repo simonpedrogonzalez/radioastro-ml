@@ -25,7 +25,17 @@ DEFAULT = dict(schema=3, design="matched_combination_groups",
                recipes_per_source=12, noise_slots=1, weak_fraction=.25, seed=20261106,
                ranges=RANGES, weak_ranges=WEAK_RANGES,
                pilot_root="runs/simulation-parametrization-v2-20261104")
-BRANCHES = [(amp, phase) for amp in ("attenuation", "amplification") for phase in ("negative", "positive")]
+AMP_BRANCHES = ("attenuation", "amplification")
+BRANCHES = [(amp, phase) for amp in AMP_BRANCHES for phase in ("negative", "positive")]
+
+
+def branches(config):
+    """Recipe strata: amp branch x phase sign. Optional config["amp_branches"] (not in DEFAULT, so absent
+    keeps the v2 strata and config hashes) restricts the amp branches, e.g. ["amplification"] for v2.2."""
+    amp = tuple(config.get("amp_branches", AMP_BRANCHES))
+    if not amp or len(set(amp)) != len(amp) or set(amp) - set(AMP_BRANCHES):
+        raise ValueError(f"amp_branches must be a non-empty subset of {AMP_BRANCHES}")
+    return [(a, p) for a, p in BRANCHES if a in amp]
 
 
 def _decode(u, lo, hi, logarithmic):
@@ -48,9 +58,10 @@ def sample_recipes(sid, snr0, ants, config):
         raise ValueError(f"Invalid source SNR0: {sid}")
     if not ants:
         raise ValueError(f"No eligible antennas: {sid}")
+    strata = branches(config)
     count = int(config["recipes_per_source"])
-    if count <= 0 or count % len(BRANCHES):
-        raise ValueError(f"recipes_per_source must be a positive multiple of {len(BRANCHES)}")
+    if count <= 0 or count % len(strata):
+        raise ValueError(f"recipes_per_source must be a positive multiple of {len(strata)}")
     w = float(config["weak_fraction"])
     if not 0 <= w < 1:
         raise ValueError("weak_fraction must lie in [0, 1)")
@@ -60,10 +71,10 @@ def sample_recipes(sid, snr0, ants, config):
     if admissible >= r_hi:
         raise ValueError(f"{sid}: no admissible active thermal-noise range")
     recipes = []
-    for amp_branch, phase_sign in BRANCHES:
+    for amp_branch, phase_sign in strata:
         group = f"{amp_branch}:{phase_sign}"
         cube = qmc.LatinHypercube(d=3, scramble=True, seed=stream_seed(
-            config["seed"], sid, f"recipe:{group}")).random(count // len(BRANCHES))
+            config["seed"], sid, f"recipe:{group}")).random(count // len(strata))
         for ua, up, un in cube:
             key = f"amp_{amp_branch}"
             A, amp_band = _banded(float(ua), ranges[key], weak[key], w, amp_branch == "amplification")
