@@ -147,6 +147,13 @@ def analyze(truth, pred, names, edges, boots, seed):
 
 # ---------------------------------------------------------------- plots
 
+def mark(ax):
+    """Dotted reference lines at the eC thresholds 0.05 and 1."""
+    for v in (.05, 1.):
+        ax.axvline(v, color="#24323a", ls=":", lw=1, zorder=1)
+        ax.text(v, 1.0, f" {v:g}", transform=ax.get_xaxis_transform(), fontsize=7, color="#24323a", va="top", ha="left")
+
+
 def _tidy(ax, log_x=False):
     if log_x:
         ax.xaxis.set_minor_formatter(matplotlib.ticker.NullFormatter())
@@ -179,6 +186,7 @@ def plot_diagonal(truth, pred, names, overall, assets):
             else:
                 ax.plot([lo, hi], [lo, hi], color="#8a8a85", lw=.9, ls="--", label="y = x")
                 ax.set(xlim=(lo, hi), ylim=(lo, hi))
+                mark(ax)
             ax.set(xlabel="true eC", ylabel="predicted eC" + (" (log; ≤ floor clipped)" if log else ""))
             if row == 0:
                 o = overall[name]
@@ -196,10 +204,10 @@ def plot_aligned(truth, train, bins, names, assets):
     against how many val rows its bin holds, how wide the bin is and how much training data sits there.
     """
     y = truth["eC"]
-    pool = np.concatenate([y[y > 0]] + [t[t > 0] for t in train.values()])
-    lo_x, hi_x = max(1e-4, float(np.quantile(pool, .001))), float(pool.max()) * 1.15
-    hist_bins = np.geomspace(lo_x, hi_x, 61)
-    fig, axes = plt.subplots(4, 1, figsize=(12, 15), sharex=True, gridspec_kw=dict(height_ratios=[1.4, 1, 1, 1]))
+    pool = np.concatenate([y] + list(train.values()))
+    lo_x, hi_x = min(0., float(pool.min())), float(pool.max()) * 1.03
+    hist_bins = np.linspace(lo_x, hi_x, 151)
+    fig, axes = plt.subplots(4, 1, figsize=(15, 15), sharex=True, gridspec_kw=dict(height_ratios=[1.4, 1, 1, 1]))
     edges = [b["lo"] for b in bins] + [bins[-1]["hi"]]
     inner = [(a["hi"] + b["lo"]) / 2 for a, b in zip(bins[:-1], bins[1:])]   # boundary between adjacent bins
     spans = list(zip([lo_x] + inner, inner + [hi_x]))
@@ -208,26 +216,26 @@ def plot_aligned(truth, train, bins, names, assets):
             if i % 2:
                 ax.axvspan(a, b, color="#eef3f6", zorder=0, lw=0)
         for x in inner:
-            ax.axvline(x, color="#8a8a85", ls=":", lw=.9, zorder=1)
+            ax.axvline(x, color="#b9c4ca", ls="-", lw=.7, zorder=1)   # bin edges: solid, lighter than the 0.05/1 marks
     ax = axes[0]
     w = np.full(len(y), 1 / len(y))
-    ax.hist(np.clip(y, lo_x, None), bins=hist_bins, weights=w, color="#8a8a85", alpha=.45,
+    ax.hist(y, bins=hist_bins, weights=w, color="#8a8a85", alpha=.45,
             label=f"validation (n={len(y)})")
     for c, name in enumerate(names):
         if name in train:
             t = train[name]
-            ax.hist(np.clip(t, lo_x, None), bins=hist_bins, weights=np.full(len(t), 1 / len(t)), histtype="step",
+            ax.hist(t, bins=hist_bins, weights=np.full(len(t), 1 / len(t)), histtype="step",
                     lw=1.7, color=COLORS[c], label=f"train {name} (n={len(t)})")
     ax.set_ylim(0, ax.get_ylim()[1] * 2)
-    for i, (b, (a, e)) in enumerate(zip(bins, spans)):   # staggered on 3 levels so narrow bins do not collide
-        ax.text(np.sqrt(a * e), .985 - .105 * (i % 3), f"n={b['n']}\n{b['lo']:.2g}–{b['hi']:.2g}\nsd {b['sd_eC']:.2g}",
-                ha="center", va="top", fontsize=7, color="#24323a", transform=ax.get_xaxis_transform())
+    for i, (a, e) in enumerate(spans):   # bin numbers (details in the table below the figure), staggered
+        ax.text((a + e) / 2, .985 - .06 * (i % 3), f"{i + 1}", ha="center", va="top", fontsize=8,
+                color="#24323a", transform=ax.get_xaxis_transform())
     ax.set(ylabel="fraction of rows per bin",
-           title="eC distributions (train sets as trained, validation shaded); bands = metric bins "
-                 "(n rows, eC range, sd of true eC inside the bin)")
-    _tidy(ax, True); ax.legend(frameon=False, fontsize=8, loc="upper left", bbox_to_anchor=(0, .66))
+           title="eC distributions (train sets as trained, validation shaded); numbered bands = metric bins")
+    _tidy(ax); ax.legend(frameon=False, fontsize=8, loc="upper left", bbox_to_anchor=(1.01, 1))
     x = np.array([b["median_eC"] for b in bins])
-    offsets = np.linspace(-.02, .02, len(names)) if len(names) > 1 else [0.]
+    dodge = .004 * (hi_x - lo_x)
+    offsets = (np.arange(len(names)) - (len(names) - 1) / 2) * dodge   # small horizontal dodge
     for ax, (key, label) in zip(axes[1:], (("r2", "within-bin R²"), ("rmse", "RMSE of eC"),
                                            ("rel_rmse", "relative RMSE\n(RMSE / mean true eC)"))):
         for c, name in enumerate(names):
@@ -235,7 +243,7 @@ def plot_aligned(truth, train, bins, names, assets):
             lo = np.array([b["runs"][name][key]["lo"] for b in bins])
             hi = np.array([b["runs"][name][key]["hi"] for b in bins])
             med = float(np.nanmedian(v))
-            ax.errorbar(x * 10 ** offsets[c], v, yerr=[np.maximum(v - lo, 0), np.maximum(hi - v, 0)], fmt="o-",
+            ax.errorbar(x + offsets[c], v, yerr=[np.maximum(v - lo, 0), np.maximum(hi - v, 0)], fmt="o-",
                         ms=5.5, lw=1.4, capsize=2.5, color=COLORS[c], label=f"{name} (median over bins {med:.3g})",
                         zorder=3)
             ax.axhline(med, color=COLORS[c], ls="--", lw=1.1, alpha=.9, zorder=2)
@@ -244,8 +252,10 @@ def plot_aligned(truth, train, bins, names, assets):
             ax.axhline(0, color="#24323a", lw=.7, zorder=2)
             ax.set_title("within-bin R² (symlog below −1; small sd in a bin makes its R² unstable)", fontsize=10)
         ax.set_ylabel(label)
-        _tidy(ax, True); ax.legend(frameon=False, fontsize=8, loc="upper left")
-    axes[-1].set(xscale="log", xlim=(lo_x, hi_x), xlabel="true eC (log; points at the bin median)")
+        _tidy(ax); ax.legend(frameon=False, fontsize=8, loc="upper left", bbox_to_anchor=(1.01, 1))
+    for ax in axes:
+        mark(ax)
+    axes[-1].set(xlim=(lo_x, hi_x), xlabel="true eC (points at the bin median)")
     fig.tight_layout()
     fig.savefig(assets / "by_eC_aligned.png", dpi=110); plt.close(fig)
     return "assets/by_eC_aligned.png"
@@ -295,11 +305,14 @@ def report(output, args, truth, pred, names, bins, overall, images):
              "Narrow bins have little spread, so R² there is low or negative even for small errors; compare runs with "
              "each other, not with the overall R². <b>RMSE</b> grows with eC by nature; <b>relative RMSE</b> (RMSE / mean "
              "true eC of the bin) removes that scale.</p>",
-             "<p class='note'>All panels share the eC axis; dashed lines are each run's median over bins (value in the legend). Top: eC distributions of the validation rows (shaded) "
+             "<p class='note'>All panels share one linear eC axis, with dotted lines at eC = 0.05 and 1; dashed lines are each run's median over bins (value in the legend). Top: eC distributions of the validation rows (shaded) "
              "and of each model's training set as it was trained (filters applied), as fractions per bin. The "
-             "alternating bands and dotted lines are the metric bins, labelled with their row count and eC range; "
-             "each point below sits at its bin's median eC.</p>",
+             "alternating numbered bands are the metric bins (rows, eC range and within-bin spread in the table below); "
+             "each point sits at its bin's median eC.</p>",
              f"<img src='{images['aligned']}' alt='eC distributions aligned with per-bin R2, RMSE and relative RMSE'>",
+             table(["bin", "true eC range", "median eC", "rows", "sources", "sd of true eC (within bin)"],
+                   [[i + 1, f"{b['lo']:.3g}–{b['hi']:.3g}", fmt(b["median_eC"]), b["n"], b["sources"], fmt(b["sd_eC"])]
+                    for i, b in enumerate(bins)]),
              "<h2>Numbers per bin</h2>",
              f"<p class='note'>Value [95% interval]. Δ = run − {html.escape(ref)}, paired bootstrap interval; "
              "<span class='better'>green</span>/<span class='worse'>red</span> when the interval excludes 0. "
