@@ -33,11 +33,19 @@ ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_RUNS = (("v2", "ml/runs/matched-v2-full-all22-dirty"),
                 ("v2.1", "ml/runs/matched-v2.1-all22-dirty"),
                 ("v2.1-nocap", "ml/runs/matched-v2.1-noampcap-all22-dirty"),
-                ("v2.2", "ml/runs/matched-v2.2-all22-dirty"))
+                ("v2.2", "ml/runs/matched-v2.2-all22-dirty"),
+                # v2.2 rows with the tail part down-weighted; target scales fixed to the v2 part (ml.multitask
+                # --part-weight tail=W --scale-part v2). Experimental weights, not tuned optima.
+                ("v2.2-w0.1", "ml/runs/matched-v2.2-tailw0.1-v2scale-all22-dirty"),
+                ("v2.2-w0.25", "ml/runs/matched-v2.2-tailw0.25-v2scale-all22-dirty"),
+                ("v2.2-w1", "ml/runs/matched-v2.2-tailw1-v2scale-all22-dirty"))
 DEFAULT_TRAINS = (("v2", "runs/dataset-v2-matched-train"),
                   ("v2.1", "runs/dataset-v2.1-train/manifest.json"),
                   ("v2.1-nocap", "runs/dataset-v2.1-noampcap-train/manifest.json"),
-                  ("v2.2", "runs/dataset-v2.2-train/manifest.json"))
+                  ("v2.2", "runs/dataset-v2.2-train/manifest.json"),
+                  ("v2.2-w0.1", "runs/dataset-v2.2-train/manifest.json"),
+                  ("v2.2-w0.25", "runs/dataset-v2.2-train/manifest.json"),
+                  ("v2.2-w1", "runs/dataset-v2.2-train/manifest.json"))
 EC_COLUMN = 3   # decoded multitask output order: d_amp, d_phase, d_noise, eC, ...
 # Validated categorical order (dataviz reference palette, light mode), as in the dataset reports.
 COLORS = ("#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#6250d6")
@@ -69,11 +77,14 @@ def load(val_root, runs, model):
         pred[name] = decoded[:, EC_COLUMN]
         summary = json.loads((run / "results.json").read_text())
         pred[name + "__train_rows"] = summary.get("train_rows")
+        pred[name + "__part_weights"] = summary.get("part_weights")
+        pred[name + "__scale_part"] = summary.get("scale_part")
     return truth, pred
 
 
 def load_train(trains, pred):
-    """Training eC of each run (run folder or v2.1 manifest, filters applied); missing paths are skipped."""
+    """Training eC and row weights of each run (run folder or v2.1 manifest, filters applied; weights from the
+    run's --part-weight, else 1); missing paths are skipped."""
     from scripts.dataset_v21 import load_manifest, read_part
     out = {}
     for name, path in trains:
@@ -81,11 +92,14 @@ def load_train(trains, pred):
         if not path.exists():
             print(f"Training set for {name} not found ({path}); its distribution is omitted", flush=True)
             continue
-        eC = np.asarray(load_manifest(path)["eC"] if path.suffix == ".json" else read_part(path, "train")[0]["eC"], float)
+        data = load_manifest(path) if path.suffix == ".json" else read_part(path, "train")[0]
+        eC = np.asarray(data["eC"], float)
+        weights = pred.get(name + "__part_weights") or {}
+        rw = np.asarray([weights.get(str(t), 1.) for t in data["part"]], float) if weights else np.ones(len(eC))
         expected = pred.get(name + "__train_rows")
         if expected is not None and expected != len(eC):
             raise ValueError(f"{name}: {path} has {len(eC)} rows but the run was trained on {expected}")
-        out[name] = eC
+        out[name] = (eC, rw)
     return out
 
 
@@ -224,7 +238,7 @@ def plot_aligned(truth, train, bins, names, assets):
     against how many val rows its bin holds, how wide the bin is and how much training data sits there.
     """
     y = truth["eC"]
-    pool = np.concatenate([y] + list(train.values()))
+    pool = np.concatenate([y] + [t for t, _ in train.values()])
     pool = pool[pool > 0]
     lo_x = 10.0 ** np.floor(np.log10(np.quantile(pool, .02)))   # start at the decade of the 2nd percentile
     hi_x = float(pool.max()) * 1.1
@@ -246,14 +260,15 @@ def plot_aligned(truth, train, bins, names, assets):
             label=f"validation (n={len(y)})")
     for c, name in enumerate(names):
         if name in train:
-            t = train[name]
-            ax.hist(t, bins=hist_bins, weights=np.full(len(t), 1 / len(t)), histtype="step",
-                    lw=1.7, color=COLORS[c], label=f"train {name} (n={len(t)})")
+            t, rw = train[name]
+            weighted = not np.all(rw == 1)
+            ax.hist(t, bins=hist_bins, weights=rw / rw.sum(), histtype="step", ls="--" if weighted else "-",
+                    lw=1.7, color=COLORS[c], label=f"train {name} (n={len(t)}{', weighted' if weighted else ''})")
     ax.set_ylim(0, ax.get_ylim()[1] * 2)
     for i, (a, e) in enumerate(spans):   # bin numbers (details in the table below the figure), staggered
         ax.text(np.sqrt(a * e), .985 - .06 * (i % 3), f"{i + 1}", ha="center", va="top", fontsize=8,
                 color="#24323a", transform=ax.get_xaxis_transform())
-    ax.set(ylabel="fraction of rows per bin",
+    ax.set(ylabel="fraction of (weighted) rows per bin",
            title="eC distributions (train sets as trained, validation shaded); numbered bands = metric bins")
     _tidy(ax); ax.legend(frameon=False, fontsize=8, loc="upper left", bbox_to_anchor=(1.01, 1))
     x = np.array([b["median_eC"] for b in bins])
@@ -313,8 +328,11 @@ def report(output, args, truth, pred, names, bins, overall, images):
              f"validation eC ({len(bins)} bins), shared by all runs. Intervals: 95% source bootstrap "
              f"({args.boots} resamples of validation sources). Reference for paired differences: <b>{html.escape(ref)}</b>.</p>",
              "<h2>Runs</h2>",
-             table(["Run", "Path", "Train rows", "R² (all val)", "RMSE (all val)"],
+             table(["Run", "Path", "Train rows", "Row weights / target scales", "R² (all val)", "RMSE (all val)"],
                    [[html.escape(n), f"<code>{html.escape(p)}</code>", str(pred.get(n + '__train_rows') or '—'),
+                     html.escape(", ".join([f"{k}={v:g}" for k, v in (pred.get(n + '__part_weights') or {}).items()]
+                                           + ([f"scales from {pred[n + '__scale_part']}"] if pred.get(n + '__scale_part') else []))
+                                 or "all 1 / own"),
                      f"{fmt(overall[n]['r2']['value'])} [{fmt(overall[n]['r2']['lo'])}, {fmt(overall[n]['r2']['hi'])}]",
                      f"{fmt(overall[n]['rmse']['value'])} [{fmt(overall[n]['rmse']['lo'])}, {fmt(overall[n]['rmse']['hi'])}]"]
                     for n, p in args.runs]),
@@ -373,7 +391,7 @@ def main():
     p.add_argument("--boots", type=int, default=1000)
     p.add_argument("--seed", type=int, default=0)
     a = p.parse_args()
-    a.runs = [tuple(x.split("=", 1)) for x in a.run] if a.run else list(DEFAULT_RUNS)
+    a.runs = [tuple(x.split("=", 1)) for x in a.run] if a.run else [r for r in DEFAULT_RUNS if _resolve(r[1]).exists()]
     if any(len(r) != 2 for r in a.runs) or len({r[0] for r in a.runs}) != len(a.runs):
         p.error("--run must be NAME=RUN with unique names")
     names = [r[0] for r in a.runs]

@@ -91,6 +91,8 @@ def load_split(root, split, feature_view="combined8", dirty=False):
 
 
 def scales(train):
+    if "fixed_scale" in train:   # --scale-part: one fixed set of target scales for every fit, including OOF folds
+        return np.asarray(train["fixed_scale"], float)
     n = len(train["X"])
     w = train["o"] / train["pi"]
     d0 = np.where(train["o"], train["d"], 0.)
@@ -213,10 +215,14 @@ def fit_xgb(x, train, params, scale, *, shared, jobs=4):
     target = targets(train, scale)
     n_out = target.shape[1]
     w = train["o"] / train["pi"]
+    rw = train.get("row_weight")   # optional per-row training weight (--part-weight); None = all rows weight 1
     if shared:
         matrix = xgb.DMatrix(x, label=target)
         def objective(raw, matrix):
-            return mixed_derivatives(raw, target, train["o"], train["pi"])
+            grad, hess = mixed_derivatives(raw, target, train["o"], train["pi"])
+            if rw is not None:
+                grad, hess = grad * rw[:, None], hess * rw[:, None]
+            return grad, hess
         return xgb.train(_xgb_parameters(params, jobs, True, n_out), matrix,
                          num_boost_round=params["n_estimators"], obj=objective)
     per_output = params if isinstance(params, list) else [params] * n_out
@@ -229,13 +235,15 @@ def fit_xgb(x, train, params, scale, *, shared, jobs=4):
         if j < 4 or j >= 7:
             matrix = xgb.DMatrix(x, label=label)
             weight = w[:, j] if j < 3 else np.ones(len(x))
+            if rw is not None:
+                weight = weight * rw
             factor = 2 / 3 if j < 3 or 7 <= j < 10 else 2
             def objective(raw, matrix, *, expected=label, weight=weight, factor=factor):
                 return factor * weight * (raw - expected), factor * weight
             model = xgb.train({k: v for k, v in _xgb_parameters(params, jobs, False).items() if k != "multi_strategy"},
                               matrix, num_boost_round=params["n_estimators"], obj=objective)
         else:
-            matrix = xgb.DMatrix(x, label=label)
+            matrix = xgb.DMatrix(x, label=label, weight=rw)
             options = {k: v for k, v in _xgb_parameters(params, jobs, False).items() if k != "multi_strategy"}
             options.update(objective="binary:logistic", base_score=.5)
             model = xgb.train(options, matrix, num_boost_round=params["n_estimators"])
@@ -267,6 +275,14 @@ def fit_mlp(x, train, val_x, val, *, seed=42, max_epochs=300, patience=20, fixed
     scale = scales(train)
     target = torch.tensor(targets(train, scale), dtype=torch.float32)
     w = torch.tensor(train["o"] / train["pi"], dtype=torch.float32)
+    rw = None if train.get("row_weight") is None else torch.tensor(train["row_weight"], dtype=torch.float32)
+
+    def mean(loss, batch):
+        """Batch mean of per-row (or per-row x output) losses; weighted by row_weight when given."""
+        if rw is None:
+            return loss.mean()
+        r = rw[batch] if loss.ndim == 1 else rw[batch, None].expand_as(loss)
+        return (r * loss).sum() / r.sum()
     n_out = target.shape[1]
     model = nn.Sequential(nn.Linear(x.shape[1], 64), nn.ReLU(), nn.Linear(64, 64), nn.ReLU(), nn.Linear(64, n_out))
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
@@ -278,12 +294,12 @@ def fit_mlp(x, train, val_x, val, *, seed=42, max_epochs=300, patience=20, fixed
         for batch in np.array_split(rng.permutation(len(x)), max(1, math.ceil(len(x) / 64))):
             optimizer.zero_grad()
             pred = model(xx[batch])
-            ld = (w[batch] * (pred[:, :3] - target[batch, :3]).square()).sum() / (len(batch) * 3)
-            ly = (pred[:, 3] - target[batch, 3]).square().mean()
-            lb = nn.functional.binary_cross_entropy_with_logits(pred[:, 4:7], target[batch, 4:7])
+            ld = mean(w[batch] * (pred[:, :3] - target[batch, :3]).square(), batch)
+            ly = mean((pred[:, 3] - target[batch, 3]).square(), batch)
+            lb = mean(nn.functional.binary_cross_entropy_with_logits(pred[:, 4:7], target[batch, 4:7], reduction="none"), batch)
             loss = ld + ly + lb
             if n_out == 11:
-                loss = loss + (pred[:, 7:10] - target[batch, 7:10]).square().mean() + (pred[:, 10] - target[batch, 10]).square().mean()
+                loss = loss + mean((pred[:, 7:10] - target[batch, 7:10]).square(), batch) + mean((pred[:, 10] - target[batch, 10]).square(), batch)
             loss.backward(); optimizer.step()
         if fixed_epochs is not None:
             continue
@@ -762,9 +778,31 @@ def _expert_matrix(independent, shared, x):
                             decode(predict_xgb(shared["model"], x), shared["scale"])))
 
 
-def fit(train_root, val_root, output, jobs=4, feature_view="combined8", dirty=False):
+def fit(train_root, val_root, output, jobs=4, feature_view="combined8", dirty=False, part_weights=None, scale_part=None):
     train, val = load_split(train_root, "train", feature_view, dirty), load_split(val_root, "val", feature_view, dirty)
+    apply_part_options(train, part_weights, scale_part)
     return fit_data(train, val, output, jobs, feature_view)
+
+
+def apply_part_options(train, part_weights=None, scale_part=None):
+    """Manifest parts only. part_weights {tag: w}: training row weight per part (unlisted parts 1).
+    scale_part: target scales computed on that part's rows alone and used for every fit."""
+    if not part_weights and not scale_part:
+        return
+    if "part" not in train:
+        raise ValueError("--part-weight/--scale-part need a manifest training set (rows tagged by part)")
+    tags = set(map(str, train["part"]))
+    unknown = (set(part_weights or {}) | ({scale_part} if scale_part else set())) - tags
+    if unknown:
+        raise ValueError(f"Unknown part tag(s) {sorted(unknown)}; manifest parts are {sorted(tags)}")
+    if part_weights:
+        if any(not w > 0 for w in part_weights.values()):
+            raise ValueError("Part weights must be positive")
+        train["row_weight"] = np.asarray([part_weights.get(str(t), 1.) for t in train["part"]], float)
+        train["part_weights"] = dict(part_weights)
+    if scale_part:
+        train["fixed_scale"] = scales(subset(train, np.asarray(train["part"]).astype(str) == scale_part))
+        train["scale_part"] = scale_part
 
 
 def fit_data(train, val, output, jobs=4, feature_view="combined8"):
@@ -873,7 +911,8 @@ def fit_data(train, val, output, jobs=4, feature_view="combined8"):
                    selected={name: dict(params=obj.get("params"), best_epoch=obj.get("best_epoch"),
                                         scale=obj["scale"].tolist()) for name, obj in fitted.items()},
                    losses=results, metrics=task_scores,
-                   selection="validation J; train binder uses source-held-out OOF experts")
+                   selection="validation J; train binder uses source-held-out OOF experts",
+                   part_weights=train.get("part_weights"), scale_part=train.get("scale_part"))
     atomic_write_json(output / "results.json", summary)
     for name in NAMES:
         restored = load_frozen(output, name)
@@ -947,6 +986,11 @@ def main():
     p.add_argument("--feature-view", choices=FEATURE_VIEWS, default="combined8")
     p.add_argument("--with-dirty", action="store_true",
                    help="Also train and report the dirty-image task (dirty change per type and eD)")
+    p.add_argument("--part-weight", action="append", metavar="TAG=W",
+                   help="Manifest training sets: weight W for rows of part TAG in every fit (repeatable; other parts 1). "
+                        "Validation selection and reported losses stay unweighted.")
+    p.add_argument("--scale-part", metavar="TAG",
+                   help="Manifest training sets: compute the target scales on part TAG only and use them for every fit")
     p.add_argument("--report-only", action="store_true")
     p.add_argument("--rebuild-html", metavar="NAME", nargs="?", const="report.html",
                    help="Rebuild the HTML from OUTPUT/results.json only (no data); optional file name")
@@ -963,7 +1007,14 @@ def main():
         report_only(a.train, a.val, a.output)
     else:
         if not a.train or not a.val: p.error("Fit requires --train and --val")
-        fit(a.train, a.val, a.output, a.jobs, a.feature_view, a.with_dirty)
+        weights = {}
+        for item in a.part_weight or []:
+            tag, _, value = item.partition("=")
+            try:
+                weights[tag] = float(value)
+            except ValueError:
+                p.error(f"--part-weight must be TAG=W, got {item!r}")
+        fit(a.train, a.val, a.output, a.jobs, a.feature_view, a.with_dirty, weights or None, a.scale_part)
 
 
 if __name__ == "__main__":
