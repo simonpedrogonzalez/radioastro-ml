@@ -253,3 +253,6 @@ TempLattice*/
 # CASA call logs written to the repo root
 casacalls-*.txt
 CLAUDE.md
+
+# user-local scratch list of sources
+new_sources.txt
