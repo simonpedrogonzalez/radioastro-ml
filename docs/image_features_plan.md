@@ -5,7 +5,7 @@ Source of the ideas: vault note `Inbox/Features to try Summary.md`, Conclusion i
 (a) extracting the three feature blocks, (b) a per-case report that shows what the features see, and
 (c) one experiment: all22 + each block, single `xgb_mlp`, on the original v2 train/val.
 
-Status: **plan only, nothing implemented.**
+Status: **implemented and run on CHPC (2026-11-25).** Outputs: tables `runs/image-features-v2/{train,val}.npz`, gate and case report `runs/image-features-v2/case_report/` (`gate.json`: fft residual = raw R; interpretations in `runs/image-features-v2/case_report_notes.json`), experiment `ml/runs/image-features-xgb_mlp/`. Deviations: the smoke run used `runs/dataset-v2-matched-smoke-chpc`; the radial area check is tested on control and noise-only rows only (gain-only rows deviate by design: that is what the contrast measures); the experiment and report take `--fft-residual` explicitly.
 
 ## 0. What exists and what is reused
 

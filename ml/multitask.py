@@ -778,6 +778,34 @@ def _expert_matrix(independent, shared, x):
                             decode(predict_xgb(shared["model"], x), shared["scale"])))
 
 
+def expert_stage(train, val, fitted, jobs):
+    """Second-stage inputs: features plus both XGB experts' predictions (fitted holds xgb_independent and
+    xgb_shared). Training rows get source-held-out (3-fold GroupKFold) out-of-fold predictions."""
+    width = train["X"].shape[1]
+    n_experts = 2 * len(outputs(bool(train.get("with_dirty", False))))
+    groups = np.asarray(train["source_ids"])
+    folds = list(GroupKFold(n_splits=3).split(train["X"], groups=groups))
+    oof = np.full((len(train["X"]), n_experts), np.nan)
+    for a, b in folds:
+        if set(groups[a]) & set(groups[b]):
+            raise ValueError("OOF source leakage")
+        part = subset(train, a)
+        ind_scale, shared_scale = scales(part), scales(part)
+        ind = dict(model=fit_xgb(part["X"], part, fitted["xgb_independent"]["params"], ind_scale,
+                                 shared=False, jobs=jobs), scale=ind_scale)
+        shared = dict(model=fit_xgb(part["X"], part, fitted["xgb_shared"]["params"], shared_scale,
+                                    shared=True, jobs=jobs), scale=shared_scale)
+        oof[b] = _expert_matrix(ind, shared, train["X"][b])
+    if not np.isfinite(oof).all():
+        raise ValueError("Incomplete OOF expert matrix")
+    stage_train = dict(train, X=np.column_stack((train["X"], oof)))
+    stage_val = dict(val, X=np.column_stack((val["X"], _expert_matrix(
+        fitted["xgb_independent"], fitted["xgb_shared"], val["X"]))))
+    if stage_train["X"].shape[1] != width + n_experts or stage_val["X"].shape[1] != width + n_experts:
+        raise ValueError(f"Binder must receive input features plus {n_experts} expert predictions")
+    return stage_train, stage_val, oof
+
+
 def fit(train_root, val_root, output, jobs=4, feature_view="combined8", dirty=False, part_weights=None, scale_part=None):
     train, val = load_split(train_root, "train", feature_view, dirty), load_split(val_root, "val", feature_view, dirty)
     apply_part_options(train, part_weights, scale_part)
@@ -816,33 +844,13 @@ def fit_data(train, val, output, jobs=4, feature_view="combined8"):
     dirty = bool(train.get("with_dirty", False))
     if dirty != bool(val.get("with_dirty", False)):
         raise ValueError("Train and validation must both include or both exclude the dirty task")
-    n_experts = 2 * len(outputs(dirty))
     output.mkdir(parents=True, exist_ok=True)
     fitted = {}
     for name in ("xgb_independent", "xgb_shared"):
         fitted[name] = _fit_tree_family(train, val, name, jobs)
         print("Selected", name, fitted[name]["params"], flush=True)
     fitted["mlp"] = fit_mlp(train["X"], train, val["X"], val)
-    groups = np.asarray(train["source_ids"])
-    folds = list(GroupKFold(n_splits=3).split(train["X"], groups=groups))
-    oof = np.full((len(train["X"]), n_experts), np.nan)
-    for a, b in folds:
-        if set(groups[a]) & set(groups[b]):
-            raise ValueError("OOF source leakage")
-        part = subset(train, a)
-        ind_scale, shared_scale = scales(part), scales(part)
-        ind = dict(model=fit_xgb(part["X"], part, fitted["xgb_independent"]["params"], ind_scale,
-                                 shared=False, jobs=jobs), scale=ind_scale)
-        shared = dict(model=fit_xgb(part["X"], part, fitted["xgb_shared"]["params"], shared_scale,
-                                    shared=True, jobs=jobs), scale=shared_scale)
-        oof[b] = _expert_matrix(ind, shared, train["X"][b])
-    if not np.isfinite(oof).all():
-        raise ValueError("Incomplete OOF expert matrix")
-    stage_train = dict(train, X=np.column_stack((train["X"], oof)))
-    stage_val = dict(val, X=np.column_stack((val["X"], _expert_matrix(
-        fitted["xgb_independent"], fitted["xgb_shared"], val["X"]))))
-    if stage_train["X"].shape[1] != width + n_experts or stage_val["X"].shape[1] != width + n_experts:
-        raise ValueError(f"Binder must receive input features plus {n_experts} expert predictions")
+    stage_train, stage_val, oof = expert_stage(train, val, fitted, jobs)
     fitted["xgb_xgb"] = _fit_tree_family(stage_train, stage_val, "xgb_shared", jobs)
     fitted["xgb_mlp"] = fit_mlp(stage_train["X"], stage_train, stage_val["X"], stage_val)
     # Naive alternative: the full-data experts' predictions on their own training rows.

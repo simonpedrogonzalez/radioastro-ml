@@ -134,6 +134,15 @@ class Features(unittest.TestCase):
 
 
 class Defects(unittest.TestCase):
+    def test_model_flux_cross_check_scales_with_absolute_flux(self):
+        from scripts.dataset_v2_matched_extract import model_flux_agrees
+        model = np.zeros((8, 8)); model[2, 2], model[5, 5] = 1e-3, -.984e-3   # net 16 uJy, cancelling components
+        net = model.sum()
+        self.assertTrue(model_flux_agrees(model, net * 1.0045))   # 0.45% of net, 7e-8 Jy of 2e-3 Jy total |flux|
+        self.assertFalse(model_flux_agrees(model, net + 1e-5))    # 0.5% of total |flux|
+        self.assertTrue(model_flux_agrees(model, None))
+        self.assertFalse(model_flux_agrees(np.full((4, 4), .1), 1.5))
+
     def test_missing_tclean_model_flux_is_none_not_an_error(self):
         from scripts.dataset_v2_matched_extract import tclean_model_flux
         self.assertIsNone(tclean_model_flux({"final_model_flux_jy": None}))

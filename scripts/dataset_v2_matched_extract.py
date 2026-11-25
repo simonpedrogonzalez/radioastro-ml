@@ -71,6 +71,17 @@ def clean2(model, convergence):
     return [float(iterations), float(np.count_nonzero(np.isfinite(model) & (model != 0)))]
 
 
+def model_flux_agrees(model, summary, rtol=1e-3):
+    """Cross-check of the model image sum against tclean's modelFlux (None: nothing to check).
+    The tolerance scales with the total |flux| of the components, not the net sum: positive and negative
+    components can cancel to a near-zero net flux whose relative difference is meaningless."""
+    if summary is None:
+        return True
+    finite = model[np.isfinite(model)]
+    scale = max(abs(summary), float(np.abs(finite).sum()), 1e-6)
+    return abs(float(finite.sum()) - summary) <= rtol * scale
+
+
 def tclean_model_flux(convergence):
     """CASA modelFlux summary, or None when CASA reports none (e.g. an empty model)."""
     value = convergence.get("final_model_flux_jy")
@@ -127,7 +138,7 @@ def extract(root, record, masks_path, nominal_rms, reference_record):
     # The direct sums are the features; the CASA summary is only a cross-check when present.
     summary = tclean_model_flux(record["convergence"])
     whole = float(model[np.isfinite(model)].sum())
-    if summary is not None and abs(whole - summary) > 1e-3 * max(abs(summary), 1e-6):
+    if not model_flux_agrees(model, summary):
         raise ValueError(f"Model flux sum {whole} disagrees with tclean modelFlux {summary}")
     X = [*c8.tolist(), *dirty_features, *m6, *clean2(model, record["convergence"])]
     # Only the flux/peak ratio may be missing (restored peak <= 0 or nonfinite).
