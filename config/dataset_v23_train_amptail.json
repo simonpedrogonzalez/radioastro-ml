@@ -1,0 +1,11 @@
+{
+  "split": "train",
+  "seed": 20261125,
+  "recipes_per_source": 12,
+  "amp_branches": ["amplification"],
+  "amp_weak_fraction": 0,
+  "range_policy": "v2.3_amp_tail_extension_amp13.2_phase_noise_v2",
+  "ranges": {
+    "amp_amplification": [13.2, 20.276]
+  }
+}

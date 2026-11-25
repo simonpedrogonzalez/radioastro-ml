@@ -22,6 +22,7 @@ Each dataset is a matched run folder (reads <split>.npz and plan.json) or a v2.1
   #   --dataset v2.1-train=runs/dataset-v2.1-train/manifest.json
   #   --dataset v2.1-nocap-train=runs/dataset-v2.1-noampcap-train/manifest.json
   #   --dataset v2.2-train=runs/dataset-v2.2-train/manifest.json
+  #   --dataset v2.3-train=runs/dataset-v2.3-train/manifest.json
   #   --dataset v2-val=runs/dataset-v2-matched-val --reference v2-val
 Rows are also counted per eC bin when an active corruption lies in a v2.2 tail
 (amplification A >= 13.2, |phase| >= 159 deg, noise ratio r >= 0.141).
@@ -45,6 +46,7 @@ DEFAULT_DATASETS = (("v2-train", "runs/dataset-v2-matched-train"),
                     ("v2.1-train", "runs/dataset-v2.1-train/manifest.json"),
                     ("v2.1-nocap-train", "runs/dataset-v2.1-noampcap-train/manifest.json"),
                     ("v2.2-train", "runs/dataset-v2.2-train/manifest.json"),
+                    ("v2.3-train", "runs/dataset-v2.3-train/manifest.json"),
                     ("v2-val", "runs/dataset-v2-matched-val"))
 AMP_CAP = 8.5468   # v2.1 amplification cap, only used to label rows
 TYPES = ("amp", "phase", "noise")

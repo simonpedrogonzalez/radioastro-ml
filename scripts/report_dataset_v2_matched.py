@@ -130,7 +130,8 @@ def preview(config, output, smoke=False):
              "<h2>Rows per presence mask</h2>", _table(["Mask", "Rows"], masks),
              "<h2>Strata</h2><p>Recipes are stratified equally over amplitude branch × phase sign, with a Latin hypercube in "
              f"(amp, phase, noise) inside each stratum. A fraction w = {config['weak_fraction']} of each amp/phase coordinate maps "
-             "to the weak band next to no-corruption; the rest maps to the strong range.</p>",
+             "to the weak band next to no-corruption; the rest maps to the strong range"
+             + (f" (amp coordinate: w = {config['amp_weak_fraction']})" if "amp_weak_fraction" in config else "") + ".</p>",
              _table(["Branch", "Recipes", "Weak amp", "Weak phase"], groups),
              _table(["Parameter", "Strong range", "Weak band"],
                     [[k, config["ranges"][k], config["weak_ranges"].get(k, "—")] for k in config["ranges"]]),

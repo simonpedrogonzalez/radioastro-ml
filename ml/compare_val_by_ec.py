@@ -14,7 +14,8 @@ bin, with its own paired bootstrap interval, so "better at large/small eC" can b
   # defaults: --model xgb_mlp --val runs/dataset-v2-matched-val
   #   --run v2=ml/runs/matched-v2-full-all22-dirty --run v2.1=ml/runs/matched-v2.1-all22-dirty
   #   --run v2.1-nocap=ml/runs/matched-v2.1-noampcap-all22-dirty
-  #   --run v2.2=ml/runs/matched-v2.2-all22-dirty   (first run is the reference)
+  #   --run v2.2=ml/runs/matched-v2.2-all22-dirty --run v2.3=ml/runs/matched-v2.3-all22-dirty
+  #   (+ the v2.2 tail-weighted runs; runs whose folder is missing are skipped; first run is the reference)
 """
 from __future__ import annotations
 
@@ -34,6 +35,8 @@ DEFAULT_RUNS = (("v2", "ml/runs/matched-v2-full-all22-dirty"),
                 ("v2.1", "ml/runs/matched-v2.1-all22-dirty"),
                 ("v2.1-nocap", "ml/runs/matched-v2.1-noampcap-all22-dirty"),
                 ("v2.2", "ml/runs/matched-v2.2-all22-dirty"),
+                # v2.3: v2 + amplification-tail extension (A 13.2-20.276, phase and noise as in v2)
+                ("v2.3", "ml/runs/matched-v2.3-all22-dirty"),
                 # v2.2 rows with the tail part down-weighted; target scales fixed to the v2 part (ml.multitask
                 # --part-weight tail=W --scale-part v2). Experimental weights, not tuned optima.
                 ("v2.2-w0.1", "ml/runs/matched-v2.2-tailw0.1-v2scale-all22-dirty"),
@@ -43,12 +46,13 @@ DEFAULT_TRAINS = (("v2", "runs/dataset-v2-matched-train"),
                   ("v2.1", "runs/dataset-v2.1-train/manifest.json"),
                   ("v2.1-nocap", "runs/dataset-v2.1-noampcap-train/manifest.json"),
                   ("v2.2", "runs/dataset-v2.2-train/manifest.json"),
+                  ("v2.3", "runs/dataset-v2.3-train/manifest.json"),
                   ("v2.2-w0.1", "runs/dataset-v2.2-train/manifest.json"),
                   ("v2.2-w0.25", "runs/dataset-v2.2-train/manifest.json"),
                   ("v2.2-w1", "runs/dataset-v2.2-train/manifest.json"))
 EC_COLUMN = 3   # decoded multitask output order: d_amp, d_phase, d_noise, eC, ...
 # Validated categorical order (dataviz reference palette, light mode), as in the dataset reports.
-COLORS = ("#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#6250d6")
+COLORS = ("#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#6250d6", "#8a6a4a")
 STYLE = ("<style>body{font:15px system-ui;max-width:1250px;margin:auto;padding:1.5rem;color:#24323a;background:#fcfcfb}"
          "img{max-width:100%}table{border-collapse:collapse;margin:.5rem 0 1.2rem}td,th{padding:.3rem .6rem;"
          "border:1px solid #ccd;text-align:right}td:first-child,th:first-child{text-align:left}th{background:#eef3f6}"

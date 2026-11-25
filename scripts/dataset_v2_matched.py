@@ -63,8 +63,11 @@ def sample_recipes(sid, snr0, ants, config):
     if count <= 0 or count % len(strata):
         raise ValueError(f"recipes_per_source must be a positive multiple of {len(strata)}")
     w = float(config["weak_fraction"])
-    if not 0 <= w < 1:
-        raise ValueError("weak_fraction must lie in [0, 1)")
+    # Optional amp_weak_fraction (not in DEFAULT, so absent keeps v2 sampling and config hashes): a separate
+    # weak fraction for the amp coordinate, e.g. 0 for v2.3 (amp all in its tail, phase with v2's weak bands).
+    w_amp = float(config.get("amp_weak_fraction", w))
+    if not (0 <= w < 1 and 0 <= w_amp < 1):
+        raise ValueError("weak_fraction and amp_weak_fraction must lie in [0, 1)")
     ranges, weak = config["ranges"], config["weak_ranges"]
     r_lo, r_hi = ranges["noise_r"]
     admissible = max(r_lo, float(np.nextafter(1 / snr0, math.inf)))
@@ -77,7 +80,7 @@ def sample_recipes(sid, snr0, ants, config):
             config["seed"], sid, f"recipe:{group}")).random(count // len(strata))
         for ua, up, un in cube:
             key = f"amp_{amp_branch}"
-            A, amp_band = _banded(float(ua), ranges[key], weak[key], w, amp_branch == "amplification")
+            A, amp_band = _banded(float(ua), ranges[key], weak[key], w_amp, amp_branch == "amplification")
             key = f"phase_{phase_sign}"
             phi, phase_band = _banded(float(up), ranges[key], weak[key], w, False)
             r = _decode(float(un), admissible, r_hi, True)

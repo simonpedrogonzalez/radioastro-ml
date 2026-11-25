@@ -39,7 +39,7 @@ SECONDS_PER_IMAGE = (6., .085)   # 6 s + 0.085 s per MB of the original MS (v2 p
 # ---------------------------------------------------------------- configuration
 
 # Matched-only optional keys, absent from DEFAULT so old configurations hash unchanged.
-MATCHED_EXTRA_KEYS = {"amp_branches"}
+MATCHED_EXTRA_KEYS = {"amp_branches", "amp_weak_fraction"}
 
 
 def configuration(path):

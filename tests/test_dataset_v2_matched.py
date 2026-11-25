@@ -241,5 +241,31 @@ class DatasetV22(unittest.TestCase):
                 sample_recipes("0000+000", 500., [3, 7], dict(DEFAULT, amp_branches=bad))
 
 
+class DatasetV23(unittest.TestCase):
+    def test_amp_tail_config_keeps_v2_phase_and_noise(self):
+        from scripts.create_dataset_v2_matched import configuration
+        from scripts.dataset_v2 import RANGES
+        config = configuration(Path(__file__).resolve().parents[1] / "config/dataset_v23_train_amptail.json")
+        self.assertEqual(config["weak_fraction"], DEFAULT["weak_fraction"])
+        self.assertEqual({k: list(v) for k, v in config["ranges"].items() if k != "amp_amplification"},
+                         {k: list(v) for k, v in RANGES.items() if k != "amp_amplification"})
+        recipes = [r for sid in ("0000+000", "0001+001", "0002+002", "0003+003")
+                   for r in sample_recipes(sid, 500., [3, 7], config)]
+        self.assertEqual({r["group"] for r in recipes}, {"amplification:negative", "amplification:positive"})
+        for r in recipes:
+            self.assertEqual(r["amp_band"], "strong")
+            self.assertTrue(13.2 <= r["A"] <= 20.276)
+            self.assertTrue(config["ranges"]["noise_r"][0] <= r["r"] <= config["ranges"]["noise_r"][1])
+        self.assertIn("weak", {r["phase_band"] for r in recipes})   # phase keeps v2's weak bands
+        self.assertLess(min(abs(r["phi_deg"]) for r in recipes), 159)
+
+    def test_amp_weak_fraction_absent_or_equal_keeps_v2_sampling(self):
+        self.assertNotIn("amp_weak_fraction", DEFAULT)
+        self.assertEqual(sample_recipes("0000+000", 500., [3, 7], DEFAULT),
+                         sample_recipes("0000+000", 500., [3, 7], dict(DEFAULT, amp_weak_fraction=DEFAULT["weak_fraction"])))
+        with self.assertRaises(ValueError):
+            sample_recipes("0000+000", 500., [3, 7], dict(DEFAULT, amp_weak_fraction=1))
+
+
 if __name__ == "__main__":
     unittest.main()
