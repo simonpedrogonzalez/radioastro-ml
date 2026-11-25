@@ -18,16 +18,18 @@ from __future__ import annotations
 import argparse
 import html
 import json
+import shutil
+import tempfile
 from pathlib import Path
 
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from matplotlib.colors import SymLogNorm
 import numpy as np
 from astropy.io import fits
 
 from scripts.clean_recovery_noise_sweep import convolve_model
+from scripts.imaging.plot_utils import casa_image_to_png, shared_fits_display_limits
 
 ROOT = Path(__file__).resolve().parents[1]
 EC_COLUMN = 3   # decoded multitask output order: d_amp, d_phase, d_noise, eC, ...
@@ -38,7 +40,7 @@ STYLE = ("<style>body{font-family:system-ui,sans-serif;margin:16px;color:#1d2a31
          "th{background:#eef2f4;position:sticky;left:0}.src{background:#f6f8f9;min-width:130px;position:sticky;left:0;z-index:1}"
          ".wrap{overflow-x:auto;max-width:100%}.feat td{border:none;padding:0 4px;font-size:10.5px}"
          ".big{font-size:12px;font-weight:600}.over{color:#b3261e}.under{color:#1f5fa8}img{display:block}"
-         ".note{color:#4a5a63;max-width:1100px}</style>")
+         ".note{color:#4a5a63;max-width:1100px}.imgs{display:grid;grid-template-columns:repeat(2,330px);gap:2px}.imgs img{width:330px}</style>")
 
 
 def _resolve(path):
@@ -58,57 +60,41 @@ def plane(path):
 
 
 def case_images(val_root, row):
-    """Clean image, true and recovered convolved models, and the eC recomputed exactly as the extractor does."""
+    """The case's clean header and CLEAN PNG, true and recovered convolved models, and eC recomputed as the extractor does."""
     record = json.loads((val_root / "cases" / row["case"] / "record.json").read_text())
     model, header = plane(val_root / record["products"]["model"])
-    clean, _ = plane(val_root / record["products"]["clean"])
+    _, clean_header = plane(val_root / record["products"]["clean"])
     with np.load(val_root / "sources" / row["source"] / "recovery" / "reference_masks.npz") as m:
         truth, omega = np.asarray(m["truth"], np.float64), np.asarray(m["omega"], bool)
     recovered = convolve_model(model, header)
     eC = float(np.sqrt(np.square((recovered - truth)[omega]).sum() / np.square(truth[omega]).sum()))
-    return clean, truth, recovered, omega, eC
+    clean_png = val_root / Path(record["products"]["clean"]).parent / "clean.png"
+    return clean_header, clean_png, truth, recovered, omega, eC
 
 
-def zoom_box(truth, recovered, pad=8, minimum=32):
-    """Square pixel box around where the true or recovered convolved model exceeds 0.1% of the true peak."""
-    level = 1e-3 * float(np.max(np.abs(truth)))
-    yy, xx = np.nonzero((np.abs(truth) > level) | (np.abs(recovered) > level))
-    cy, cx = (yy.min() + yy.max()) / 2, (xx.min() + xx.max()) / 2
-    half = int(max(minimum / 2, (yy.max() - yy.min()) / 2 + pad, (xx.max() - xx.min()) / 2 + pad))
-    n = truth.shape[0]
-    y0 = int(min(max(cy - half, 0), n - 2 * half)) if 2 * half < n else 0
-    x0 = int(min(max(cx - half, 0), n - 2 * half)) if 2 * half < n else 0
-    return slice(y0, y0 + 2 * half), slice(x0, x0 + 2 * half)
+def plot_case(folder, stem, clean_header, clean_png, truth, recovered, omega):
+    """Four standard imaging plots (scripts.imaging.plot_utils.casa_image_to_png, as in every case's imaging/*.png).
 
-
-def plot_case(path, clean, truth, recovered, omega, title):
-    """CLEAN image over the full field (box = zoom), then the models and their difference zoomed to the source."""
-    peak = float(np.max(np.abs(truth)))
-    diff = np.where(omega, recovered - truth, np.nan)
-    dmax = float(np.nanmax(np.abs(diff))) or 1.
-    norm = SymLogNorm(linthresh=1e-2 * peak, vmin=-0.1 * peak, vmax=max(peak, float(np.max(recovered))), base=10)
-    cpeak = float(np.nanmax(np.abs(clean))) or 1.
-    ys, xs = zoom_box(truth, recovered)
-    extent = (xs.start - .5, xs.stop - .5, ys.start - .5, ys.stop - .5)
-    panels = ((clean, None, "CLEAN image (full field)", "inferno",
-               SymLogNorm(linthresh=1e-2 * cpeak, vmin=-0.1 * cpeak, vmax=cpeak, base=10)),
-              (truth[ys, xs], extent, "true model ⊛ beam (zoom)", "inferno", norm),
-              (recovered[ys, xs], extent, "recovered model ⊛ beam (zoom)", "inferno", norm),
-              (diff[ys, xs], extent, "recovered − true (zoom)", "RdBu_r",
-               SymLogNorm(linthresh=1e-2 * peak, vmin=-dmax, vmax=dmax, base=10)))
-    fig, axes = plt.subplots(1, 4, figsize=(8.4, 2.45))
-    for ax, (img, ext, label, cmap, nrm), full in zip(axes, panels, (clean, truth, recovered, diff)):
-        im = ax.imshow(img, origin="lower", cmap=cmap, norm=nrm, interpolation="nearest", extent=ext)
-        ax.set_title(f"{label}\nmax|·| {np.nanmax(np.abs(full)):.3g} Jy/beam", fontsize=6.5)
-        ax.set_xticks([]); ax.set_yticks([])
-        cb = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.02)
-        cb.ax.tick_params(labelsize=5)
-    axes[0].add_patch(plt.Rectangle((extent[0], extent[2]), extent[1] - extent[0], extent[3] - extent[2],
-                                    fill=False, ec="cyan", lw=0.8))
-    fig.suptitle(title, fontsize=8)
-    fig.tight_layout(rect=(0, 0, 1, 0.93))
-    fig.savefig(path, dpi=85)
-    plt.close(fig)
+    The CLEAN image is the case's own imaging/clean.png from dataset creation. The true and recovered models
+    (Jy/beam, peak-one restoring beam) are written as FITS planes on the CLEAN image's header and rendered with one
+    shared colour range; the difference (zero outside the eC support) uses its own symmetric range.
+    """
+    shutil.copyfile(clean_png, folder / f"{stem}_clean.png")
+    header = clean_header.copy()
+    header["BUNIT"] = "Jy/beam"
+    planes = {"true": truth, "recovered": recovered, "difference": np.where(omega, recovered - truth, 0.)}
+    # Node-local temp dir: NFS keeps .nfs* placeholders for still-mapped FITS files, which blocks cleanup.
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+        paths = {}
+        for key, data in planes.items():
+            paths[key] = Path(tmp) / f"{key}.fits"
+            fits.PrimaryHDU(data.astype(np.float32), header).writeto(paths[key])
+        shared = shared_fits_display_limits([paths["true"], paths["recovered"]])
+        titles = {"true": "true model ⊛ beam", "recovered": "recovered model ⊛ beam", "difference": "recovered − true"}
+        for key in planes:
+            casa_image_to_png(paths[key], folder / f"{stem}_{key}.png", title=titles[key], draw_beam=True,
+                              display_limits_mjy_per_beam=shared if key != "difference" else None)
+    return [f"{stem}_{k}.png" for k in ("clean", "true", "recovered", "difference")]
 
 
 def plot_features(path, names, X_train, y_train, X_val, y_val, sel):
@@ -200,17 +186,16 @@ def main(argv=None):
         for i in idx:
             rid = row_ids[i]
             row = rows[rid]
-            clean, truth, recovered, omega, eC = case_images(val_root, row)
+            clean_header, clean_png, truth, recovered, omega, eC = case_images(val_root, row)
             if not np.isclose(eC, y[i], rtol=1e-6, atol=1e-9):
                 raise ValueError(f"{rid}: recomputed eC {eC} differs from stored {y[i]}")
-            name = rid.replace("+", "p").replace(":", "_") + ".png"
-            plot_case(assets / "cases" / name, clean, truth, recovered, omega,
-                      f"{rid}  ({MASK_NAMES[int(val['mask'][i])]})")
+            stem = rid.replace("+", "p").replace(":", "_")
+            pngs = plot_case(assets / "cases", stem, clean_header, clean_png, truth, recovered, omega)
             A, phi, a = val["params"][i]
             cls = "over" if err[i] > 0 else "under"
             feats = "".join(f"<tr><td>{html.escape(n)}</td><td>{fmt(v)}</td></tr>" for n, v in zip(names, X[i]))
             cells.append(
-                f"<td><img src='assets/cases/{html.escape(name)}' width='714' alt='{html.escape(rid)}'>"
+                "<td><div class='imgs'>" + "".join(f"<img src='assets/cases/{html.escape(f)}' alt='{html.escape(f)}'>" for f in pngs) + "</div>"
                 f"<div class='big'>{html.escape(rid)} · {MASK_NAMES[int(val['mask'][i])]}</div>"
                 f"<div class='big'>true eC {y[i]:.4f} · predicted {pred[i]:.4f} · "
                 f"<span class='{cls}'>error {err[i]:+.4f}</span> · {100 * se[i] / total:.2f}% of total SE</div>"
@@ -238,10 +223,14 @@ def main(argv=None):
             f"Overall RMSE {rmse:.4f}; RMSE of the other {len(y) - k} rows {rmse_rest:.4f}.</p>",
             "<h2>Selected cases by source</h2>",
             "<p class='note'>One row per source, ordered by the selected cases' share of the total squared error; cases "
-            "left to right by squared error. Images: CLEAN image; true model and recovered CLEAN model, both convolved with "
-            "the restoring beam (peak-one beam, the eC definition), on a shared colour scale; and their difference. "
+            "left to right by squared error. Images use the standard imaging plotter "
+            "(<code>scripts.imaging.plot_utils.casa_image_to_png</code>: full field, WCS axes, inferno, linear symmetric "
+            "99.5th-percentile range, mJy/beam, beam ellipse). Top left: the case's own CLEAN image plot from dataset "
+            "creation (cyan contour = CLEAN mask). Top right / bottom left: true model and recovered CLEAN model, both "
+            "convolved with the restoring beam (peak-one beam, the eC definition), sharing one colour range. Bottom right: "
+            "recovered − true, own symmetric range. "
             "eC = ‖recovered − true‖ / ‖true‖ over the support Ω, recomputed from these images (matches the stored value). "
-            "Colour scales are symmetric-log (linear within 1% of the peak). Error = predicted − true "
+            "Error = predicted − true "
             "(<span class='over'>red: overpredicted</span>, <span class='under'>blue: underpredicted</span>). "
             "Features are the model's inputs, unscaled.</p>",
             f"<div class='wrap'><table>{header}{body}</table></div>",
